@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Mobile Dataset Collector - LeRobot Demo</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Outfit', sans-serif;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            background-color: #0b0f19;
+            color: #f3f4f6;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Glassmorphism Header */
+        header {
+            background: rgba(17, 24, 39, 0.7);
+            backdrop-filter: blur(12px);
+            padding: 14px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            z-index: 10;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .brand-dot {
+            width: 12px;
+            height: 12px;
+            background: #6366f1;
+            border-radius: 50%;
+            box-shadow: 0 0 12px #6366f1;
+        }
+
+        h1 {
+            font-size: 1.1rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a5b4fc 0%, #c084fc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .badge {
+            background: rgba(99, 102, 241, 0.15);
+            color: #818cf8;
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        /* Camera Viewport */
+        .viewport-container {
+            flex: 1;
+            position: relative;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* Overlays */
+        .hud-overlay {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            right: 16px;
+            display: flex;
+            justify-content: space-between;
+            pointer-events: none;
+        }
+
+        .hud-card {
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 8px 14px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .rec-dot {
+            width: 10px;
+            height: 10px;
+            background: #ef4444;
+            border-radius: 50%;
+            opacity: 0.3;
+        }
+
+        .rec-dot.active {
+            opacity: 1;
+            animation: pulse 1s infinite alternate;
+        }
+
+        @keyframes pulse {
+            from { opacity: 0.3; }
+            to { opacity: 1; box-shadow: 0 0 10px #ef4444; }
+        }
+
+        /* Controls Section */
+        .controls-panel {
+            background: rgba(15, 23, 42, 0.9);
+            backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px 20px 28px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            z-index: 10;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #9ca3af;
+            font-weight: 600;
+        }
+
+        .instruction-wrapper {
+            display: flex;
+            gap: 8px;
+        }
+
+        select, input[type="text"] {
+            flex: 1;
+            background: rgba(30, 41, 59, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: #fff;
+            padding: 12px 14px;
+            border-radius: 12px;
+            font-size: 0.95rem;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        select:focus, input[type="text"]:focus {
+            border-color: #6366f1;
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
+        }
+
+        .rec-button {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+            border: none;
+            padding: 16px;
+            border-radius: 16px;
+            font-size: 1.05rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            box-shadow: 0 4px 20px rgba(239, 68, 68, 0.4);
+            cursor: pointer;
+            transition: transform 0.1s, box-shadow 0.2s;
+        }
+
+        .rec-button:active {
+            transform: scale(0.98);
+        }
+
+        .rec-button.recording {
+            background: linear-gradient(135deg, #475569 0%, #334155 100%);
+            box-shadow: 0 4px 20px rgba(71, 85, 105, 0.4);
+        }
+
+        .status-banner {
+            font-size: 0.8rem;
+            text-align: center;
+            color: #94a3b8;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="brand">
+            <div class="brand-dot"></div>
+            <h1>LeRobot Collector</h1>
+        </div>
+        <div class="badge">SO-100 Embodiment</div>
+    </header>
+
+    <div class="viewport-container">
+        <video id="cameraPreview" autoplay playsinline muted></video>
+        
+        <div class="hud-overlay">
+            <div class="hud-card">
+                <div class="rec-dot" id="recDot"></div>
+                <span id="recTime">00:00.0</span>
+            </div>
+            <div class="hud-card">
+                <span>IMU: <strong id="imuHz">0</strong> Hz</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls-panel">
+        <div class="input-group">
+            <label for="taskInstruction">Task Instruction</label>
+            <div class="instruction-wrapper">
+                <select id="presetInstruction">
+                    <option value="reach to apple">reach to apple</option>
+                    <option value="reach to banana">reach to banana</option>
+                    <option value="pick up cup">pick up cup</option>
+                    <option value="custom">Custom...</option>
+                </select>
+                <input type="text" id="customInstruction" placeholder="Enter custom task..." style="display: none;">
+            </div>
+        </div>
+
+        <button class="rec-button" id="recordBtn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="12" r="8"/>
+            </svg>
+            <span id="btnText">START RECORDING</span>
+        </button>
+
+        <div class="status-banner" id="statusText">Ready to capture demonstration</div>
+    </div>
+
+    <script>
+        const cameraPreview = document.getElementById('cameraPreview');
+        const recordBtn = document.getElementById('recordBtn');
+        const btnText = document.getElementById('btnText');
+        const recDot = document.getElementById('recDot');
+        const recTime = document.getElementById('recTime');
+        const imuHz = document.getElementById('imuHz');
+        const statusText = document.getElementById('statusText');
+        const presetInstruction = document.getElementById('presetInstruction');
+        const customInstruction = document.getElementById('customInstruction');
+
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let isRecording = false;
+        let startTime = 0;
+        let timerInterval = null;
+
+        let imuData = [];
+        let imuCount = 0;
+        let imuRateInterval = null;
+
+        // Custom instruction toggle
+        presetInstruction.addEventListener('change', (e) => {
+            if (e.target.value === 'custom') {
+                customInstruction.style.display = 'block';
+            } else {
+                customInstruction.style.display = 'none';
+            }
+        });
+
+        // Initialize Camera
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
+                    audio: false
+                });
+                cameraPreview.srcObject = stream;
+            } catch (err) {
+                console.error("Camera access error:", err);
+                statusText.innerText = "Camera access denied or unverified.";
+            }
+        }
+
+        // Initialize IMU listeners
+        function initIMU() {
+            if (window.DeviceMotionEvent) {
+                window.addEventListener('devicemotion', (event) => {
+                    if (!isRecording) return;
+                    imuCount++;
+                    const acc = event.accelerationIncludingGravity || { x: 0, y: 0, z: 9.81 };
+                    const rot = event.rotationRate || { alpha: 0, beta: 0, gamma: 0 };
+                    
+                    imuData.push({
+                        timestamp: (Date.now() - startTime) / 1000.0,
+                        accel: [acc.x || 0, acc.y || 0, acc.z || 9.81],
+                        gyro: [rot.alpha || 0, rot.beta || 0, rot.gamma || 0]
+                    });
+                });
+            }
+
+            if (window.DeviceOrientationEvent) {
+                window.addEventListener('deviceorientation', (event) => {
+                    if (!isRecording || imuData.length === 0) return;
+                    const lastIdx = imuData.length - 1;
+                    imuData[lastIdx].orientation = [event.alpha || 0, event.beta || 0, event.gamma || 0];
+                });
+            }
+        }
+
+        // Recording logic
+        recordBtn.addEventListener('click', async () => {
+            if (!isRecording) {
+                startRecording();
+            } else {
+                stopRecording();
+            }
+        });
+
+        async function startRecording() {
+            // Permission request for iOS 13+
+            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                try {
+                    await DeviceMotionEvent.requestPermission();
+                } catch (e) {
+                    console.log("DeviceMotion permission:", e);
+                }
+            }
+
+            const stream = cameraPreview.srcObject;
+            if (!stream) return;
+
+            recordedChunks = [];
+            imuData = [];
+            imuCount = 0;
+            isRecording = true;
+            startTime = Date.now();
+
+            mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) recordedChunks.push(e.data);
+            };
+            mediaRecorder.start(30);
+
+            // UI updates
+            recDot.classList.add('active');
+            recordBtn.classList.add('recording');
+            btnText.innerText = "STOP RECORDING";
+            statusText.innerText = "Recording trajectory & IMU data...";
+
+            timerInterval = setInterval(() => {
+                const elapsed = (Date.now() - startTime) / 1000.0;
+                const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+                const secs = (elapsed % 60).toFixed(1).padStart(4, '0');
+                recTime.innerText = `${mins}:${secs}`;
+            }, 100);
+
+            imuRateInterval = setInterval(() => {
+                imuHz.innerText = imuCount;
+                imuCount = 0;
+            }, 1000);
+        }
+
+        async function stopRecording() {
+            isRecording = false;
+            clearInterval(timerInterval);
+            clearInterval(imuRateInterval);
+
+            recDot.classList.remove('active');
+            recordBtn.classList.remove('recording');
+            btnText.innerText = "SAVING...";
+            statusText.innerText = "Uploading & processing trajectory...";
+
+            mediaRecorder.stop();
+
+            mediaRecorder.onstop = async () => {
+                const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                const task = presetInstruction.value === 'custom' ? customInstruction.value : presetInstruction.value;
+
+                const formData = new FormData();
+                formData.append('video', blob, 'recording.webm');
+                formData.append('imu_data', JSON.stringify(imuData));
+                formData.append('task', task);
+
+                try {
+                    const response = await fetch('/api/recordings/save', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const res = await response.json();
+                    if (res.status === 'success') {
+                        statusText.innerText = `Saved Episode #${res.episode_index}! Task: "${res.task}"`;
+                    } else {
+                        statusText.innerText = "Error saving recording.";
+                    }
+                } catch (err) {
+                    console.error("Upload error:", err);
+                    statusText.innerText = "Upload failed.";
+                }
+
+                btnText.innerText = "START RECORDING";
+            };
+        }
+
+        window.onload = () => {
+            initCamera();
+            initIMU();
+        };
+    </script>
+</body>
+</html>

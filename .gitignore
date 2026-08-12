@@ -1,0 +1,29 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.env
+
+# Recorded Sessions & Excluded Exports
+recordings/*
+!recordings/.gitkeep
+lerobot_exports/*
+!lerobot_exports/.gitkeep
+test_export_output/
+
+# Media and Dataset Files
+*.mp4
+*.webm
+*.parquet
+*.h5
+
+# IDE & System Files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
