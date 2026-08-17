@@ -119,10 +119,21 @@ async def save_recording(
     except Exception:
         parsed_imu = []
 
-    # 3. Determine frame count of video
+    # 3. Determine frame count of video accurately
     cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0 or fps > 120 or np.isnan(fps):
+        fps = 30.0
+
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    if frame_count <= 0:
+        count = 0
+        while True:
+            ret, _ = cap.read()
+            if not ret:
+                break
+            count += 1
+        frame_count = max(count, 1)
     cap.release()
 
     if frame_count <= 0:

@@ -883,59 +883,67 @@
             fetchEpisodes();
         };
 
-        // Timeline scrubbing
-        timelineSlider.addEventListener('input', (e) => {
-            currentFrame = parseInt(e.target.value);
-            updateFrameDisplay();
-        });
-
-        function updateFrameDisplay() {
+        // Bi-directional Synchronization between HTML5 Video, 3D Arm, and Timeline Slider
+        function syncFrameUI() {
             if (selectedEpIdx < 0 || !episodes[selectedEpIdx]) return;
             const ep = episodes[selectedEpIdx];
             const total = ep.num_frames || 1;
-            const timeSec = (currentFrame / 30.0).toFixed(2);
-            frameCounter.innerText = `${currentFrame} / ${total - 1} (${timeSec}s)`;
+            const dur = (episodeVideo.duration && !isNaN(episodeVideo.duration)) ? episodeVideo.duration : (total / 30.0);
+            const curTime = (episodeVideo.currentTime && !isNaN(episodeVideo.currentTime)) ? episodeVideo.currentTime : ((currentFrame / Math.max(1, total - 1)) * dur);
+            
+            frameCounter.innerText = `${currentFrame} / ${total - 1} (${curTime.toFixed(2)}s / ${dur.toFixed(2)}s)`;
 
             if (ep.joint_states && ep.joint_states[currentFrame]) {
                 applyJointsTo3DModel(ep.joint_states[currentFrame]);
             }
-
-            if (episodeVideo.duration) {
-                episodeVideo.currentTime = currentFrame / 30.0;
-            }
         }
 
-        // Play / Pause Animation Loop
+        // When user drags timeline slider
+        timelineSlider.addEventListener('input', (e) => {
+            if (selectedEpIdx < 0 || !episodes[selectedEpIdx]) return;
+            const ep = episodes[selectedEpIdx];
+            currentFrame = parseInt(e.target.value);
+            const total = ep.num_frames || 1;
+
+            if (episodeVideo.duration && !isNaN(episodeVideo.duration)) {
+                episodeVideo.currentTime = (currentFrame / Math.max(1, total - 1)) * episodeVideo.duration;
+            }
+            syncFrameUI();
+        });
+
+        // When HTML5 video updates its playback time
+        episodeVideo.addEventListener('timeupdate', () => {
+            if (selectedEpIdx < 0 || !episodes[selectedEpIdx] || !episodeVideo.duration) return;
+            const ep = episodes[selectedEpIdx];
+            const total = ep.num_frames || 1;
+            const progress = episodeVideo.currentTime / episodeVideo.duration;
+            currentFrame = Math.min(total - 1, Math.max(0, Math.floor(progress * total)));
+            timelineSlider.value = currentFrame;
+            syncFrameUI();
+        });
+
+        episodeVideo.addEventListener('loadedmetadata', () => {
+            syncFrameUI();
+        });
+
+        // Play / Pause Synchronized Toggle
         playBtn.addEventListener('click', () => {
-            if (isPlaying) {
-                pausePlayback();
+            if (episodeVideo.paused) {
+                episodeVideo.play().catch(() => {});
+                playIcon.innerHTML = `<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>`;
             } else {
-                startPlayback();
+                episodeVideo.pause();
+                playIcon.innerHTML = `<polygon points="5 3 19 12 5 21 5 3"/>`;
             }
         });
 
-        function startPlayback() {
-            if (selectedEpIdx < 0 || !episodes[selectedEpIdx]) return;
-            isPlaying = true;
+        episodeVideo.addEventListener('play', () => {
             playIcon.innerHTML = `<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>`;
-            
-            episodeVideo.play().catch(() => {});
+        });
 
-            playInterval = setInterval(() => {
-                const ep = episodes[selectedEpIdx];
-                if (!ep) return;
-                currentFrame = (currentFrame + 1) % ep.num_frames;
-                timelineSlider.value = currentFrame;
-                updateFrameDisplay();
-            }, 1000 / 30);
-        }
-
-        function pausePlayback() {
-            isPlaying = false;
-            clearInterval(playInterval);
+        episodeVideo.addEventListener('pause', () => {
             playIcon.innerHTML = `<polygon points="5 3 19 12 5 21 5 3"/>`;
-            episodeVideo.pause();
-        }
+        });
 
         // Generate Sample Recording
         document.getElementById('addSampleBtn').onclick = async () => {
