@@ -155,7 +155,7 @@
             height: 420px;
             border-radius: 14px;
             overflow: hidden;
-            background: #040711;
+            background: radial-gradient(circle at center, #0a1128 0%, #030611 100%);
         }
 
         #canvas3d {
@@ -175,6 +175,36 @@
             font-size: 0.72rem;
             color: #94a3b8;
             pointer-events: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .legend-overlay {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 6px 12px;
+            border-radius: 10px;
+            font-size: 0.72rem;
+            display: flex;
+            gap: 12px;
+            pointer-events: none;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
         }
 
         /* Playback Timeline Controls */
@@ -231,7 +261,7 @@
             accent-color: #6366f1;
         }
 
-        /* Joint Telemetry Gauges */
+        /* Cartesian & Pose Telemetry */
         .joint-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -256,7 +286,7 @@
         }
 
         .joint-val {
-            font-size: 1.1rem;
+            font-size: 1.05rem;
             font-weight: 700;
             color: #818cf8;
             font-family: 'JetBrains Mono', monospace;
@@ -407,20 +437,25 @@
     </nav>
 
     <div class="container">
-        <!-- Left: 3D Robot Arm Visualization & Video Sync -->
+        <!-- Left: 3D End-Effector Trajectory Shape & Video Sync -->
         <div style="display: flex; flex-direction: column; gap: 16px;">
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">
                         <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-                        SO-100 Robot Arm 3D Articulation View
+                        3D End-Effector Trajectory Shape & Pose
                     </div>
                     <span style="font-size: 0.8rem; color: #94a3b8;" id="activeEpText">No episode selected</span>
                 </div>
 
                 <div class="viewport-wrapper">
                     <div id="canvas3d"></div>
-                    <div class="canvas-overlay-hint">🖱️ Drag to rotate • Scroll to zoom • Right-click to pan</div>
+                    <div class="canvas-overlay-hint">🖱️ Drag to orbit • Scroll to zoom • Right-click to pan</div>
+                    <div class="legend-overlay">
+                        <div class="legend-item"><div class="legend-dot" style="background: #10b981;"></div> Start</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #ef4444;"></div> Goal / End</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #38bdf8;"></div> Motion Path</div>
+                    </div>
                 </div>
 
                 <!-- Timeline / Playback Slider -->
@@ -432,44 +467,44 @@
                     </button>
                     <div class="slider-wrapper">
                         <div class="slider-header">
-                            <span>TIMELINE FRAME</span>
-                            <span id="frameCounter">0 / 0 (0.00s)</span>
+                            <span>TRAJECTORY TIMELINE</span>
+                            <span id="frameCounter">0 / 0 (0.00s / 0.00s)</span>
                         </div>
                         <input type="range" id="timelineSlider" min="0" max="0" value="0">
                     </div>
                 </div>
 
-                <!-- Live Joint Angle Telemetry Gauges -->
+                <!-- End-Effector Cartesian & Pose Telemetry -->
                 <div class="joint-grid">
                     <div class="joint-box">
-                        <div class="joint-name">q0 Base Yaw</div>
-                        <div class="joint-val" id="j0Val">0.0°</div>
-                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j0Bar"></div></div>
+                        <div class="joint-name">Position X (Forward)</div>
+                        <div class="joint-val" id="valX">+0.0 cm</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barX"></div></div>
                     </div>
                     <div class="joint-box">
-                        <div class="joint-name">q1 Shoulder</div>
-                        <div class="joint-val" id="j1Val">0.0°</div>
-                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j1Bar"></div></div>
+                        <div class="joint-name">Position Y (Lateral)</div>
+                        <div class="joint-val" id="valY">+0.0 cm</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barY"></div></div>
                     </div>
                     <div class="joint-box">
-                        <div class="joint-name">q2 Elbow</div>
-                        <div class="joint-val" id="j2Val">0.0°</div>
-                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j2Bar"></div></div>
+                        <div class="joint-name">Height Z (Vertical)</div>
+                        <div class="joint-val" id="valZ">+0.0 cm</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barZ"></div></div>
                     </div>
                     <div class="joint-box">
-                        <div class="joint-name">q3 Wrist Pitch</div>
-                        <div class="joint-val" id="j3Val">0.0°</div>
-                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j3Bar"></div></div>
+                        <div class="joint-name">Orientation (R, P, Y)</div>
+                        <div class="joint-val" id="valRPY" style="font-size: 0.88rem;">0°, 0°, 0°</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barRPY"></div></div>
                     </div>
                     <div class="joint-box">
-                        <div class="joint-name">q4 Wrist Roll</div>
-                        <div class="joint-val" id="j4Val">0.0°</div>
-                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j4Bar"></div></div>
+                        <div class="joint-name">Path Length</div>
+                        <div class="joint-val" id="valDist">0.0 cm</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barDist"></div></div>
                     </div>
                     <div class="joint-box">
-                        <div class="joint-name">Gripper Jaw</div>
-                        <div class="joint-val" id="j5Val">50%</div>
-                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j5Bar"></div></div>
+                        <div class="joint-name">Gripper Aperture</div>
+                        <div class="joint-val" id="valGrip">50%</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barGrip"></div></div>
                     </div>
                 </div>
             </div>
@@ -503,7 +538,7 @@
                     </div>
                     <div class="stat-box">
                         <div class="stat-val">SO-100</div>
-                        <div class="stat-lbl">Embodiment</div>
+                        <div class="stat-lbl">Target Embodiment</div>
                     </div>
                     <div class="stat-box">
                         <div class="stat-val">v3.0</div>
@@ -532,8 +567,6 @@
 
         let episodes = [];
         let selectedEpIdx = -1;
-        let isPlaying = false;
-        let playInterval = null;
         let currentFrame = 0;
 
         // UI Element References
@@ -543,158 +576,142 @@
         const frameCounter = document.getElementById('frameCounter');
         const episodeVideo = document.getElementById('episodeVideo');
 
-        // Telemetry Gauge elements
-        const j0Val = document.getElementById('j0Val');
-        const j1Val = document.getElementById('j1Val');
-        const j2Val = document.getElementById('j2Val');
-        const j3Val = document.getElementById('j3Val');
-        const j4Val = document.getElementById('j4Val');
-        const j5Val = document.getElementById('j5Val');
+        // Telemetry readouts
+        const valX = document.getElementById('valX');
+        const valY = document.getElementById('valY');
+        const valZ = document.getElementById('valZ');
+        const valRPY = document.getElementById('valRPY');
+        const valDist = document.getElementById('valDist');
+        const valGrip = document.getElementById('valGrip');
 
-        const j0Bar = document.getElementById('j0Bar');
-        const j1Bar = document.getElementById('j1Bar');
-        const j2Bar = document.getElementById('j2Bar');
-        const j3Bar = document.getElementById('j3Bar');
-        const j4Bar = document.getElementById('j4Bar');
-        const j5Bar = document.getElementById('j5Bar');
+        const barX = document.getElementById('barX');
+        const barY = document.getElementById('barY');
+        const barZ = document.getElementById('barZ');
+        const barRPY = document.getElementById('barRPY');
+        const barDist = document.getElementById('barDist');
+        const barGrip = document.getElementById('barGrip');
 
         // ==========================================
-        // 1. THREE.JS 3D ARTICULATED SO-100 ROBOT ARM
+        // 1. THREE.JS 3D END-EFFECTOR TRAJECTORY SCENE
         // ==========================================
         const container = document.getElementById('canvas3d');
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x040711);
 
-        const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.05, 50);
-        camera.position.set(0.45, 0.35, 0.45);
-        camera.lookAt(0.12, 0.12, 0);
+        const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.02, 50);
+        camera.position.set(0.35, 0.35, 0.45);
+        camera.lookAt(0.22, 0.14, 0);
 
-        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         renderer.setSize(container.clientWidth, container.clientHeight);
         renderer.shadowMap.enabled = true;
         container.appendChild(renderer.domElement);
 
         const controls = new THREE.OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
-        controls.dampingFactor = 0.05;
-        controls.target.set(0.12, 0.12, 0);
+        controls.dampingFactor = 0.06;
+        controls.target.set(0.22, 0.14, 0);
 
-        // Lighting & Grid
+        // Ground Reference Grid & Origin
         const grid = new THREE.GridHelper(1.2, 24, 0x334155, 0x1e293b);
         grid.position.y = 0;
         scene.add(grid);
 
+        // Lighting
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
         scene.add(ambientLight);
 
-        const keyLight = new THREE.DirectionalLight(0x818cf8, 1.0);
+        const keyLight = new THREE.DirectionalLight(0x818cf8, 1.2);
         keyLight.position.set(1.5, 2.5, 1.5);
         scene.add(keyLight);
 
-        const fillLight = new THREE.DirectionalLight(0xc084fc, 0.5);
+        const fillLight = new THREE.DirectionalLight(0x38bdf8, 0.6);
         fillLight.position.set(-1.5, 1.0, -1.0);
         scene.add(fillLight);
 
-        // Materials
-        const darkMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.6, roughness: 0.3 });
-        const cyanMat = new THREE.MeshStandardMaterial({ color: 0x6366f1, metalness: 0.5, roughness: 0.3 });
-        const accentMat = new THREE.MeshStandardMaterial({ color: 0x818cf8, metalness: 0.7, roughness: 0.2 });
-        const gripperMat = new THREE.MeshStandardMaterial({ color: 0x10b981, metalness: 0.4, roughness: 0.4 });
+        // ==========================================
+        // 2. 3D TRAJECTORY GEOMETRY OBJECTS
+        // ==========================================
+        let trajectoryTube = null;
+        let waypointDotsGroup = new THREE.Group();
+        scene.add(waypointDotsGroup);
 
-        // Build Kinematic Joint Hierarchy for SO-100:
-        // Base -> Joint0 (Yaw) -> Shoulder -> Joint1 (Pitch) -> UpperArm -> Joint2 (Pitch) -> Forearm -> Joint3 (Pitch) -> Wrist -> Joint4 (Roll) -> Gripper
-
-        // 1. Robot Base
-        const baseMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.075, 0.035, 24), darkMat);
-        baseMesh.position.y = 0.0175;
-        scene.add(baseMesh);
-
-        // Joint 0: Base Yaw Group
-        const joint0Group = new THREE.Group();
-        joint0Group.position.y = 0.035;
-        scene.add(joint0Group);
-
-        const rotatingTurret = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.055, 0.04, 20), darkMat);
-        rotatingTurret.position.y = 0.02;
-        joint0Group.add(rotatingTurret);
-
-        // Joint 1: Shoulder Pitch Group (Height L1 = 0.115m)
-        const joint1Group = new THREE.Group();
-        joint1Group.position.y = 0.08; // Base of shoulder pivot
-        joint0Group.add(joint1Group);
-
-        const shoulderPivot = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.05, 16), accentMat);
-        shoulderPivot.rotation.x = Math.PI / 2;
-        joint1Group.add(shoulderPivot);
-
-        // Upper Arm Link (L2 = 0.135m)
-        const upperArmGroup = new THREE.Group();
-        joint1Group.add(upperArmGroup);
-
-        const upperArmMesh = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.135, 0.035), cyanMat);
-        upperArmMesh.position.y = 0.135 / 2;
-        upperArmGroup.add(upperArmMesh);
-
-        // Joint 2: Elbow Pitch Group (L2 = 0.135m above shoulder)
-        const joint2Group = new THREE.Group();
-        joint2Group.position.y = 0.135;
-        upperArmGroup.add(joint2Group);
-
-        const elbowPivot = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.045, 16), accentMat);
-        elbowPivot.rotation.x = Math.PI / 2;
-        joint2Group.add(elbowPivot);
-
-        // Forearm Link (L3 = 0.140m)
-        const forearmGroup = new THREE.Group();
-        joint2Group.add(forearmGroup);
-
-        const forearmMesh = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.140, 0.03), cyanMat);
-        forearmMesh.position.y = 0.140 / 2;
-        forearmGroup.add(forearmMesh);
-
-        // Joint 3: Wrist Pitch Group (L3 = 0.140m above elbow)
-        const joint3Group = new THREE.Group();
-        joint3Group.position.y = 0.140;
-        forearmGroup.add(joint3Group);
-
-        const wristPitchPivot = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.035, 16), accentMat);
-        wristPitchPivot.rotation.x = Math.PI / 2;
-        joint3Group.add(wristPitchPivot);
-
-        // Joint 4: Wrist Roll Group
-        const joint4Group = new THREE.Group();
-        joint4Group.position.y = 0.035;
-        joint3Group.add(joint4Group);
-
-        const wristRollMount = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.03, 16), darkMat);
-        wristRollMount.position.y = 0.015;
-        joint4Group.add(wristRollMount);
-
-        // Gripper Jaws (L4 tip offset)
-        const gripperPalm = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.015, 0.025), darkMat);
-        gripperPalm.position.y = 0.035;
-        joint4Group.add(gripperPalm);
-
-        const fingerLeft = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.04, 0.012), gripperMat);
-        fingerLeft.position.set(-0.015, 0.055, 0);
-        joint4Group.add(fingerLeft);
-
-        const fingerRight = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.04, 0.012), gripperMat);
-        fingerRight.position.set(0.015, 0.055, 0);
-        joint4Group.add(fingerRight);
-
-        // Glowing End-Effector Marker
-        const eeMarker = new THREE.Mesh(
+        // Start Beacon Marker (Green)
+        const startBeacon = new THREE.Group();
+        const startSphere = new THREE.Mesh(
             new THREE.SphereGeometry(0.012, 16, 16),
-            new THREE.MeshBasicMaterial({ color: 0x38bdf8 })
+            new THREE.MeshStandardMaterial({ color: 0x10b981, emissive: 0x059669, roughness: 0.3 })
         );
-        eeMarker.position.y = 0.075;
-        joint4Group.add(eeMarker);
+        const startRing = new THREE.Mesh(
+            new THREE.RingGeometry(0.016, 0.022, 24),
+            new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide })
+        );
+        startRing.rotation.x = -Math.PI / 2;
+        startBeacon.add(startSphere, startRing);
+        startBeacon.visible = false;
+        scene.add(startBeacon);
 
-        // Trajectory Ribbon
-        let trajLine = null;
+        // Goal/End Beacon Marker (Red)
+        const goalBeacon = new THREE.Group();
+        const goalSphere = new THREE.Mesh(
+            new THREE.SphereGeometry(0.012, 16, 16),
+            new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xdc2626, roughness: 0.3 })
+        );
+        const goalRing = new THREE.Mesh(
+            new THREE.RingGeometry(0.016, 0.022, 24),
+            new THREE.MeshBasicMaterial({ color: 0xef4444, side: THREE.DoubleSide })
+        );
+        goalRing.rotation.x = -Math.PI / 2;
+        goalBeacon.add(goalSphere, goalRing);
+        goalBeacon.visible = false;
+        scene.add(goalBeacon);
 
-        // Render Loop
+        // ==========================================
+        // 3. END-EFFECTOR TOOL / CURSOR GIZMO
+        // ==========================================
+        const eeCursorGroup = new THREE.Group();
+        scene.add(eeCursorGroup);
+
+        // Focal glowing TCP sphere
+        const tcpSphere = new THREE.Mesh(
+            new THREE.SphereGeometry(0.009, 16, 16),
+            new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, roughness: 0.2 })
+        );
+        eeCursorGroup.add(tcpSphere);
+
+        // Stylized Gripper Jaws on the Tool
+        const fingerLeft = new THREE.Mesh(
+            new THREE.BoxGeometry(0.006, 0.025, 0.008),
+            new THREE.MeshStandardMaterial({ color: 0x818cf8, metalness: 0.6, roughness: 0.3 })
+        );
+        fingerLeft.position.set(-0.012, 0.012, 0);
+
+        const fingerRight = new THREE.Mesh(
+            new THREE.BoxGeometry(0.006, 0.025, 0.008),
+            new THREE.MeshStandardMaterial({ color: 0x818cf8, metalness: 0.6, roughness: 0.3 })
+        );
+        fingerRight.position.set(0.012, 0.012, 0);
+
+        eeCursorGroup.add(fingerLeft, fingerRight);
+
+        // Orientation Axes Gizmo (X: Red, Y: Green, Z: Blue)
+        const axesGizmo = new THREE.AxesHelper(0.035);
+        eeCursorGroup.add(axesGizmo);
+
+        // Height Drop Line & Ground Shadow Disc
+        const dropLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, -0.2, 0)]);
+        const dropLine = new THREE.Line(dropLineGeo, new THREE.LineDashedMaterial({ color: 0x64748b, dashSize: 0.008, gapSize: 0.004 }));
+        dropLine.computeLineDistances();
+        scene.add(dropLine);
+
+        const groundDisc = new THREE.Mesh(
+            new THREE.CircleGeometry(0.02, 20),
+            new THREE.MeshBasicMaterial({ color: 0x1e293b, side: THREE.DoubleSide, transparent: true, opacity: 0.7 })
+        );
+        groundDisc.rotation.x = -Math.PI / 2;
+        groundDisc.position.y = 0.001;
+        scene.add(groundDisc);
+
+        // Animation Render Loop
         function renderLoop() {
             requestAnimationFrame(renderLoop);
             controls.update();
@@ -710,57 +727,156 @@
         });
 
         // ==========================================
-        // 2. FORWARD KINEMATICS & POSE APPLIER
+        // 4. TRAJECTORY RECONSTRUCTION & RENDERING
         // ==========================================
-        function applyJointsTo3DModel(q) {
-            // q = [q0_deg, q1_deg, q2_deg, q3_deg, q4_deg, gripper_state]
-            if (!q || q.length < 6) return;
+        let currentTrajectoryPoints = [];
+        let totalPathLength = 0;
 
-            const q0_rad = THREE.MathUtils.degToRad(q[0]);
-            const q1_rad = THREE.MathUtils.degToRad(q[1]);
-            const q2_rad = THREE.MathUtils.degToRad(q[2]);
-            const q3_rad = THREE.MathUtils.degToRad(q[3]);
-            const q4_rad = THREE.MathUtils.degToRad(q[4]);
-            const gripper = q[5]; // 0 (closed) to 100 (open)
+        function buildTrajectoryGeometry(poses, joint_states) {
+            currentTrajectoryPoints = [];
+            totalPathLength = 0;
 
-            // Joint 0: Base Yaw (rotates around Y)
-            joint0Group.rotation.y = q0_rad;
+            if (trajectoryTube) scene.remove(trajectoryTube);
+            while (waypointDotsGroup.children.length > 0) {
+                waypointDotsGroup.remove(waypointDotsGroup.children[0]);
+            }
 
-            // Joint 1: Shoulder Pitch (rotates around X)
-            upperArmGroup.rotation.x = -q1_rad;
+            const numPoints = joint_states ? joint_states.length : (poses ? poses.length : 0);
+            if (numPoints < 2) {
+                startBeacon.visible = false;
+                goalBeacon.visible = false;
+                return;
+            }
 
-            // Joint 2: Elbow Pitch (rotates around X)
-            forearmGroup.rotation.x = -q2_rad;
+            for (let f = 0; f < numPoints; f++) {
+                let x, y, z;
+                if (joint_states && joint_states[f]) {
+                    const q = joint_states[f];
+                    const q0_rad = THREE.MathUtils.degToRad(q[0]);
+                    const q1_rad = THREE.MathUtils.degToRad(q[1]);
+                    const q2_rad = THREE.MathUtils.degToRad(q[2]);
+                    const r = 0.135 * Math.cos(q1_rad) + 0.140 * Math.cos(q1_rad + q2_rad);
+                    x = r * Math.cos(q0_rad);
+                    z = r * Math.sin(q0_rad);
+                    y = 0.115 + 0.135 * Math.sin(q1_rad) + 0.140 * Math.sin(q1_rad + q2_rad);
+                } else {
+                    x = 0.25 + poses[f][0] * 0.8;
+                    z = poses[f][1] * 0.8;
+                    y = 0.15 + poses[f][2] * 0.8;
+                }
 
-            // Joint 3: Wrist Pitch (rotates around X)
-            joint3Group.rotation.x = -q3_rad;
+                const pt = new THREE.Vector3(x, y, z);
+                currentTrajectoryPoints.push(pt);
 
-            // Joint 4: Wrist Roll (rotates around Y)
-            joint4Group.rotation.y = q4_rad;
+                if (f > 0) {
+                    totalPathLength += pt.distanceTo(currentTrajectoryPoints[f - 1]);
+                }
+            }
 
-            // Gripper aperture animation
-            const fingerOffset = 0.008 + (gripper / 100.0) * 0.015;
-            fingerLeft.position.x = -fingerOffset;
-            fingerRight.position.x = fingerOffset;
+            // Create Smooth 3D Spline Curve
+            const curve = new THREE.CatmullRomCurve3(currentTrajectoryPoints);
+            const tubeGeo = new THREE.TubeGeometry(curve, 100, 0.0035, 12, false);
 
-            // Update Telemetry Displays
-            j0Val.innerText = `${q[0].toFixed(1)}°`;
-            j1Val.innerText = `${q[1].toFixed(1)}°`;
-            j2Val.innerText = `${q[2].toFixed(1)}°`;
-            j3Val.innerText = `${q[3].toFixed(1)}°`;
-            j4Val.innerText = `${q[4].toFixed(1)}°`;
-            j5Val.innerText = `${gripper.toFixed(0)}%`;
+            // Shader Material with Start-to-End Color Gradient (Green -> Cyan -> Purple)
+            const tubeMat = new THREE.MeshStandardMaterial({
+                color: 0x38bdf8,
+                emissive: 0x0284c7,
+                roughness: 0.25,
+                metalness: 0.7
+            });
 
-            j0Bar.style.width = `${Math.min(100, Math.max(0, (q[0] + 180) / 360 * 100))}%`;
-            j1Bar.style.width = `${Math.min(100, Math.max(0, (q[1] + 90) / 180 * 100))}%`;
-            j2Bar.style.width = `${Math.min(100, Math.max(0, (q[2] + 120) / 240 * 100))}%`;
-            j3Bar.style.width = `${Math.min(100, Math.max(0, (q[3] + 90) / 180 * 100))}%`;
-            j4Bar.style.width = `${Math.min(100, Math.max(0, (q[4] + 180) / 360 * 100))}%`;
-            j5Bar.style.width = `${Math.min(100, Math.max(0, gripper))}%`;
+            trajectoryTube = new THREE.Mesh(tubeGeo, tubeMat);
+            scene.add(trajectoryTube);
+
+            // Add Waypoint Density Beads along the trajectory shape
+            const dotGeo = new THREE.SphereGeometry(0.0025, 8, 8);
+            const dotMat = new THREE.MeshBasicMaterial({ color: 0xa5b4fc });
+            for (let i = 0; i < currentTrajectoryPoints.length; i += 3) {
+                const dot = new THREE.Mesh(dotGeo, dotMat);
+                dot.position.copy(currentTrajectoryPoints[i]);
+                waypointDotsGroup.add(dot);
+            }
+
+            // Position Start & Goal Beacons
+            startBeacon.position.copy(currentTrajectoryPoints[0]);
+            startBeacon.visible = true;
+
+            goalBeacon.position.copy(currentTrajectoryPoints[currentTrajectoryPoints.length - 1]);
+            goalBeacon.visible = true;
+
+            // Auto-focus Camera on Trajectory Center
+            const center = new THREE.Vector3();
+            currentTrajectoryPoints.forEach(p => center.add(p));
+            center.divideScalar(currentTrajectoryPoints.length);
+
+            controls.target.copy(center);
+            camera.position.set(center.x + 0.25, center.y + 0.22, center.z + 0.32);
         }
 
         // ==========================================
-        // 3. EPISODE MANAGER & API INTEGRATION
+        // 5. UPDATE END-EFFECTOR POSE & TELEMETRY
+        // ==========================================
+        function updateEndEffectorPose(frameIdx) {
+            if (!currentTrajectoryPoints || currentTrajectoryPoints.length === 0) return;
+            const idx = Math.min(currentTrajectoryPoints.length - 1, Math.max(0, frameIdx));
+            const pt = currentTrajectoryPoints[idx];
+
+            // Update End-Effector 3D Position
+            eeCursorGroup.position.copy(pt);
+
+            // Update Ground Drop Line & Disc
+            const linePositions = new Float32Array([
+                pt.x, pt.y, pt.z,
+                pt.x, 0.0, pt.z
+            ]);
+            dropLine.geometry.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+            dropLine.computeLineDistances();
+            groundDisc.position.set(pt.x, 0.001, pt.z);
+
+            // Retrieve Orientation & Gripper
+            let roll = 0, pitch = 0, yaw = 0, gripper = 50;
+            if (episodes[selectedEpIdx]) {
+                const ep = episodes[selectedEpIdx];
+                if (ep.joint_states && ep.joint_states[idx]) {
+                    const q = ep.joint_states[idx];
+                    yaw = q[0];
+                    pitch = q[1] + q[2] + q[3];
+                    roll = q[4];
+                    gripper = q[5];
+                }
+            }
+
+            // Rotate End-Effector Tool Axes
+            eeCursorGroup.rotation.set(
+                -THREE.MathUtils.degToRad(pitch),
+                THREE.MathUtils.degToRad(yaw),
+                THREE.MathUtils.degToRad(roll),
+                'ZYX'
+            );
+
+            // Animate Gripper Finger Aperture
+            const fingerOffset = 0.006 + (gripper / 100.0) * 0.012;
+            fingerLeft.position.x = -fingerOffset;
+            fingerRight.position.x = fingerOffset;
+
+            // Update Telemetry Display
+            valX.innerText = `${(pt.x * 100).toFixed(1)} cm`;
+            valY.innerText = `${(pt.z * 100).toFixed(1)} cm`;
+            valZ.innerText = `${(pt.y * 100).toFixed(1)} cm`;
+            valRPY.innerText = `${roll.toFixed(0)}°, ${pitch.toFixed(0)}°, ${yaw.toFixed(0)}°`;
+            valDist.innerText = `${(totalPathLength * 100).toFixed(1)} cm`;
+            valGrip.innerText = `${gripper.toFixed(0)}%`;
+
+            barX.style.width = `${Math.min(100, Math.max(0, (pt.x / 0.4) * 100))}%`;
+            barY.style.width = `${Math.min(100, Math.max(0, ((pt.z + 0.2) / 0.4) * 100))}%`;
+            barZ.style.width = `${Math.min(100, Math.max(0, (pt.y / 0.35) * 100))}%`;
+            barRPY.style.width = `75%`;
+            barDist.style.width = `100%`;
+            barGrip.style.width = `${Math.min(100, Math.max(0, gripper))}%`;
+        }
+
+        // ==========================================
+        // 6. EPISODE MANAGER & EVENT HANDLERS
         // ==========================================
         async function fetchEpisodes() {
             try {
@@ -826,34 +942,11 @@
             timelineSlider.max = (ep.num_frames - 1) || 0;
             timelineSlider.value = 0;
             currentFrame = 0;
-            updateFrameDisplay();
 
-            // Draw full 3D end-effector trajectory ribbon
-            if (trajLine) scene.remove(trajLine);
-            if (ep.joint_states && ep.joint_states.length > 0) {
-                const points = [];
-                for (let f = 0; f < ep.joint_states.length; f++) {
-                    const q = ep.joint_states[f];
-                    // Forward kinematics point
-                    const q0_rad = THREE.MathUtils.degToRad(q[0]);
-                    const q1_rad = THREE.MathUtils.degToRad(q[1]);
-                    const q2_rad = THREE.MathUtils.degToRad(q[2]);
-                    const r = 0.135 * Math.cos(q1_rad) + 0.140 * Math.cos(q1_rad + q2_rad);
-                    const x = r * Math.cos(q0_rad);
-                    const z = r * Math.sin(q0_rad);
-                    const y = 0.115 + 0.135 * Math.sin(q1_rad) + 0.140 * Math.sin(q1_rad + q2_rad);
-                    points.push(new THREE.Vector3(x, y, z));
-                }
-                const geometry = new THREE.BufferGeometry().setFromPoints(points);
-                const material = new THREE.LineBasicMaterial({ color: 0x38bdf8, linewidth: 3 });
-                trajLine = new THREE.Line(geometry, material);
-                scene.add(trajLine);
-            }
-
-            // Apply frame 0 pose
-            if (ep.joint_states && ep.joint_states[0]) {
-                applyJointsTo3DModel(ep.joint_states[0]);
-            }
+            // Reconstruct 3D End-Effector Trajectory Path
+            buildTrajectoryGeometry(ep.poses, ep.joint_states);
+            updateEndEffectorPose(0);
+            syncFrameUI();
         }
 
         // Delete Episode Action
@@ -883,7 +976,7 @@
             fetchEpisodes();
         };
 
-        // Bi-directional Synchronization between HTML5 Video, 3D Arm, and Timeline Slider
+        // Bi-directional Synchronization between HTML5 Video, 3D Trajectory, and Timeline Slider
         function syncFrameUI() {
             if (selectedEpIdx < 0 || !episodes[selectedEpIdx]) return;
             const ep = episodes[selectedEpIdx];
@@ -892,10 +985,7 @@
             const curTime = (episodeVideo.currentTime && !isNaN(episodeVideo.currentTime)) ? episodeVideo.currentTime : ((currentFrame / Math.max(1, total - 1)) * dur);
             
             frameCounter.innerText = `${currentFrame} / ${total - 1} (${curTime.toFixed(2)}s / ${dur.toFixed(2)}s)`;
-
-            if (ep.joint_states && ep.joint_states[currentFrame]) {
-                applyJointsTo3DModel(ep.joint_states[currentFrame]);
-            }
+            updateEndEffectorPose(currentFrame);
         }
 
         // When user drags timeline slider
