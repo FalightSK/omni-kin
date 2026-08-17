@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Live In-Browser Dataset Collector - LeRobot</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <title>Mobile Dataset Collector - Multi-Orientation</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <style>
         * {
             box-sizing: border-box;
@@ -15,9 +15,10 @@
         }
 
         body {
-            background-color: #080c14;
+            background-color: #060911;
             color: #f3f4f6;
             height: 100vh;
+            width: 100vw;
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -25,14 +26,15 @@
 
         /* Top Header */
         header {
-            background: rgba(15, 23, 42, 0.85);
+            background: rgba(15, 23, 42, 0.9);
             backdrop-filter: blur(12px);
-            padding: 12px 16px;
+            padding: 10px 16px;
             display: flex;
             align-items: center;
             justify-content: space-between;
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            z-index: 20;
+            z-index: 30;
+            flex-shrink: 0;
         }
 
         .brand {
@@ -50,11 +52,17 @@
         }
 
         h1 {
-            font-size: 1.05rem;
+            font-size: 1rem;
             font-weight: 700;
             background: linear-gradient(135deg, #a5b4fc 0%, #c084fc 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+        }
+
+        .header-badges {
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
 
         .badge {
@@ -67,7 +75,22 @@
             font-weight: 600;
         }
 
-        /* Viewport Container */
+        .badge-orientation {
+            background: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        /* Main Workspace Container */
+        .main-workspace {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Camera Viewport */
         .viewport {
             flex: 1;
             position: relative;
@@ -87,9 +110,9 @@
         /* HUD Overlays */
         .hud-top {
             position: absolute;
-            top: 12px;
-            left: 12px;
-            right: 12px;
+            top: 10px;
+            left: 10px;
+            right: 10px;
             display: flex;
             justify-content: space-between;
             pointer-events: none;
@@ -97,7 +120,7 @@
         }
 
         .hud-card {
-            background: rgba(15, 23, 42, 0.8);
+            background: rgba(15, 23, 42, 0.82);
             backdrop-filter: blur(8px);
             border: 1px solid rgba(255, 255, 255, 0.12);
             padding: 6px 12px;
@@ -123,14 +146,14 @@
 
         @keyframes pulse {
             from { opacity: 0.3; }
-            to { opacity: 1; box-shadow: 0 0 10px #ef4444; }
+            to { opacity: 1; box-shadow: 0 0 12px #ef4444; }
         }
 
         .hud-bottom {
             position: absolute;
-            bottom: 12px;
-            left: 12px;
-            right: 12px;
+            bottom: 10px;
+            left: 10px;
+            right: 10px;
             display: flex;
             justify-content: space-between;
             pointer-events: none;
@@ -138,17 +161,17 @@
         }
 
         .telemetry-card {
-            background: rgba(15, 23, 42, 0.8);
+            background: rgba(15, 23, 42, 0.82);
             backdrop-filter: blur(8px);
             border: 1px solid rgba(255, 255, 255, 0.1);
-            padding: 6px 10px;
+            padding: 4px 8px;
             border-radius: 8px;
-            font-size: 0.7rem;
+            font-size: 0.68rem;
             color: #94a3b8;
-            font-family: monospace;
+            font-family: 'JetBrains Mono', monospace;
         }
 
-        /* Help / Permission Card */
+        /* Permission & Help Card */
         .guide-card {
             position: absolute;
             inset: 16px;
@@ -156,36 +179,24 @@
             backdrop-filter: blur(16px);
             border: 1px solid rgba(99, 102, 241, 0.4);
             border-radius: 20px;
-            padding: 24px;
+            padding: 20px;
             display: flex;
             flex-direction: column;
             justify-content: center;
             text-align: center;
-            gap: 16px;
-            z-index: 15;
+            gap: 12px;
+            z-index: 20;
         }
 
         .guide-card h2 {
-            font-size: 1.15rem;
+            font-size: 1.1rem;
             color: #e0e7ff;
         }
 
         .guide-card p {
-            font-size: 0.85rem;
+            font-size: 0.82rem;
             color: #94a3b8;
-            line-height: 1.5;
-        }
-
-        .guide-steps {
-            background: rgba(30, 41, 59, 0.6);
-            border-radius: 12px;
-            padding: 12px;
-            text-align: left;
-            font-size: 0.78rem;
-            color: #cbd5e1;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
+            line-height: 1.4;
         }
 
         .btn-action {
@@ -199,26 +210,39 @@
             cursor: pointer;
         }
 
-        /* Controls Panel */
-        .controls {
+        .guide-steps {
+            background: rgba(30, 41, 59, 0.6);
+            border-radius: 10px;
+            padding: 10px;
+            text-align: left;
+            font-size: 0.75rem;
+            color: #cbd5e1;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        /* Controls Panel - Default (Portrait) */
+        .controls-panel {
             background: rgba(15, 23, 42, 0.95);
             backdrop-filter: blur(16px);
             border-top: 1px solid rgba(255, 255, 255, 0.1);
-            padding: 14px 18px 24px 18px;
+            padding: 14px 18px 20px 18px;
             display: flex;
             flex-direction: column;
-            gap: 12px;
-            z-index: 20;
+            gap: 10px;
+            z-index: 25;
+            flex-shrink: 0;
         }
 
         .input-group {
             display: flex;
             flex-direction: column;
-            gap: 6px;
+            gap: 4px;
         }
 
         label {
-            font-size: 0.72rem;
+            font-size: 0.7rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             color: #9ca3af;
@@ -235,28 +259,27 @@
             background: rgba(30, 41, 59, 0.8);
             border: 1px solid rgba(255, 255, 255, 0.12);
             color: #fff;
-            padding: 10px 14px;
+            padding: 10px 12px;
             border-radius: 10px;
-            font-size: 0.9rem;
+            font-size: 0.88rem;
             outline: none;
         }
 
-        /* Record Button */
         .btn-record {
             background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
             color: white;
             border: none;
-            padding: 16px;
-            border-radius: 16px;
-            font-size: 1.05rem;
+            padding: 14px;
+            border-radius: 14px;
+            font-size: 1rem;
             font-weight: 700;
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 10px;
+            gap: 8px;
             box-shadow: 0 4px 20px rgba(239, 68, 68, 0.4);
             cursor: pointer;
-            transition: transform 0.1s, box-shadow 0.2s;
+            transition: transform 0.1s;
         }
 
         .btn-record:active {
@@ -269,9 +292,50 @@
         }
 
         .status-text {
-            font-size: 0.78rem;
+            font-size: 0.75rem;
             text-align: center;
             color: #94a3b8;
+        }
+
+        /* =======================================================
+           LANDSCAPE / HORIZONTAL AXIS RESPONSIVE LAYOUT
+           ======================================================= */
+        @media (orientation: landscape) or (max-height: 500px) {
+            header {
+                padding: 6px 14px;
+            }
+
+            .main-workspace {
+                flex-direction: row;
+            }
+
+            .viewport {
+                flex: 1;
+                height: 100%;
+            }
+
+            .controls-panel {
+                width: 260px;
+                height: 100%;
+                border-top: none;
+                border-left: 1px solid rgba(255, 255, 255, 0.1);
+                padding: 12px 14px;
+                justify-content: space-between;
+                gap: 8px;
+                overflow-y: auto;
+            }
+
+            .btn-record {
+                padding: 16px 12px;
+                font-size: 0.95rem;
+                flex-direction: column;
+                gap: 4px;
+            }
+
+            .btn-record svg {
+                width: 24px;
+                height: 24px;
+            }
         }
     </style>
 </head>
@@ -280,69 +344,76 @@
     <header>
         <div class="brand">
             <div class="brand-dot"></div>
-            <h1>LeRobot Live Collector</h1>
+            <h1>LeRobot Collector</h1>
         </div>
-        <div class="badge">SO-100</div>
+        <div class="header-badges">
+            <div class="badge badge-orientation" id="orientBadge">📱 HORIZONTAL (Landscape)</div>
+            <div class="badge">SO-100</div>
+        </div>
     </header>
 
-    <div class="viewport">
-        <video id="cameraPreview" autoplay playsinline muted></video>
+    <div class="main-workspace">
+        <!-- Viewport Area -->
+        <div class="viewport">
+            <video id="cameraPreview" autoplay playsinline muted></video>
 
-        <!-- Permission & Activation Card -->
-        <div class="guide-card" id="guideCard">
-            <h2>📷 Live Camera & 100Hz IMU</h2>
-            <p>Captures live camera frames and synchronized IMU accelerometer + gyroscope motion streams inside the browser.</p>
-            
-            <button class="btn-action" id="enableBtn">⚡ START LIVE CAPTURE</button>
+            <!-- Permission / Startup Card -->
+            <div class="guide-card" id="guideCard">
+                <h2>📷 Live Camera & 100Hz IMU</h2>
+                <p>Orient your phone horizontally (Landscape) or vertically to record demonstrations.</p>
+                
+                <button class="btn-action" id="enableBtn">⚡ START LIVE CAPTURE</button>
 
-            <div class="guide-steps" id="browserHelp" style="display: none;">
-                <strong>💡 If camera is blocked on Android Chrome:</strong>
-                <span>1. Open <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code></span>
-                <span>2. Add <code id="originCode">http://192.168.1.178:8000</code> and select <strong>Enabled</strong></span>
-                <span>3. Tap <strong>Relaunch</strong></span>
+                <div class="guide-steps" id="browserHelp" style="display: none;">
+                    <strong>💡 If camera is blocked on Android Chrome:</strong>
+                    <span>1. Go to <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code></span>
+                    <span>2. Add <code id="originCode">http://192.168.1.178:8000</code> & set <strong>Enabled</strong></span>
+                    <span>3. Tap <strong>Relaunch</strong></span>
+                </div>
+            </div>
+
+            <!-- HUD Top -->
+            <div class="hud-top">
+                <div class="hud-card">
+                    <div class="rec-indicator" id="recDot"></div>
+                    <span id="recTimer">00:00.0</span>
+                </div>
+                <div class="hud-card">
+                    <span>IMU: <strong id="imuRate">0</strong> Hz (<span id="imuTotal">0</span>)</span>
+                </div>
+            </div>
+
+            <!-- HUD Bottom (Live IMU Readout) -->
+            <div class="hud-bottom">
+                <div class="telemetry-card" id="accelReadout">ACC: [0.0, 0.0, 9.8]</div>
+                <div class="telemetry-card" id="gyroReadout">GYR: [0.0, 0.0, 0.0]</div>
             </div>
         </div>
 
-        <!-- HUD Top -->
-        <div class="hud-top">
-            <div class="hud-card">
-                <div class="rec-indicator" id="recDot"></div>
-                <span id="recTimer">00:00.0</span>
+        <!-- Controls Area (Side on Landscape, Bottom on Portrait) -->
+        <div class="controls-panel">
+            <div class="input-group">
+                <label for="taskPreset">Task Instruction</label>
+                <div class="instruction-box">
+                    <select id="taskPreset">
+                        <option value="reach to apple">reach to apple</option>
+                        <option value="reach to banana">reach to banana</option>
+                        <option value="pick up cup">pick up cup</option>
+                        <option value="custom">Custom...</option>
+                    </select>
+                    <input type="text" id="taskCustom" placeholder="Enter task..." style="display: none;">
+                </div>
             </div>
-            <div class="hud-card">
-                <span>IMU: <strong id="imuRate">0</strong> Hz (<span id="imuTotal">0</span>)</span>
-            </div>
+
+            <button class="btn-record" id="recordBtn">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
+                    <circle cx="12" cy="12" r="8"/>
+                </svg>
+                <span id="recordBtnText">START RECORDING</span>
+            </button>
+
+            <div class="status-text" id="statusText">Ready to start demonstration</div>
         </div>
-
-        <!-- HUD Bottom (Live IMU Readout) -->
-        <div class="hud-bottom">
-            <div class="telemetry-card" id="accelReadout">ACC: [0.0, 0.0, 9.8]</div>
-            <div class="telemetry-card" id="gyroReadout">GYR: [0.0, 0.0, 0.0]</div>
-        </div>
-    </div>
-
-    <div class="controls">
-        <div class="input-group">
-            <label for="taskPreset">Task Instruction</label>
-            <div class="instruction-box">
-                <select id="taskPreset">
-                    <option value="reach to apple">reach to apple</option>
-                    <option value="reach to banana">reach to banana</option>
-                    <option value="pick up cup">pick up cup</option>
-                    <option value="custom">Custom...</option>
-                </select>
-                <input type="text" id="taskCustom" placeholder="Enter task..." style="display: none;">
-            </div>
-        </div>
-
-        <button class="btn-record" id="recordBtn">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                <circle cx="12" cy="12" r="8"/>
-            </svg>
-            <span id="recordBtnText">START LIVE RECORDING</span>
-        </button>
-
-        <div class="status-text" id="statusText">Ready to start demonstration</div>
     </div>
 
     <script>
@@ -362,6 +433,7 @@
         const statusText = document.getElementById('statusText');
         const taskPreset = document.getElementById('taskPreset');
         const taskCustom = document.getElementById('taskCustom');
+        const orientBadge = document.getElementById('orientBadge');
 
         originCode.innerText = `${window.location.protocol}//${window.location.host}`;
 
@@ -376,6 +448,33 @@
         let imuRateInterval = null;
         let lastAccel = [0, 0, 9.81];
         let lastGyro = [0, 0, 0];
+        let currentScreenAngle = 0;
+
+        // Update Orientation Display & Tracking Angle
+        function updateOrientation() {
+            const angle = (screen.orientation && screen.orientation.angle !== undefined)
+                ? screen.orientation.angle
+                : (window.orientation || 0);
+            
+            currentScreenAngle = angle;
+
+            if (Math.abs(angle) === 90 || Math.abs(angle) === 270 || window.innerWidth > window.innerHeight) {
+                orientBadge.innerText = "📱 Horizontal (Landscape)";
+                orientBadge.style.color = "#34d399";
+                orientBadge.style.borderColor = "rgba(16, 185, 129, 0.3)";
+            } else {
+                orientBadge.innerText = "📱 Vertical (Portrait)";
+                orientBadge.style.color = "#818cf8";
+                orientBadge.style.borderColor = "rgba(99, 102, 241, 0.3)";
+            }
+        }
+
+        window.addEventListener('resize', updateOrientation);
+        window.addEventListener('orientationchange', updateOrientation);
+        if (screen.orientation) {
+            screen.orientation.addEventListener('change', updateOrientation);
+        }
+        updateOrientation();
 
         // Custom task toggle
         taskPreset.addEventListener('change', (e) => {
@@ -400,7 +499,8 @@
                         imuData.push({
                             timestamp: elapsed,
                             accel: lastAccel,
-                            gyro: lastGyro
+                            gyro: lastGyro,
+                            screen_angle: currentScreenAngle
                         });
                         imuSampleCount++;
                         imuTotal.innerText = imuData.length;
@@ -420,10 +520,12 @@
                 });
             }
 
-            imuRateInterval = setInterval(() => {
-                imuRate.innerText = imuSampleCount;
-                imuSampleCount = 0;
-            }, 1000);
+            if (!imuRateInterval) {
+                imuRateInterval = setInterval(() => {
+                    imuRate.innerText = imuSampleCount;
+                    imuSampleCount = 0;
+                }, 1000);
+            }
         }
 
         // Start Camera Stream
@@ -441,8 +543,8 @@
                 const constraints = {
                     video: {
                         facingMode: { ideal: 'environment' },
-                        width: { ideal: 640 },
-                        height: { ideal: 480 },
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
                         frameRate: { ideal: 30 }
                     },
                     audio: false
@@ -458,7 +560,7 @@
 
                 guideCard.style.display = 'none';
                 setupIMU();
-                statusText.innerText = "Live camera & IMU tracking active.";
+                statusText.innerText = "Live camera & IMU active.";
             } catch (err) {
                 console.error("Camera access failed:", err);
                 statusText.innerText = "Camera blocked: " + err.message;
@@ -530,7 +632,7 @@
             recDot.classList.remove('active');
             recordBtn.classList.remove('recording');
             recordBtnText.innerText = "SAVING...";
-            statusText.innerText = "Uploading demonstration & calculating IK...";
+            statusText.innerText = "Processing demonstration...";
 
             mediaRecorder.stop();
 
@@ -559,12 +661,11 @@
                     statusText.innerText = "Upload failed: " + err.message;
                 }
 
-                recordBtnText.innerText = "START LIVE RECORDING";
+                recordBtnText.innerText = "START RECORDING";
             };
         }
 
         window.onload = () => {
-            // Auto start if available
             if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
                 startLiveCapture();
             }

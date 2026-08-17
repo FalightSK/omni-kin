@@ -37,7 +37,17 @@ class TrajectoryEstimator:
         orientations = []
 
         for s in imu_samples:
-            acc = s.get('accel', [0.0, 0.0, 0.0])
+            acc = list(s.get('accel', [0.0, 0.0, 9.81]))
+            angle = s.get('screen_angle', 0)
+
+            # Re-map axes for horizontal landscape holding
+            if angle == 90:
+                acc = [-acc[1], acc[0], acc[2]]
+            elif angle == 270 or angle == -90:
+                acc = [acc[1], -acc[0], acc[2]]
+            elif angle == 180:
+                acc = [-acc[0], -acc[1], acc[2]]
+
             accels.append(acc)
 
             ori = s.get('orientation', None)
