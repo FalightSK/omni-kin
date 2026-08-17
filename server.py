@@ -1,6 +1,7 @@
 """
 server.py
 FastAPI Server for Mobile Dataset Collector & LeRobot Exporter
+Focuses on pure relative 6-DoF End-Effector Trajectory starting at (0, 0, 0).
 """
 
 import os
@@ -139,26 +140,19 @@ async def save_recording(
     if frame_count <= 0:
         frame_count = 60
 
-    # 4. Estimate 6-DoF phone poses
-    poses = trajectory_estimator.estimate_trajectory_from_imu(parsed_imu, num_video_frames=frame_count, video_fps=fps)
+    # 4. Estimate 6-DoF End-Effector Trajectory (Starts at 0, 0, 0)
+    ee_poses = trajectory_estimator.estimate_trajectory_from_imu(parsed_imu, num_video_frames=frame_count, video_fps=fps)
 
-    # 5. Compute SO-100 Joint Angles via Inverse Kinematics
-    joint_states = []
-
+    # 5. Append gripper state (100% open early, 10% closed near grasp)
+    gripper_states = []
     for i in range(frame_count):
-        phone_pose = poses[i]
-        arm_pose = ik_solver.map_phone_to_workspace(phone_pose)
-        
-        # Simulating gripper closing near end of reach motion
-        gripper_state = 100.0 if i < (frame_count * 0.7) else 10.0
-        
-        joints = ik_solver.inverse_kinematics(arm_pose, gripper_state=gripper_state)
-        joint_states.append(joints)
+        g = 100.0 if i < (frame_count * 0.7) else 10.0
+        gripper_states.append(g)
 
-    # Target actions (next step joint positions)
-    joint_states = np.array(joint_states)
-    actions = np.roll(joint_states, -1, axis=0)
-    actions[-1] = joint_states[-1]
+    # Target actions (next-step Cartesian EEF poses + gripper)
+    ee_poses = np.array(ee_poses)
+    actions = np.roll(ee_poses, -1, axis=0)
+    actions[-1] = ee_poses[-1]
 
     timestamps = np.linspace(0, frame_count / fps, frame_count)
 
@@ -168,10 +162,13 @@ async def save_recording(
         'video_path': video_path,
         'video_url': f"/recordings/episode_{ep_idx:04d}/recording.mp4",
         'num_frames': frame_count,
-        'poses': poses.tolist() if isinstance(poses, np.ndarray) else poses,
-        'joint_states': joint_states.tolist() if isinstance(joint_states, np.ndarray) else joint_states,
-        'actions': actions.tolist() if isinstance(actions, np.ndarray) else actions,
-        'timestamps': timestamps.tolist() if isinstance(timestamps, np.ndarray) else timestamps,
+        'fps': fps,
+        'duration': frame_count / fps,
+        'ee_poses': ee_poses.tolist(),
+        'poses': ee_poses.tolist(),
+        'gripper_states': gripper_states,
+        'actions': actions.tolist(),
+        'timestamps': timestamps.tolist(),
         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -187,7 +184,7 @@ async def save_recording(
 @app.post("/api/recordings/sample")
 async def generate_sample_recording(task: str = "reach to apple"):
     """
-    Generates a synthetic demonstration episode for instant testing.
+    Generates a synthetic demonstration episode starting at (0, 0, 0) for instant testing.
     """
     ep_idx = len(EPISODES_DB)
     ep_dir = os.path.join(RECORDINGS_DIR, f"episode_{ep_idx:04d}")
@@ -201,33 +198,27 @@ async def generate_sample_recording(task: str = "reach to apple"):
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(video_path, fourcc, fps, (640, 480))
 
-    poses = trajectory_estimator.estimate_trajectory_from_imu([], num_video_frames=frame_count, video_fps=fps)
-    joint_states = []
+    ee_poses = trajectory_estimator.estimate_trajectory_from_imu([], num_video_frames=frame_count, video_fps=fps)
+    gripper_states = []
 
     for i in range(frame_count):
-        # Draw dynamic frame
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(frame, f"Task: {task}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
         cv2.putText(frame, f"Frame {i+1}/{frame_count}", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (129, 140, 248), 2)
         
-        # Draw moving target point
         cx = int(320 + 150 * np.sin(i * 0.05))
         cy = int(240 + 80 * np.cos(i * 0.05))
         cv2.circle(frame, (cx, cy), 20, (0, 255, 0) if "apple" in task else (0, 255, 255), -1)
         out.write(frame)
 
-        # Compute IK
-        phone_pose = poses[i]
-        arm_pose = ik_solver.map_phone_to_workspace(phone_pose)
-        gripper = 100.0 if i < 60 else 0.0
-        joints = ik_solver.inverse_kinematics(arm_pose, gripper_state=gripper)
-        joint_states.append(joints)
+        g = 100.0 if i < 60 else 10.0
+        gripper_states.append(g)
 
     out.release()
 
-    joint_states = np.array(joint_states)
-    actions = np.roll(joint_states, -1, axis=0)
-    actions[-1] = joint_states[-1]
+    ee_poses = np.array(ee_poses)
+    actions = np.roll(ee_poses, -1, axis=0)
+    actions[-1] = ee_poses[-1]
     timestamps = np.linspace(0, frame_count / fps, frame_count)
 
     episode_data = {
@@ -236,10 +227,13 @@ async def generate_sample_recording(task: str = "reach to apple"):
         'video_path': video_path,
         'video_url': f"/recordings/episode_{ep_idx:04d}/recording.mp4",
         'num_frames': frame_count,
-        'poses': poses.tolist() if isinstance(poses, np.ndarray) else poses,
-        'joint_states': joint_states.tolist() if isinstance(joint_states, np.ndarray) else joint_states,
-        'actions': actions.tolist() if isinstance(actions, np.ndarray) else actions,
-        'timestamps': timestamps.tolist() if isinstance(timestamps, np.ndarray) else timestamps,
+        'fps': fps,
+        'duration': frame_count / fps,
+        'ee_poses': ee_poses.tolist(),
+        'poses': ee_poses.tolist(),
+        'gripper_states': gripper_states,
+        'actions': actions.tolist(),
+        'timestamps': timestamps.tolist(),
         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -256,7 +250,7 @@ async def export_lerobot():
     if not EPISODES_DB:
         return JSONResponse({"status": "error", "message": "No episodes recorded yet."}, status_code=400)
 
-    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_so100_demo")
+    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_eef_trajectory_demo")
 
     return JSONResponse({
         "status": "success",
@@ -266,13 +260,10 @@ async def export_lerobot():
 
 @app.post("/api/isaac_lab/replay")
 async def replay_in_isaac_lab(episode_index: int = 0):
-    """
-    Triggers Isaac Lab simulation replay using C:\\Users\\SK\\miniconda3\\envs\\isaac_lab\\python.exe
-    """
     if not EPISODES_DB:
         return JSONResponse({"status": "error", "message": "No episodes to replay."}, status_code=400)
 
-    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_so100_demo")
+    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_eef_trajectory_demo")
     parquet_path = os.path.join(export_path, "data", "chunk-000", "file-000.parquet")
 
     isaac_python = r"C:\Users\SK\miniconda3\envs\isaac_lab\python.exe"
@@ -299,7 +290,7 @@ if __name__ == "__main__":
     local_ip = get_local_ip()
 
     print("\n" + "="*60)
-    print("LeRobot Mobile Trajectory Collector Server Started!")
+    print("LeRobot Mobile End-Effector Trajectory Collector Server Started!")
     print("="*60)
     print(f"Desktop Dashboard: http://localhost:8000")
     print(f"Phone Mobile URL:  http://{local_ip}:8000/mobile")

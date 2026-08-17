@@ -732,7 +732,7 @@
         let currentTrajectoryPoints = [];
         let totalPathLength = 0;
 
-        function buildTrajectoryGeometry(poses, joint_states) {
+        function buildTrajectoryGeometry(poses) {
             currentTrajectoryPoints = [];
             totalPathLength = 0;
 
@@ -741,7 +741,7 @@
                 waypointDotsGroup.remove(waypointDotsGroup.children[0]);
             }
 
-            const numPoints = joint_states ? joint_states.length : (poses ? poses.length : 0);
+            const numPoints = poses ? poses.length : 0;
             if (numPoints < 2) {
                 startBeacon.visible = false;
                 goalBeacon.visible = false;
@@ -749,23 +749,10 @@
             }
 
             for (let f = 0; f < numPoints; f++) {
-                let x, y, z;
-                if (joint_states && joint_states[f]) {
-                    const q = joint_states[f];
-                    const q0_rad = THREE.MathUtils.degToRad(q[0]);
-                    const q1_rad = THREE.MathUtils.degToRad(q[1]);
-                    const q2_rad = THREE.MathUtils.degToRad(q[2]);
-                    const r = 0.135 * Math.cos(q1_rad) + 0.140 * Math.cos(q1_rad + q2_rad);
-                    x = r * Math.cos(q0_rad);
-                    z = r * Math.sin(q0_rad);
-                    y = 0.115 + 0.135 * Math.sin(q1_rad) + 0.140 * Math.sin(q1_rad + q2_rad);
-                } else {
-                    x = 0.25 + poses[f][0] * 0.8;
-                    z = poses[f][1] * 0.8;
-                    y = 0.15 + poses[f][2] * 0.8;
-                }
-
-                const pt = new THREE.Vector3(x, y, z);
+                const p = poses[f];
+                // Pure relative position starting at (0,0,0)
+                // p[0]: X (Forward), p[1]: Y (Lateral), p[2]: Z (Height)
+                const pt = new THREE.Vector3(p[0], p[2], p[1]);
                 currentTrajectoryPoints.push(pt);
 
                 if (f > 0) {
@@ -775,9 +762,8 @@
 
             // Create Smooth 3D Spline Curve
             const curve = new THREE.CatmullRomCurve3(currentTrajectoryPoints);
-            const tubeGeo = new THREE.TubeGeometry(curve, 100, 0.0035, 12, false);
+            const tubeGeo = new THREE.TubeGeometry(curve, 100, 0.004, 12, false);
 
-            // Shader Material with Start-to-End Color Gradient (Green -> Cyan -> Purple)
             const tubeMat = new THREE.MeshStandardMaterial({
                 color: 0x38bdf8,
                 emissive: 0x0284c7,
@@ -789,16 +775,16 @@
             scene.add(trajectoryTube);
 
             // Add Waypoint Density Beads along the trajectory shape
-            const dotGeo = new THREE.SphereGeometry(0.0025, 8, 8);
+            const dotGeo = new THREE.SphereGeometry(0.003, 8, 8);
             const dotMat = new THREE.MeshBasicMaterial({ color: 0xa5b4fc });
-            for (let i = 0; i < currentTrajectoryPoints.length; i += 3) {
+            for (let i = 0; i < currentTrajectoryPoints.length; i += 2) {
                 const dot = new THREE.Mesh(dotGeo, dotMat);
                 dot.position.copy(currentTrajectoryPoints[i]);
                 waypointDotsGroup.add(dot);
             }
 
-            // Position Start & Goal Beacons
-            startBeacon.position.copy(currentTrajectoryPoints[0]);
+            // Position Start Beacon at Origin (0,0,0) & Goal Beacon at End
+            startBeacon.position.set(0, 0, 0);
             startBeacon.visible = true;
 
             goalBeacon.position.copy(currentTrajectoryPoints[currentTrajectoryPoints.length - 1]);
@@ -809,8 +795,8 @@
             currentTrajectoryPoints.forEach(p => center.add(p));
             center.divideScalar(currentTrajectoryPoints.length);
 
-            controls.target.copy(center);
-            camera.position.set(center.x + 0.25, center.y + 0.22, center.z + 0.32);
+            controls.target.set(center.x, Math.max(0.05, center.y), center.z);
+            camera.position.set(center.x + 0.25, center.y + 0.25, center.z + 0.35);
         }
 
         // ==========================================
@@ -834,23 +820,27 @@
             groundDisc.position.set(pt.x, 0.001, pt.z);
 
             // Retrieve Orientation & Gripper
-            let roll = 0, pitch = 0, yaw = 0, gripper = 50;
+            let p = [0, 0, 0, 0, 0, 0];
+            let gripper = 50;
             if (episodes[selectedEpIdx]) {
                 const ep = episodes[selectedEpIdx];
-                if (ep.joint_states && ep.joint_states[idx]) {
-                    const q = ep.joint_states[idx];
-                    yaw = q[0];
-                    pitch = q[1] + q[2] + q[3];
-                    roll = q[4];
-                    gripper = q[5];
+                if (ep.poses && ep.poses[idx]) {
+                    p = ep.poses[idx];
+                }
+                if (ep.gripper_states && ep.gripper_states[idx] !== undefined) {
+                    gripper = ep.gripper_states[idx];
                 }
             }
 
+            const rollDeg = THREE.MathUtils.radToDeg(p[3] || 0);
+            const pitchDeg = THREE.MathUtils.radToDeg(p[4] || 0);
+            const yawDeg = THREE.MathUtils.radToDeg(p[5] || 0);
+
             // Rotate End-Effector Tool Axes
             eeCursorGroup.rotation.set(
-                -THREE.MathUtils.degToRad(pitch),
-                THREE.MathUtils.degToRad(yaw),
-                THREE.MathUtils.degToRad(roll),
+                p[4] || 0,
+                p[5] || 0,
+                p[3] || 0,
                 'ZYX'
             );
 
@@ -859,18 +849,18 @@
             fingerLeft.position.x = -fingerOffset;
             fingerRight.position.x = fingerOffset;
 
-            // Update Telemetry Display
-            valX.innerText = `${(pt.x * 100).toFixed(1)} cm`;
-            valY.innerText = `${(pt.z * 100).toFixed(1)} cm`;
-            valZ.innerText = `${(pt.y * 100).toFixed(1)} cm`;
-            valRPY.innerText = `${roll.toFixed(0)}°, ${pitch.toFixed(0)}°, ${yaw.toFixed(0)}°`;
+            // Update Telemetry Display (in cm from (0,0,0))
+            valX.innerText = `${p[0] >= 0 ? '+' : ''}${(p[0] * 100).toFixed(1)} cm`;
+            valY.innerText = `${p[1] >= 0 ? '+' : ''}${(p[1] * 100).toFixed(1)} cm`;
+            valZ.innerText = `${p[2] >= 0 ? '+' : ''}${(p[2] * 100).toFixed(1)} cm`;
+            valRPY.innerText = `${rollDeg.toFixed(0)}°, ${pitchDeg.toFixed(0)}°, ${yawDeg.toFixed(0)}°`;
             valDist.innerText = `${(totalPathLength * 100).toFixed(1)} cm`;
             valGrip.innerText = `${gripper.toFixed(0)}%`;
 
-            barX.style.width = `${Math.min(100, Math.max(0, (pt.x / 0.4) * 100))}%`;
-            barY.style.width = `${Math.min(100, Math.max(0, ((pt.z + 0.2) / 0.4) * 100))}%`;
-            barZ.style.width = `${Math.min(100, Math.max(0, (pt.y / 0.35) * 100))}%`;
-            barRPY.style.width = `75%`;
+            barX.style.width = `${Math.min(100, Math.max(0, (Math.abs(p[0]) / 0.3) * 100))}%`;
+            barY.style.width = `${Math.min(100, Math.max(0, (Math.abs(p[1]) / 0.2) * 100))}%`;
+            barZ.style.width = `${Math.min(100, Math.max(0, (Math.abs(p[2]) / 0.2) * 100))}%`;
+            barRPY.style.width = `80%`;
             barDist.style.width = `100%`;
             barGrip.style.width = `${Math.min(100, Math.max(0, gripper))}%`;
         }
@@ -943,8 +933,8 @@
             timelineSlider.value = 0;
             currentFrame = 0;
 
-            // Reconstruct 3D End-Effector Trajectory Path
-            buildTrajectoryGeometry(ep.poses, ep.joint_states);
+            // Reconstruct 3D End-Effector Trajectory Path starting at (0, 0, 0)
+            buildTrajectoryGeometry(ep.poses || ep.ee_poses);
             updateEndEffectorPose(0);
             syncFrameUI();
         }
