@@ -310,8 +310,9 @@
     </div>
 
     <script>
-        // Set local IP text
-        document.getElementById('mobileUrlText').innerText = `http://${window.location.hostname}:8000/mobile`;
+        // Set local IP text with current protocol (https if available)
+        const proto = window.location.protocol === 'https:' ? 'https:' : 'https:';
+        document.getElementById('mobileUrlText').innerText = `${proto}//${window.location.hostname}:8000/mobile`;
 
         let episodes = [];
         let selectedEpIdx = -1;

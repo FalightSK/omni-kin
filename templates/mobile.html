@@ -25,9 +25,9 @@
 
         /* Glassmorphism Header */
         header {
-            background: rgba(17, 24, 39, 0.7);
+            background: rgba(17, 24, 39, 0.85);
             backdrop-filter: blur(12px);
-            padding: 14px 20px;
+            padding: 12px 18px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -50,7 +50,7 @@
         }
 
         h1 {
-            font-size: 1.1rem;
+            font-size: 1.05rem;
             font-weight: 700;
             background: linear-gradient(135deg, #a5b4fc 0%, #c084fc 100%);
             -webkit-background-clip: text;
@@ -61,10 +61,29 @@
             background: rgba(99, 102, 241, 0.15);
             color: #818cf8;
             border: 1px solid rgba(99, 102, 241, 0.3);
-            padding: 4px 10px;
+            padding: 3px 8px;
             border-radius: 20px;
-            font-size: 0.75rem;
+            font-size: 0.72rem;
             font-weight: 600;
+        }
+
+        /* SSL Warning Banner */
+        .ssl-banner {
+            display: none;
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            color: #111827;
+            padding: 10px 14px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            text-align: center;
+            z-index: 20;
+        }
+
+        .ssl-banner a {
+            color: #000;
+            text-decoration: underline;
+            font-weight: 700;
+            margin-left: 6px;
         }
 
         /* Camera Viewport */
@@ -87,29 +106,30 @@
         /* Overlays */
         .hud-overlay {
             position: absolute;
-            top: 16px;
-            left: 16px;
-            right: 16px;
+            top: 12px;
+            left: 12px;
+            right: 12px;
             display: flex;
             justify-content: space-between;
             pointer-events: none;
+            z-index: 5;
         }
 
         .hud-card {
-            background: rgba(15, 23, 42, 0.75);
+            background: rgba(15, 23, 42, 0.8);
             backdrop-filter: blur(8px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            padding: 8px 14px;
-            border-radius: 12px;
-            font-size: 0.8rem;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            padding: 6px 12px;
+            border-radius: 10px;
+            font-size: 0.75rem;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
         }
 
         .rec-dot {
-            width: 10px;
-            height: 10px;
+            width: 8px;
+            height: 8px;
             background: #ef4444;
             border-radius: 50%;
             opacity: 0.3;
@@ -125,15 +145,53 @@
             to { opacity: 1; box-shadow: 0 0 10px #ef4444; }
         }
 
-        /* Controls Section */
-        .controls-panel {
-            background: rgba(15, 23, 42, 0.9);
+        /* Permission Prompt Overlay */
+        .permission-card {
+            position: absolute;
+            background: rgba(15, 23, 42, 0.92);
             backdrop-filter: blur(16px);
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-            padding: 20px 20px 28px 20px;
+            border: 1px solid rgba(99, 102, 241, 0.4);
+            border-radius: 16px;
+            padding: 20px;
+            margin: 20px;
+            text-align: center;
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 12px;
+            z-index: 15;
+        }
+
+        .permission-card h3 {
+            font-size: 1rem;
+            color: #e0e7ff;
+        }
+
+        .permission-card p {
+            font-size: 0.8rem;
+            color: #94a3b8;
+            line-height: 1.4;
+        }
+
+        .btn-grant {
+            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+            color: white;
+            border: none;
+            padding: 12px 18px;
+            border-radius: 12px;
+            font-weight: 700;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+
+        /* Controls Section */
+        .controls-panel {
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 16px 18px 24px 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
             z-index: 10;
         }
 
@@ -144,7 +202,7 @@
         }
 
         label {
-            font-size: 0.75rem;
+            font-size: 0.72rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             color: #9ca3af;
@@ -161,25 +219,19 @@
             background: rgba(30, 41, 59, 0.8);
             border: 1px solid rgba(255, 255, 255, 0.12);
             color: #fff;
-            padding: 12px 14px;
-            border-radius: 12px;
-            font-size: 0.95rem;
+            padding: 10px 12px;
+            border-radius: 10px;
+            font-size: 0.9rem;
             outline: none;
-            transition: all 0.2s;
-        }
-
-        select:focus, input[type="text"]:focus {
-            border-color: #6366f1;
-            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
         }
 
         .rec-button {
             background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
             color: white;
             border: none;
-            padding: 16px;
-            border-radius: 16px;
-            font-size: 1.05rem;
+            padding: 14px;
+            border-radius: 14px;
+            font-size: 1rem;
             font-weight: 700;
             display: flex;
             align-items: center;
@@ -187,11 +239,6 @@
             gap: 10px;
             box-shadow: 0 4px 20px rgba(239, 68, 68, 0.4);
             cursor: pointer;
-            transition: transform 0.1s, box-shadow 0.2s;
-        }
-
-        .rec-button:active {
-            transform: scale(0.98);
         }
 
         .rec-button.recording {
@@ -200,24 +247,51 @@
         }
 
         .status-banner {
-            font-size: 0.8rem;
+            font-size: 0.78rem;
             text-align: center;
             color: #94a3b8;
+        }
+
+        /* Native File Capture */
+        .native-capture-btn {
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px dashed rgba(255, 255, 255, 0.2);
+            color: #cbd5e1;
+            padding: 8px 12px;
+            border-radius: 10px;
+            font-size: 0.78rem;
+            text-align: center;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
         }
     </style>
 </head>
 <body>
+
+    <div class="ssl-banner" id="sslBanner">
+        🔒 Mobile Camera requires HTTPS. <a id="httpsLink" href="#">Switch to HTTPS</a>
+    </div>
 
     <header>
         <div class="brand">
             <div class="brand-dot"></div>
             <h1>LeRobot Collector</h1>
         </div>
-        <div class="badge">SO-100 Embodiment</div>
+        <div class="badge">SO-100</div>
     </header>
 
     <div class="viewport-container">
         <video id="cameraPreview" autoplay playsinline muted></video>
+
+        <!-- Permission Prompt (if camera not started yet) -->
+        <div class="permission-card" id="permCard">
+            <h3>📷 Camera & Sensor Access</h3>
+            <p>Tap below to start the camera and high-frequency motion tracking.</p>
+            <button class="btn-grant" id="grantBtn">START CAMERA</button>
+        </div>
         
         <div class="hud-overlay">
             <div class="hud-card">
@@ -240,22 +314,29 @@
                     <option value="pick up cup">pick up cup</option>
                     <option value="custom">Custom...</option>
                 </select>
-                <input type="text" id="customInstruction" placeholder="Enter custom task..." style="display: none;">
+                <input type="text" id="customInstruction" placeholder="Enter task..." style="display: none;">
             </div>
         </div>
 
         <button class="rec-button" id="recordBtn">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
                 <circle cx="12" cy="12" r="8"/>
             </svg>
             <span id="btnText">START RECORDING</span>
         </button>
+
+        <label class="native-capture-btn">
+            <span>📷 Or Record with Native Camera App</span>
+            <input type="file" id="nativeVideoInput" accept="video/*" capture="environment" style="display: none;">
+        </label>
 
         <div class="status-banner" id="statusText">Ready to capture demonstration</div>
     </div>
 
     <script>
         const cameraPreview = document.getElementById('cameraPreview');
+        const permCard = document.getElementById('permCard');
+        const grantBtn = document.getElementById('grantBtn');
         const recordBtn = document.getElementById('recordBtn');
         const btnText = document.getElementById('btnText');
         const recDot = document.getElementById('recDot');
@@ -264,6 +345,9 @@
         const statusText = document.getElementById('statusText');
         const presetInstruction = document.getElementById('presetInstruction');
         const customInstruction = document.getElementById('customInstruction');
+        const nativeVideoInput = document.getElementById('nativeVideoInput');
+        const sslBanner = document.getElementById('sslBanner');
+        const httpsLink = document.getElementById('httpsLink');
 
         let mediaRecorder = null;
         let recordedChunks = [];
@@ -275,35 +359,64 @@
         let imuCount = 0;
         let imuRateInterval = null;
 
+        // Check if accessed over HTTP on mobile
+        if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+            sslBanner.style.display = 'block';
+            httpsLink.href = 'https://' + location.hostname + ':8000' + location.pathname;
+        }
+
         // Custom instruction toggle
         presetInstruction.addEventListener('change', (e) => {
-            if (e.target.value === 'custom') {
-                customInstruction.style.display = 'block';
-            } else {
-                customInstruction.style.display = 'none';
-            }
+            customInstruction.style.display = e.target.value === 'custom' ? 'block' : 'none';
         });
 
         // Initialize Camera
-        async function initCamera() {
+        async function startCamera() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
+                // Request iOS 13+ motion permission if available
+                if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                    try {
+                        const perm = await DeviceMotionEvent.requestPermission();
+                        console.log("DeviceMotion permission:", perm);
+                    } catch (e) {
+                        console.log("Motion permission notice:", e);
+                    }
+                }
+
+                const constraints = {
+                    video: {
+                        facingMode: { ideal: 'environment' },
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    },
                     audio: false
-                });
+                };
+
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 cameraPreview.srcObject = stream;
+                cameraPreview.play();
+                permCard.style.display = 'none';
+                statusText.innerText = "Camera active & ready to record.";
+                initIMU();
             } catch (err) {
-                console.error("Camera access error:", err);
-                statusText.innerText = "Camera access denied or unverified.";
+                console.error("Camera error:", err);
+                statusText.innerText = "Camera error: " + (err.message || err.name);
+                if (location.protocol !== 'https:') {
+                    statusText.innerText = "⚠️ Please use HTTPS for mobile camera access!";
+                    sslBanner.style.display = 'block';
+                }
             }
         }
+
+        grantBtn.addEventListener('click', startCamera);
 
         // Initialize IMU listeners
         function initIMU() {
             if (window.DeviceMotionEvent) {
                 window.addEventListener('devicemotion', (event) => {
-                    if (!isRecording) return;
                     imuCount++;
+                    if (!isRecording) return;
+                    
                     const acc = event.accelerationIncludingGravity || { x: 0, y: 0, z: 9.81 };
                     const rot = event.rotationRate || { alpha: 0, beta: 0, gamma: 0 };
                     
@@ -322,10 +435,21 @@
                     imuData[lastIdx].orientation = [event.alpha || 0, event.beta || 0, event.gamma || 0];
                 });
             }
+
+            if (!imuRateInterval) {
+                imuRateInterval = setInterval(() => {
+                    imuHz.innerText = imuCount;
+                    imuCount = 0;
+                }, 1000);
+            }
         }
 
         // Recording logic
         recordBtn.addEventListener('click', async () => {
+            if (!cameraPreview.srcObject) {
+                await startCamera();
+                return;
+            }
             if (!isRecording) {
                 startRecording();
             } else {
@@ -334,35 +458,33 @@
         });
 
         async function startRecording() {
-            // Permission request for iOS 13+
-            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-                try {
-                    await DeviceMotionEvent.requestPermission();
-                } catch (e) {
-                    console.log("DeviceMotion permission:", e);
-                }
-            }
-
             const stream = cameraPreview.srcObject;
             if (!stream) return;
 
             recordedChunks = [];
             imuData = [];
-            imuCount = 0;
             isRecording = true;
             startTime = Date.now();
 
-            mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+            let options = { mimeType: 'video/webm' };
+            if (!MediaRecorder.isTypeSupported('video/webm')) {
+                if (MediaRecorder.isTypeSupported('video/mp4')) {
+                    options = { mimeType: 'video/mp4' };
+                } else {
+                    options = {};
+                }
+            }
+
+            mediaRecorder = new MediaRecorder(stream, options);
             mediaRecorder.ondataavailable = (e) => {
                 if (e.data.size > 0) recordedChunks.push(e.data);
             };
             mediaRecorder.start(30);
 
-            // UI updates
             recDot.classList.add('active');
             recordBtn.classList.add('recording');
             btnText.innerText = "STOP RECORDING";
-            statusText.innerText = "Recording trajectory & IMU data...";
+            statusText.innerText = "Recording demonstration trajectory...";
 
             timerInterval = setInterval(() => {
                 const elapsed = (Date.now() - startTime) / 1000.0;
@@ -370,57 +492,66 @@
                 const secs = (elapsed % 60).toFixed(1).padStart(4, '0');
                 recTime.innerText = `${mins}:${secs}`;
             }, 100);
-
-            imuRateInterval = setInterval(() => {
-                imuHz.innerText = imuCount;
-                imuCount = 0;
-            }, 1000);
         }
 
         async function stopRecording() {
             isRecording = false;
             clearInterval(timerInterval);
-            clearInterval(imuRateInterval);
 
             recDot.classList.remove('active');
             recordBtn.classList.remove('recording');
             btnText.innerText = "SAVING...";
-            statusText.innerText = "Uploading & processing trajectory...";
+            statusText.innerText = "Processing trajectory...";
 
             mediaRecorder.stop();
 
             mediaRecorder.onstop = async () => {
-                const blob = new Blob(recordedChunks, { type: 'video/webm' });
-                const task = presetInstruction.value === 'custom' ? customInstruction.value : presetInstruction.value;
-
-                const formData = new FormData();
-                formData.append('video', blob, 'recording.webm');
-                formData.append('imu_data', JSON.stringify(imuData));
-                formData.append('task', task);
-
-                try {
-                    const response = await fetch('/api/recordings/save', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    const res = await response.json();
-                    if (res.status === 'success') {
-                        statusText.innerText = `Saved Episode #${res.episode_index}! Task: "${res.task}"`;
-                    } else {
-                        statusText.innerText = "Error saving recording.";
-                    }
-                } catch (err) {
-                    console.error("Upload error:", err);
-                    statusText.innerText = "Upload failed.";
-                }
-
+                const blob = new Blob(recordedChunks, { type: recordedChunks[0]?.type || 'video/webm' });
+                await uploadRecording(blob, imuData);
                 btnText.innerText = "START RECORDING";
             };
         }
 
+        // Native Video File Capture Fallback
+        nativeVideoInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            statusText.innerText = "Uploading native video recording...";
+            await uploadRecording(file, []);
+        });
+
+        async function uploadRecording(videoBlob, imuList) {
+            const task = presetInstruction.value === 'custom' ? customInstruction.value : presetInstruction.value;
+
+            const formData = new FormData();
+            formData.append('video', videoBlob, 'recording.mp4');
+            formData.append('imu_data', JSON.stringify(imuList));
+            formData.append('task', task);
+
+            try {
+                const response = await fetch('/api/recordings/save', {
+                    method: 'POST',
+                    body: formData
+                });
+                const res = await response.json();
+                if (res.status === 'success') {
+                    statusText.innerText = `✅ Saved Episode #${res.episode_index}! Task: "${res.task}"`;
+                } else {
+                    statusText.innerText = "Error saving recording.";
+                }
+            } catch (err) {
+                console.error("Upload error:", err);
+                statusText.innerText = "Upload failed: " + err.message;
+            }
+        }
+
         window.onload = () => {
-            initCamera();
             initIMU();
+            // Try auto-starting if secure
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                startCamera();
+            }
         };
     </script>
 </body>
