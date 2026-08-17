@@ -8,6 +8,7 @@ import sys
 import time
 import json
 import socket
+import shutil
 import numpy as np
 import cv2
 
@@ -66,6 +67,36 @@ async def mobile_page(request: Request):
 @app.get("/api/episodes")
 async def get_episodes():
     return JSONResponse(EPISODES_DB)
+
+@app.delete("/api/episodes/{episode_index}")
+async def delete_episode(episode_index: int):
+    global EPISODES_DB
+    found = False
+    new_db = []
+    for ep in EPISODES_DB:
+        if ep['episode_index'] == episode_index:
+            found = True
+            if os.path.exists(ep.get('video_path', '')):
+                ep_dir = os.path.dirname(ep['video_path'])
+                if os.path.exists(ep_dir):
+                    shutil.rmtree(ep_dir, ignore_errors=True)
+        else:
+            new_db.append(ep)
+    
+    EPISODES_DB = new_db
+    if not found:
+        return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+    return JSONResponse({"status": "success", "message": f"Episode #{episode_index} deleted", "remaining": len(EPISODES_DB)})
+
+@app.post("/api/episodes/clear")
+async def clear_all_episodes():
+    global EPISODES_DB
+    for ep in EPISODES_DB:
+        if os.path.exists(ep.get('video_path', '')):
+            ep_dir = os.path.dirname(ep['video_path'])
+            shutil.rmtree(ep_dir, ignore_errors=True)
+    EPISODES_DB = []
+    return JSONResponse({"status": "success", "message": "All episodes cleared"})
 
 @app.post("/api/recordings/save")
 async def save_recording(

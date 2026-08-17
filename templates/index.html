@@ -4,8 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LeRobot Mobile Trajectory Dashboard</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <style>
         * {
             box-sizing: border-box;
@@ -15,29 +16,31 @@
         }
 
         body {
-            background-color: #090d16;
+            background-color: #070a12;
             color: #f1f5f9;
             min-height: 100vh;
             display: flex;
             flex-direction: column;
+            overflow-x: hidden;
         }
 
         /* Navbar */
         nav {
-            background: rgba(15, 23, 42, 0.8);
+            background: rgba(15, 23, 42, 0.85);
             backdrop-filter: blur(16px);
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            padding: 16px 32px;
+            padding: 14px 28px;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            z-index: 10;
         }
 
         .logo {
             display: flex;
             align-items: center;
-            gap: 12px;
-            font-size: 1.25rem;
+            gap: 10px;
+            font-size: 1.2rem;
             font-weight: 700;
             background: linear-gradient(135deg, #818cf8 0%, #c084fc 100%);
             -webkit-background-clip: text;
@@ -58,7 +61,7 @@
             border: 1px solid rgba(99, 102, 241, 0.3);
             padding: 6px 14px;
             border-radius: 20px;
-            font-size: 0.85rem;
+            font-size: 0.82rem;
             color: #a5b4fc;
             display: flex;
             align-items: center;
@@ -67,22 +70,22 @@
 
         .nav-actions {
             display: flex;
-            gap: 12px;
+            gap: 10px;
         }
 
         .btn {
             background: rgba(255, 255, 255, 0.08);
             border: 1px solid rgba(255, 255, 255, 0.12);
             color: white;
-            padding: 10px 18px;
+            padding: 8px 16px;
             border-radius: 12px;
             font-weight: 600;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             cursor: pointer;
             transition: all 0.2s;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
         }
 
         .btn:hover {
@@ -99,13 +102,23 @@
             box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6);
         }
 
+        .btn-danger {
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #f87171;
+        }
+
+        .btn-danger:hover {
+            background: rgba(239, 68, 68, 0.25);
+        }
+
         /* Main Grid Layout */
         .container {
             flex: 1;
-            padding: 24px 32px;
+            padding: 20px 28px;
             display: grid;
             grid-template-columns: 1fr 380px;
-            gap: 24px;
+            gap: 20px;
         }
 
         /* Cards */
@@ -113,11 +126,11 @@
             background: rgba(15, 23, 42, 0.6);
             backdrop-filter: blur(12px);
             border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 20px;
-            padding: 20px;
+            border-radius: 18px;
+            padding: 18px;
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 14px;
         }
 
         .card-header {
@@ -127,7 +140,7 @@
         }
 
         .card-title {
-            font-size: 1rem;
+            font-size: 0.95rem;
             font-weight: 600;
             color: #cbd5e1;
             display: flex;
@@ -135,29 +148,151 @@
             gap: 8px;
         }
 
-        /* 3D Canvas */
-        #canvas3d {
+        /* 3D Canvas Container */
+        .viewport-wrapper {
+            position: relative;
             width: 100%;
-            height: 380px;
+            height: 420px;
             border-radius: 14px;
             overflow: hidden;
-            background: #050811;
+            background: #040711;
+        }
+
+        #canvas3d {
+            width: 100%;
+            height: 100%;
+        }
+
+        .canvas-overlay-hint {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            background: rgba(15, 23, 42, 0.75);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 4px 10px;
+            border-radius: 8px;
+            font-size: 0.72rem;
+            color: #94a3b8;
+            pointer-events: none;
+        }
+
+        /* Playback Timeline Controls */
+        .playback-controls {
+            background: rgba(30, 41, 59, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 14px;
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .btn-play {
+            width: 38px;
+            height: 38px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+            border: none;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+
+        .btn-play:active {
+            transform: scale(0.95);
+        }
+
+        .slider-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .slider-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            color: #94a3b8;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.15);
+            outline: none;
+            cursor: pointer;
+            accent-color: #6366f1;
+        }
+
+        /* Joint Telemetry Gauges */
+        .joint-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+        }
+
+        .joint-box {
+            background: rgba(30, 41, 59, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 12px;
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .joint-name {
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #94a3b8;
+        }
+
+        .joint-val {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #818cf8;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .joint-bar-bg {
+            width: 100%;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 2px;
+        }
+
+        .joint-bar-fill {
+            height: 100%;
+            background: #6366f1;
+            width: 50%;
+            transition: width 0.05s ease-out;
         }
 
         /* Episode List */
         .episode-list {
             display: flex;
             flex-direction: column;
-            gap: 12px;
-            max-height: 400px;
+            gap: 10px;
+            max-height: 380px;
             overflow-y: auto;
+            padding-right: 4px;
         }
 
         .episode-item {
             background: rgba(30, 41, 59, 0.4);
             border: 1px solid rgba(255, 255, 255, 0.06);
             border-radius: 14px;
-            padding: 14px 16px;
+            padding: 12px 14px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -170,20 +305,21 @@
             border-color: rgba(99, 102, 241, 0.4);
         }
 
-        .ep-info {
+        .ep-left {
             display: flex;
             flex-direction: column;
             gap: 4px;
+            flex: 1;
         }
 
         .ep-title {
             font-weight: 600;
-            font-size: 0.95rem;
+            font-size: 0.9rem;
             color: #f8fafc;
         }
 
         .ep-task {
-            font-size: 0.8rem;
+            font-size: 0.75rem;
             color: #a5b4fc;
             background: rgba(99, 102, 241, 0.15);
             padding: 2px 8px;
@@ -192,35 +328,59 @@
         }
 
         .ep-meta {
-            font-size: 0.75rem;
+            font-size: 0.72rem;
             color: #64748b;
         }
 
-        /* Modal / Stats Panel */
+        .ep-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-del {
+            background: rgba(239, 68, 68, 0.12);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            color: #f87171;
+            width: 30px;
+            height: 30px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .btn-del:hover {
+            background: rgba(239, 68, 68, 0.3);
+            transform: scale(1.05);
+        }
+
         .stat-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
+            gap: 10px;
         }
 
         .stat-box {
             background: rgba(30, 41, 59, 0.5);
             border: 1px solid rgba(255, 255, 255, 0.06);
             border-radius: 12px;
-            padding: 12px;
+            padding: 10px;
             display: flex;
             flex-direction: column;
-            gap: 4px;
+            gap: 2px;
         }
 
         .stat-val {
-            font-size: 1.3rem;
+            font-size: 1.2rem;
             font-weight: 700;
             color: #818cf8;
         }
 
         .stat-lbl {
-            font-size: 0.75rem;
+            font-size: 0.72rem;
             color: #94a3b8;
             text-transform: uppercase;
         }
@@ -235,44 +395,99 @@
         </div>
 
         <div class="mobile-url-card">
-            <span>📱 Mobile App URL:</span>
-            <strong id="mobileUrlText">http://<span id="localIp">localhost</span>:8000/mobile</strong>
+            <span>📱 Mobile URL:</span>
+            <strong id="mobileUrlText">http://localhost:8000/mobile</strong>
         </div>
 
         <div class="nav-actions">
-            <button class="btn" id="addSampleBtn">⚡ Generate Sample Recording</button>
-            <button class="btn" id="isaacBtn" style="border-color: #818cf8; color: #a5b4fc;">🎮 Replay in Isaac Lab</button>
-            <button class="btn btn-primary" id="exportBtn">📦 Export LeRobot Dataset</button>
+            <button class="btn" id="addSampleBtn">⚡ Sample Demo</button>
+            <button class="btn" id="isaacBtn" style="border-color: #818cf8; color: #a5b4fc;">🎮 Isaac Lab</button>
+            <button class="btn btn-primary" id="exportBtn">📦 Export LeRobot</button>
         </div>
     </nav>
 
     <div class="container">
-        <!-- Left: 3D Visualization & Video Player -->
-        <div style="display: flex; flex-direction: column; gap: 24px;">
+        <!-- Left: 3D Robot Arm Visualization & Video Sync -->
+        <div style="display: flex; flex-direction: column; gap: 16px;">
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">
                         <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-                        3D Trajectory & SO-100 Kinematics Preview
+                        SO-100 Robot Arm 3D Articulation View
                     </div>
                     <span style="font-size: 0.8rem; color: #94a3b8;" id="activeEpText">No episode selected</span>
                 </div>
-                <div id="canvas3d"></div>
+
+                <div class="viewport-wrapper">
+                    <div id="canvas3d"></div>
+                    <div class="canvas-overlay-hint">🖱️ Drag to rotate • Scroll to zoom • Right-click to pan</div>
+                </div>
+
+                <!-- Timeline / Playback Slider -->
+                <div class="playback-controls">
+                    <button class="btn-play" id="playBtn">
+                        <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24" id="playIcon">
+                            <polygon points="5 3 19 12 5 21 5 3"/>
+                        </svg>
+                    </button>
+                    <div class="slider-wrapper">
+                        <div class="slider-header">
+                            <span>TIMELINE FRAME</span>
+                            <span id="frameCounter">0 / 0 (0.00s)</span>
+                        </div>
+                        <input type="range" id="timelineSlider" min="0" max="0" value="0">
+                    </div>
+                </div>
+
+                <!-- Live Joint Angle Telemetry Gauges -->
+                <div class="joint-grid">
+                    <div class="joint-box">
+                        <div class="joint-name">q0 Base Yaw</div>
+                        <div class="joint-val" id="j0Val">0.0°</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j0Bar"></div></div>
+                    </div>
+                    <div class="joint-box">
+                        <div class="joint-name">q1 Shoulder</div>
+                        <div class="joint-val" id="j1Val">0.0°</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j1Bar"></div></div>
+                    </div>
+                    <div class="joint-box">
+                        <div class="joint-name">q2 Elbow</div>
+                        <div class="joint-val" id="j2Val">0.0°</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j2Bar"></div></div>
+                    </div>
+                    <div class="joint-box">
+                        <div class="joint-name">q3 Wrist Pitch</div>
+                        <div class="joint-val" id="j3Val">0.0°</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j3Bar"></div></div>
+                    </div>
+                    <div class="joint-box">
+                        <div class="joint-name">q4 Wrist Roll</div>
+                        <div class="joint-val" id="j4Val">0.0°</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j4Bar"></div></div>
+                    </div>
+                    <div class="joint-box">
+                        <div class="joint-name">Gripper Jaw</div>
+                        <div class="joint-val" id="j5Val">50%</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="j5Bar"></div></div>
+                    </div>
+                </div>
             </div>
 
+            <!-- Video Recording Card -->
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">
                         <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
-                        Camera Stream Recording
+                        Synchronized Video Demonstration
                     </div>
                 </div>
-                <video id="episodeVideo" controls style="width: 100%; height: 240px; background: #000; border-radius: 12px;"></video>
+                <video id="episodeVideo" controls style="width: 100%; height: 220px; background: #000; border-radius: 12px;"></video>
             </div>
         </div>
 
         <!-- Right: Episode Manager & Export Panel -->
-        <div style="display: flex; flex-direction: column; gap: 24px;">
+        <div style="display: flex; flex-direction: column; gap: 16px;">
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">Dataset Summary</div>
@@ -299,8 +514,11 @@
 
             <div class="card" style="flex: 1;">
                 <div class="card-header">
-                    <div class="card-title">Episodes List</div>
-                    <button class="btn" style="padding: 4px 10px; font-size: 0.75rem;" id="refreshBtn">Refresh</button>
+                    <div class="card-title">Recorded Episodes</div>
+                    <div style="display: flex; gap: 6px;">
+                        <button class="btn btn-danger" style="padding: 3px 8px; font-size: 0.72rem;" id="clearAllBtn">Clear All</button>
+                        <button class="btn" style="padding: 3px 8px; font-size: 0.72rem;" id="refreshBtn">Refresh</button>
+                    </div>
                 </div>
                 <div class="episode-list" id="epList">
                     <!-- Dynamic episode items -->
@@ -310,58 +528,249 @@
     </div>
 
     <script>
-        // Set local IP text with current protocol (https if available)
-        const proto = window.location.protocol === 'https:' ? 'https:' : 'https:';
-        document.getElementById('mobileUrlText').innerText = `${proto}//${window.location.hostname}:8000/mobile`;
+        document.getElementById('mobileUrlText').innerText = `http://${window.location.hostname}:8000/mobile`;
 
         let episodes = [];
         let selectedEpIdx = -1;
+        let isPlaying = false;
+        let playInterval = null;
+        let currentFrame = 0;
 
-        // Three.js 3D Viewport Setup
-        const canvasContainer = document.getElementById('canvas3d');
+        // UI Element References
+        const playBtn = document.getElementById('playBtn');
+        const playIcon = document.getElementById('playIcon');
+        const timelineSlider = document.getElementById('timelineSlider');
+        const frameCounter = document.getElementById('frameCounter');
+        const episodeVideo = document.getElementById('episodeVideo');
+
+        // Telemetry Gauge elements
+        const j0Val = document.getElementById('j0Val');
+        const j1Val = document.getElementById('j1Val');
+        const j2Val = document.getElementById('j2Val');
+        const j3Val = document.getElementById('j3Val');
+        const j4Val = document.getElementById('j4Val');
+        const j5Val = document.getElementById('j5Val');
+
+        const j0Bar = document.getElementById('j0Bar');
+        const j1Bar = document.getElementById('j1Bar');
+        const j2Bar = document.getElementById('j2Bar');
+        const j3Bar = document.getElementById('j3Bar');
+        const j4Bar = document.getElementById('j4Bar');
+        const j5Bar = document.getElementById('j5Bar');
+
+        // ==========================================
+        // 1. THREE.JS 3D ARTICULATED SO-100 ROBOT ARM
+        // ==========================================
+        const container = document.getElementById('canvas3d');
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x050811);
+        scene.background = new THREE.Color(0x040711);
 
-        const camera = new THREE.PerspectiveCamera(45, canvasContainer.clientWidth / canvasContainer.clientHeight, 0.1, 100);
-        camera.position.set(0.6, 0.5, 0.6);
-        camera.lookAt(0, 0.1, 0);
+        const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.05, 50);
+        camera.position.set(0.45, 0.35, 0.45);
+        camera.lookAt(0.12, 0.12, 0);
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
-        renderer.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight);
-        canvasContainer.appendChild(renderer.domElement);
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        renderer.shadowMap.enabled = true;
+        container.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.target.set(0.12, 0.12, 0);
 
         // Lighting & Grid
-        const grid = new THREE.GridHelper(1.0, 20, 0x334155, 0x1e293b);
+        const grid = new THREE.GridHelper(1.2, 24, 0x334155, 0x1e293b);
+        grid.position.y = 0;
         scene.add(grid);
 
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
         scene.add(ambientLight);
-        const dirLight = new THREE.DirectionalLight(0x818cf8, 0.8);
-        dirLight.position.set(1, 2, 1);
-        scene.add(dirLight);
 
-        // Robot Arm Base Mesh (SO-100 Base)
-        const baseGeo = new THREE.CylinderGeometry(0.06, 0.08, 0.04, 16);
-        const baseMat = new THREE.MeshStandardMaterial({ color: 0x475569 });
-        const robotBase = new THREE.Mesh(baseGeo, baseMat);
-        robotBase.position.set(0, 0.02, 0);
-        scene.add(robotBase);
+        const keyLight = new THREE.DirectionalLight(0x818cf8, 1.0);
+        keyLight.position.set(1.5, 2.5, 1.5);
+        scene.add(keyLight);
 
-        // Trajectory Line Mesh
+        const fillLight = new THREE.DirectionalLight(0xc084fc, 0.5);
+        fillLight.position.set(-1.5, 1.0, -1.0);
+        scene.add(fillLight);
+
+        // Materials
+        const darkMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.6, roughness: 0.3 });
+        const cyanMat = new THREE.MeshStandardMaterial({ color: 0x6366f1, metalness: 0.5, roughness: 0.3 });
+        const accentMat = new THREE.MeshStandardMaterial({ color: 0x818cf8, metalness: 0.7, roughness: 0.2 });
+        const gripperMat = new THREE.MeshStandardMaterial({ color: 0x10b981, metalness: 0.4, roughness: 0.4 });
+
+        // Build Kinematic Joint Hierarchy for SO-100:
+        // Base -> Joint0 (Yaw) -> Shoulder -> Joint1 (Pitch) -> UpperArm -> Joint2 (Pitch) -> Forearm -> Joint3 (Pitch) -> Wrist -> Joint4 (Roll) -> Gripper
+
+        // 1. Robot Base
+        const baseMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.075, 0.035, 24), darkMat);
+        baseMesh.position.y = 0.0175;
+        scene.add(baseMesh);
+
+        // Joint 0: Base Yaw Group
+        const joint0Group = new THREE.Group();
+        joint0Group.position.y = 0.035;
+        scene.add(joint0Group);
+
+        const rotatingTurret = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.055, 0.04, 20), darkMat);
+        rotatingTurret.position.y = 0.02;
+        joint0Group.add(rotatingTurret);
+
+        // Joint 1: Shoulder Pitch Group (Height L1 = 0.115m)
+        const joint1Group = new THREE.Group();
+        joint1Group.position.y = 0.08; // Base of shoulder pivot
+        joint0Group.add(joint1Group);
+
+        const shoulderPivot = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.05, 16), accentMat);
+        shoulderPivot.rotation.x = Math.PI / 2;
+        joint1Group.add(shoulderPivot);
+
+        // Upper Arm Link (L2 = 0.135m)
+        const upperArmGroup = new THREE.Group();
+        joint1Group.add(upperArmGroup);
+
+        const upperArmMesh = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.135, 0.035), cyanMat);
+        upperArmMesh.position.y = 0.135 / 2;
+        upperArmGroup.add(upperArmMesh);
+
+        // Joint 2: Elbow Pitch Group (L2 = 0.135m above shoulder)
+        const joint2Group = new THREE.Group();
+        joint2Group.position.y = 0.135;
+        upperArmGroup.add(joint2Group);
+
+        const elbowPivot = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.045, 16), accentMat);
+        elbowPivot.rotation.x = Math.PI / 2;
+        joint2Group.add(elbowPivot);
+
+        // Forearm Link (L3 = 0.140m)
+        const forearmGroup = new THREE.Group();
+        joint2Group.add(forearmGroup);
+
+        const forearmMesh = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.140, 0.03), cyanMat);
+        forearmMesh.position.y = 0.140 / 2;
+        forearmGroup.add(forearmMesh);
+
+        // Joint 3: Wrist Pitch Group (L3 = 0.140m above elbow)
+        const joint3Group = new THREE.Group();
+        joint3Group.position.y = 0.140;
+        forearmGroup.add(joint3Group);
+
+        const wristPitchPivot = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.035, 16), accentMat);
+        wristPitchPivot.rotation.x = Math.PI / 2;
+        joint3Group.add(wristPitchPivot);
+
+        // Joint 4: Wrist Roll Group
+        const joint4Group = new THREE.Group();
+        joint4Group.position.y = 0.035;
+        joint3Group.add(joint4Group);
+
+        const wristRollMount = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.03, 16), darkMat);
+        wristRollMount.position.y = 0.015;
+        joint4Group.add(wristRollMount);
+
+        // Gripper Jaws (L4 tip offset)
+        const gripperPalm = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.015, 0.025), darkMat);
+        gripperPalm.position.y = 0.035;
+        joint4Group.add(gripperPalm);
+
+        const fingerLeft = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.04, 0.012), gripperMat);
+        fingerLeft.position.set(-0.015, 0.055, 0);
+        joint4Group.add(fingerLeft);
+
+        const fingerRight = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.04, 0.012), gripperMat);
+        fingerRight.position.set(0.015, 0.055, 0);
+        joint4Group.add(fingerRight);
+
+        // Glowing End-Effector Marker
+        const eeMarker = new THREE.Mesh(
+            new THREE.SphereGeometry(0.012, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0x38bdf8 })
+        );
+        eeMarker.position.y = 0.075;
+        joint4Group.add(eeMarker);
+
+        // Trajectory Ribbon
         let trajLine = null;
 
-        function animate() {
-            requestAnimationFrame(animate);
+        // Render Loop
+        function renderLoop() {
+            requestAnimationFrame(renderLoop);
+            controls.update();
             renderer.render(scene, camera);
         }
-        animate();
+        renderLoop();
 
-        // Fetch Episodes from API
+        // Window Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        });
+
+        // ==========================================
+        // 2. FORWARD KINEMATICS & POSE APPLIER
+        // ==========================================
+        function applyJointsTo3DModel(q) {
+            // q = [q0_deg, q1_deg, q2_deg, q3_deg, q4_deg, gripper_state]
+            if (!q || q.length < 6) return;
+
+            const q0_rad = THREE.MathUtils.degToRad(q[0]);
+            const q1_rad = THREE.MathUtils.degToRad(q[1]);
+            const q2_rad = THREE.MathUtils.degToRad(q[2]);
+            const q3_rad = THREE.MathUtils.degToRad(q[3]);
+            const q4_rad = THREE.MathUtils.degToRad(q[4]);
+            const gripper = q[5]; // 0 (closed) to 100 (open)
+
+            // Joint 0: Base Yaw (rotates around Y)
+            joint0Group.rotation.y = q0_rad;
+
+            // Joint 1: Shoulder Pitch (rotates around X)
+            upperArmGroup.rotation.x = -q1_rad;
+
+            // Joint 2: Elbow Pitch (rotates around X)
+            forearmGroup.rotation.x = -q2_rad;
+
+            // Joint 3: Wrist Pitch (rotates around X)
+            joint3Group.rotation.x = -q3_rad;
+
+            // Joint 4: Wrist Roll (rotates around Y)
+            joint4Group.rotation.y = q4_rad;
+
+            // Gripper aperture animation
+            const fingerOffset = 0.008 + (gripper / 100.0) * 0.015;
+            fingerLeft.position.x = -fingerOffset;
+            fingerRight.position.x = fingerOffset;
+
+            // Update Telemetry Displays
+            j0Val.innerText = `${q[0].toFixed(1)}°`;
+            j1Val.innerText = `${q[1].toFixed(1)}°`;
+            j2Val.innerText = `${q[2].toFixed(1)}°`;
+            j3Val.innerText = `${q[3].toFixed(1)}°`;
+            j4Val.innerText = `${q[4].toFixed(1)}°`;
+            j5Val.innerText = `${gripper.toFixed(0)}%`;
+
+            j0Bar.style.width = `${Math.min(100, Math.max(0, (q[0] + 180) / 360 * 100))}%`;
+            j1Bar.style.width = `${Math.min(100, Math.max(0, (q[1] + 90) / 180 * 100))}%`;
+            j2Bar.style.width = `${Math.min(100, Math.max(0, (q[2] + 120) / 240 * 100))}%`;
+            j3Bar.style.width = `${Math.min(100, Math.max(0, (q[3] + 90) / 180 * 100))}%`;
+            j4Bar.style.width = `${Math.min(100, Math.max(0, (q[4] + 180) / 360 * 100))}%`;
+            j5Bar.style.width = `${Math.min(100, Math.max(0, gripper))}%`;
+        }
+
+        // ==========================================
+        // 3. EPISODE MANAGER & API INTEGRATION
+        // ==========================================
         async function fetchEpisodes() {
             try {
                 const res = await fetch('/api/episodes');
                 episodes = await res.json();
                 renderEpisodes();
+
+                if (episodes.length > 0 && selectedEpIdx < 0) {
+                    selectEpisode(0);
+                }
             } catch (err) {
                 console.error("Error loading episodes:", err);
             }
@@ -383,14 +792,20 @@
                 const item = document.createElement('div');
                 item.className = `episode-item ${idx === selectedEpIdx ? 'selected' : ''}`;
                 item.innerHTML = `
-                    <div class="ep-info">
+                    <div class="ep-left" onclick="selectEpisode(${idx})">
                         <div class="ep-title">Episode #${ep.episode_index}</div>
                         <div class="ep-task">${ep.task}</div>
                         <div class="ep-meta">${ep.num_frames} frames • ${ep.created_at || 'Just now'}</div>
                     </div>
-                    <div style="font-size: 1.2rem; color: #818cf8;">➔</div>
+                    <div class="ep-actions">
+                        <button class="btn-del" onclick="deleteEpisode(event, ${ep.episode_index})" title="Delete Episode">
+                            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <polyline points="3 6 5 6 21 6"></polyline>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                        </button>
+                    </div>
                 `;
-                item.onclick = () => selectEpisode(idx);
                 epList.appendChild(item);
             });
 
@@ -398,25 +813,128 @@
         }
 
         function selectEpisode(idx) {
+            if (idx < 0 || idx >= episodes.length) return;
             selectedEpIdx = idx;
             const ep = episodes[idx];
             document.getElementById('activeEpText').innerText = `Episode #${ep.episode_index} - "${ep.task}"`;
             renderEpisodes();
 
             if (ep.video_url) {
-                document.getElementById('episodeVideo').src = ep.video_url;
+                episodeVideo.src = ep.video_url;
             }
 
-            // Draw 3D trajectory
-            if (ep.poses) {
-                if (trajLine) scene.remove(trajLine);
+            timelineSlider.max = (ep.num_frames - 1) || 0;
+            timelineSlider.value = 0;
+            currentFrame = 0;
+            updateFrameDisplay();
 
-                const points = ep.poses.map(p => new THREE.Vector3(p[0] + 0.2, p[2] + 0.1, p[1]));
+            // Draw full 3D end-effector trajectory ribbon
+            if (trajLine) scene.remove(trajLine);
+            if (ep.joint_states && ep.joint_states.length > 0) {
+                const points = [];
+                for (let f = 0; f < ep.joint_states.length; f++) {
+                    const q = ep.joint_states[f];
+                    // Forward kinematics point
+                    const q0_rad = THREE.MathUtils.degToRad(q[0]);
+                    const q1_rad = THREE.MathUtils.degToRad(q[1]);
+                    const q2_rad = THREE.MathUtils.degToRad(q[2]);
+                    const r = 0.135 * Math.cos(q1_rad) + 0.140 * Math.cos(q1_rad + q2_rad);
+                    const x = r * Math.cos(q0_rad);
+                    const z = r * Math.sin(q0_rad);
+                    const y = 0.115 + 0.135 * Math.sin(q1_rad) + 0.140 * Math.sin(q1_rad + q2_rad);
+                    points.push(new THREE.Vector3(x, y, z));
+                }
                 const geometry = new THREE.BufferGeometry().setFromPoints(points);
-                const material = new THREE.LineBasicMaterial({ color: 0x818cf8, linewidth: 3 });
+                const material = new THREE.LineBasicMaterial({ color: 0x38bdf8, linewidth: 3 });
                 trajLine = new THREE.Line(geometry, material);
                 scene.add(trajLine);
             }
+
+            // Apply frame 0 pose
+            if (ep.joint_states && ep.joint_states[0]) {
+                applyJointsTo3DModel(ep.joint_states[0]);
+            }
+        }
+
+        // Delete Episode Action
+        async function deleteEpisode(e, episodeIndex) {
+            e.stopPropagation();
+            if (!confirm(`Are you sure you want to delete Episode #${episodeIndex}?`)) return;
+
+            try {
+                const res = await fetch(`/api/episodes/${episodeIndex}`, { method: 'DELETE' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    selectedEpIdx = -1;
+                    fetchEpisodes();
+                } else {
+                    alert(data.message);
+                }
+            } catch (err) {
+                console.error("Delete error:", err);
+            }
+        }
+
+        // Clear All Episodes
+        document.getElementById('clearAllBtn').onclick = async () => {
+            if (!confirm("Are you sure you want to clear ALL recorded episodes?")) return;
+            await fetch('/api/episodes/clear', { method: 'POST' });
+            selectedEpIdx = -1;
+            fetchEpisodes();
+        };
+
+        // Timeline scrubbing
+        timelineSlider.addEventListener('input', (e) => {
+            currentFrame = parseInt(e.target.value);
+            updateFrameDisplay();
+        });
+
+        function updateFrameDisplay() {
+            if (selectedEpIdx < 0 || !episodes[selectedEpIdx]) return;
+            const ep = episodes[selectedEpIdx];
+            const total = ep.num_frames || 1;
+            const timeSec = (currentFrame / 30.0).toFixed(2);
+            frameCounter.innerText = `${currentFrame} / ${total - 1} (${timeSec}s)`;
+
+            if (ep.joint_states && ep.joint_states[currentFrame]) {
+                applyJointsTo3DModel(ep.joint_states[currentFrame]);
+            }
+
+            if (episodeVideo.duration) {
+                episodeVideo.currentTime = currentFrame / 30.0;
+            }
+        }
+
+        // Play / Pause Animation Loop
+        playBtn.addEventListener('click', () => {
+            if (isPlaying) {
+                pausePlayback();
+            } else {
+                startPlayback();
+            }
+        });
+
+        function startPlayback() {
+            if (selectedEpIdx < 0 || !episodes[selectedEpIdx]) return;
+            isPlaying = true;
+            playIcon.innerHTML = `<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>`;
+            
+            episodeVideo.play().catch(() => {});
+
+            playInterval = setInterval(() => {
+                const ep = episodes[selectedEpIdx];
+                if (!ep) return;
+                currentFrame = (currentFrame + 1) % ep.num_frames;
+                timelineSlider.value = currentFrame;
+                updateFrameDisplay();
+            }, 1000 / 30);
+        }
+
+        function pausePlayback() {
+            isPlaying = false;
+            clearInterval(playInterval);
+            playIcon.innerHTML = `<polygon points="5 3 19 12 5 21 5 3"/>`;
+            episodeVideo.pause();
         }
 
         // Generate Sample Recording
