@@ -17,22 +17,22 @@
         body {
             background-color: #0b0f19;
             color: #f3f4f6;
-            height: 100vh;
+            min-height: 100vh;
             display: flex;
             flex-direction: column;
-            overflow: hidden;
+            padding: 16px;
+            gap: 16px;
         }
 
-        /* Glassmorphism Header */
         header {
             background: rgba(17, 24, 39, 0.85);
             backdrop-filter: blur(12px);
-            padding: 12px 18px;
+            padding: 14px 18px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            z-index: 10;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
         }
 
         .brand {
@@ -50,7 +50,7 @@
         }
 
         h1 {
-            font-size: 1.05rem;
+            font-size: 1.1rem;
             font-weight: 700;
             background: linear-gradient(135deg, #a5b4fc 0%, #c084fc 100%);
             -webkit-background-clip: text;
@@ -61,472 +61,226 @@
             background: rgba(99, 102, 241, 0.15);
             color: #818cf8;
             border: 1px solid rgba(99, 102, 241, 0.3);
-            padding: 3px 8px;
+            padding: 4px 10px;
             border-radius: 20px;
-            font-size: 0.72rem;
-            font-weight: 600;
-        }
-
-        /* SSL Warning Banner */
-        .ssl-banner {
-            display: none;
-            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-            color: #111827;
-            padding: 10px 14px;
-            font-size: 0.78rem;
-            font-weight: 600;
-            text-align: center;
-            z-index: 20;
-        }
-
-        .ssl-banner a {
-            color: #000;
-            text-decoration: underline;
-            font-weight: 700;
-            margin-left: 6px;
-        }
-
-        /* Camera Viewport */
-        .viewport-container {
-            flex: 1;
-            position: relative;
-            background: #000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-        }
-
-        video {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-
-        /* Overlays */
-        .hud-overlay {
-            position: absolute;
-            top: 12px;
-            left: 12px;
-            right: 12px;
-            display: flex;
-            justify-content: space-between;
-            pointer-events: none;
-            z-index: 5;
-        }
-
-        .hud-card {
-            background: rgba(15, 23, 42, 0.8);
-            backdrop-filter: blur(8px);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            padding: 6px 12px;
-            border-radius: 10px;
             font-size: 0.75rem;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+            font-weight: 600;
         }
 
-        .rec-dot {
-            width: 8px;
-            height: 8px;
-            background: #ef4444;
-            border-radius: 50%;
-            opacity: 0.3;
-        }
-
-        .rec-dot.active {
-            opacity: 1;
-            animation: pulse 1s infinite alternate;
-        }
-
-        @keyframes pulse {
-            from { opacity: 0.3; }
-            to { opacity: 1; box-shadow: 0 0 10px #ef4444; }
-        }
-
-        /* Permission Prompt Overlay */
-        .permission-card {
-            position: absolute;
-            background: rgba(15, 23, 42, 0.92);
+        .card {
+            background: rgba(15, 23, 42, 0.7);
             backdrop-filter: blur(16px);
-            border: 1px solid rgba(99, 102, 241, 0.4);
-            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 20px;
             padding: 20px;
-            margin: 20px;
-            text-align: center;
             display: flex;
             flex-direction: column;
-            gap: 12px;
-            z-index: 15;
-        }
-
-        .permission-card h3 {
-            font-size: 1rem;
-            color: #e0e7ff;
-        }
-
-        .permission-card p {
-            font-size: 0.8rem;
-            color: #94a3b8;
-            line-height: 1.4;
-        }
-
-        .btn-grant {
-            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-            color: white;
-            border: none;
-            padding: 12px 18px;
-            border-radius: 12px;
-            font-weight: 700;
-            font-size: 0.9rem;
-            cursor: pointer;
-        }
-
-        /* Controls Section */
-        .controls-panel {
-            background: rgba(15, 23, 42, 0.95);
-            backdrop-filter: blur(16px);
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-            padding: 16px 18px 24px 18px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-            z-index: 10;
+            gap: 16px;
         }
 
         .input-group {
             display: flex;
             flex-direction: column;
-            gap: 6px;
+            gap: 8px;
         }
 
         label {
-            font-size: 0.72rem;
+            font-size: 0.78rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             color: #9ca3af;
             font-weight: 600;
         }
 
-        .instruction-wrapper {
-            display: flex;
-            gap: 8px;
-        }
-
         select, input[type="text"] {
-            flex: 1;
+            width: 100%;
             background: rgba(30, 41, 59, 0.8);
             border: 1px solid rgba(255, 255, 255, 0.12);
             color: #fff;
-            padding: 10px 12px;
-            border-radius: 10px;
-            font-size: 0.9rem;
+            padding: 14px 16px;
+            border-radius: 14px;
+            font-size: 1rem;
             outline: none;
         }
 
-        .rec-button {
+        /* Big Record Button */
+        .record-trigger {
             background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
             color: white;
             border: none;
-            padding: 14px;
-            border-radius: 14px;
-            font-size: 1rem;
+            padding: 22px 18px;
+            border-radius: 18px;
+            font-size: 1.15rem;
             font-weight: 700;
             display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 10px;
-            box-shadow: 0 4px 20px rgba(239, 68, 68, 0.4);
+            gap: 8px;
+            box-shadow: 0 8px 24px rgba(239, 68, 68, 0.4);
             cursor: pointer;
-        }
-
-        .rec-button.recording {
-            background: linear-gradient(135deg, #475569 0%, #334155 100%);
-            box-shadow: 0 4px 20px rgba(71, 85, 105, 0.4);
-        }
-
-        .status-banner {
-            font-size: 0.78rem;
             text-align: center;
+            transition: transform 0.1s, box-shadow 0.2s;
+        }
+
+        .record-trigger:active {
+            transform: scale(0.98);
+        }
+
+        .record-trigger svg {
+            width: 36px;
+            height: 36px;
+        }
+
+        .record-trigger span {
+            font-size: 1.1rem;
+        }
+
+        .record-trigger small {
+            font-size: 0.8rem;
+            opacity: 0.85;
+            font-weight: 400;
+        }
+
+        /* Status card */
+        .status-card {
+            background: rgba(30, 41, 59, 0.4);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 14px;
+            padding: 16px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .status-title {
+            font-size: 0.85rem;
             color: #94a3b8;
         }
 
-        /* Native File Capture */
-        .native-capture-btn {
-            background: rgba(255, 255, 255, 0.06);
-            border: 1px dashed rgba(255, 255, 255, 0.2);
-            color: #cbd5e1;
-            padding: 8px 12px;
-            border-radius: 10px;
-            font-size: 0.78rem;
-            text-align: center;
-            cursor: pointer;
+        .status-msg {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #e0e7ff;
+        }
+
+        .hud-stats {
             display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
+            justify-content: space-around;
+            padding-top: 8px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            font-size: 0.8rem;
+            color: #64748b;
+        }
+
+        .hud-stats strong {
+            color: #a5b4fc;
+        }
+
+        /* Live Viewport (if active) */
+        #videoPreview {
+            width: 100%;
+            height: 200px;
+            background: #000;
+            border-radius: 14px;
+            object-fit: cover;
+            display: none;
         }
     </style>
 </head>
 <body>
-
-    <div class="ssl-banner" id="sslBanner">
-        🔒 Mobile Camera requires HTTPS. <a id="httpsLink" href="#">Switch to HTTPS</a>
-    </div>
 
     <header>
         <div class="brand">
             <div class="brand-dot"></div>
             <h1>LeRobot Collector</h1>
         </div>
-        <div class="badge">SO-100</div>
+        <div class="badge">SO-100 Arm</div>
     </header>
 
-    <div class="viewport-container">
-        <video id="cameraPreview" autoplay playsinline muted></video>
+    <div class="card">
+        <div class="input-group">
+            <label for="presetInstruction">Task Instruction</label>
+            <select id="presetInstruction">
+                <option value="reach to apple">reach to apple</option>
+                <option value="reach to banana">reach to banana</option>
+                <option value="pick up cup">pick up cup</option>
+                <option value="custom">Custom Instruction...</option>
+            </select>
+            <input type="text" id="customInstruction" placeholder="e.g. push red cube forward" style="display: none; margin-top: 8px;">
+        </div>
 
-        <!-- Permission Prompt (if camera not started yet) -->
-        <div class="permission-card" id="permCard">
-            <h3>📷 Camera & Sensor Access</h3>
-            <p>Tap below to start the camera and high-frequency motion tracking.</p>
-            <button class="btn-grant" id="grantBtn">START CAMERA</button>
-        </div>
-        
-        <div class="hud-overlay">
-            <div class="hud-card">
-                <div class="rec-dot" id="recDot"></div>
-                <span id="recTime">00:00.0</span>
-            </div>
-            <div class="hud-card">
-                <span>IMU: <strong id="imuHz">0</strong> Hz</span>
-            </div>
-        </div>
+        <video id="videoPreview" autoplay playsinline muted></video>
+
+        <!-- Native Camera Record Trigger (Works 100% on HTTP and HTTPS) -->
+        <label class="record-trigger" id="recordTrigger">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="12" r="9"/>
+            </svg>
+            <span id="recordLabel">RECORD DEMONSTRATION</span>
+            <small id="recordSub">Tap to open phone camera & capture motion</small>
+            <input type="file" id="cameraFileInput" accept="video/*" capture="environment" style="display: none;">
+        </label>
     </div>
 
-    <div class="controls-panel">
-        <div class="input-group">
-            <label for="taskInstruction">Task Instruction</label>
-            <div class="instruction-wrapper">
-                <select id="presetInstruction">
-                    <option value="reach to apple">reach to apple</option>
-                    <option value="reach to banana">reach to banana</option>
-                    <option value="pick up cup">pick up cup</option>
-                    <option value="custom">Custom...</option>
-                </select>
-                <input type="text" id="customInstruction" placeholder="Enter task..." style="display: none;">
-            </div>
+    <div class="status-card">
+        <div class="status-title">Status</div>
+        <div class="status-msg" id="statusMsg">Ready to record demonstration</div>
+        <div class="hud-stats">
+            <span>Protocol: <strong id="protocolText">HTTP</strong></span>
+            <span>Target: <strong>SO-100 IK</strong></span>
         </div>
-
-        <button class="rec-button" id="recordBtn">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                <circle cx="12" cy="12" r="8"/>
-            </svg>
-            <span id="btnText">START RECORDING</span>
-        </button>
-
-        <label class="native-capture-btn">
-            <span>📷 Or Record with Native Camera App</span>
-            <input type="file" id="nativeVideoInput" accept="video/*" capture="environment" style="display: none;">
-        </label>
-
-        <div class="status-banner" id="statusText">Ready to capture demonstration</div>
     </div>
 
     <script>
-        const cameraPreview = document.getElementById('cameraPreview');
-        const permCard = document.getElementById('permCard');
-        const grantBtn = document.getElementById('grantBtn');
-        const recordBtn = document.getElementById('recordBtn');
-        const btnText = document.getElementById('btnText');
-        const recDot = document.getElementById('recDot');
-        const recTime = document.getElementById('recTime');
-        const imuHz = document.getElementById('imuHz');
-        const statusText = document.getElementById('statusText');
+        const cameraFileInput = document.getElementById('cameraFileInput');
+        const recordLabel = document.getElementById('recordLabel');
+        const recordSub = document.getElementById('recordSub');
+        const statusMsg = document.getElementById('statusMsg');
         const presetInstruction = document.getElementById('presetInstruction');
         const customInstruction = document.getElementById('customInstruction');
-        const nativeVideoInput = document.getElementById('nativeVideoInput');
-        const sslBanner = document.getElementById('sslBanner');
-        const httpsLink = document.getElementById('httpsLink');
+        const protocolText = document.getElementById('protocolText');
+        const videoPreview = document.getElementById('videoPreview');
 
-        let mediaRecorder = null;
-        let recordedChunks = [];
-        let isRecording = false;
-        let startTime = 0;
-        let timerInterval = null;
+        protocolText.innerText = window.location.protocol.replace(':', '').toUpperCase();
 
         let imuData = [];
-        let imuCount = 0;
-        let imuRateInterval = null;
-
-        // Check if accessed over HTTP on mobile
-        if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-            sslBanner.style.display = 'block';
-            httpsLink.href = 'https://' + location.hostname + ':8000' + location.pathname;
-        }
+        let startTime = Date.now();
 
         // Custom instruction toggle
         presetInstruction.addEventListener('change', (e) => {
             customInstruction.style.display = e.target.value === 'custom' ? 'block' : 'none';
         });
 
-        // Initialize Camera
-        async function startCamera() {
-            try {
-                // Request iOS 13+ motion permission if available
-                if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-                    try {
-                        const perm = await DeviceMotionEvent.requestPermission();
-                        console.log("DeviceMotion permission:", perm);
-                    } catch (e) {
-                        console.log("Motion permission notice:", e);
-                    }
-                }
-
-                const constraints = {
-                    video: {
-                        facingMode: { ideal: 'environment' },
-                        width: { ideal: 640 },
-                        height: { ideal: 480 }
-                    },
-                    audio: false
-                };
-
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                cameraPreview.srcObject = stream;
-                cameraPreview.play();
-                permCard.style.display = 'none';
-                statusText.innerText = "Camera active & ready to record.";
-                initIMU();
-            } catch (err) {
-                console.error("Camera error:", err);
-                statusText.innerText = "Camera error: " + (err.message || err.name);
-                if (location.protocol !== 'https:') {
-                    statusText.innerText = "⚠️ Please use HTTPS for mobile camera access!";
-                    sslBanner.style.display = 'block';
-                }
-            }
-        }
-
-        grantBtn.addEventListener('click', startCamera);
-
-        // Initialize IMU listeners
-        function initIMU() {
-            if (window.DeviceMotionEvent) {
-                window.addEventListener('devicemotion', (event) => {
-                    imuCount++;
-                    if (!isRecording) return;
-                    
-                    const acc = event.accelerationIncludingGravity || { x: 0, y: 0, z: 9.81 };
-                    const rot = event.rotationRate || { alpha: 0, beta: 0, gamma: 0 };
-                    
-                    imuData.push({
-                        timestamp: (Date.now() - startTime) / 1000.0,
-                        accel: [acc.x || 0, acc.y || 0, acc.z || 9.81],
-                        gyro: [rot.alpha || 0, rot.beta || 0, rot.gamma || 0]
-                    });
+        // Initialize background IMU listeners if available
+        if (window.DeviceMotionEvent) {
+            window.addEventListener('devicemotion', (event) => {
+                const acc = event.accelerationIncludingGravity || { x: 0, y: 0, z: 9.81 };
+                const rot = event.rotationRate || { alpha: 0, beta: 0, gamma: 0 };
+                
+                imuData.push({
+                    timestamp: (Date.now() - startTime) / 1000.0,
+                    accel: [acc.x || 0, acc.y || 0, acc.z || 9.81],
+                    gyro: [rot.alpha || 0, rot.beta || 0, rot.gamma || 0]
                 });
-            }
-
-            if (window.DeviceOrientationEvent) {
-                window.addEventListener('deviceorientation', (event) => {
-                    if (!isRecording || imuData.length === 0) return;
-                    const lastIdx = imuData.length - 1;
-                    imuData[lastIdx].orientation = [event.alpha || 0, event.beta || 0, event.gamma || 0];
-                });
-            }
-
-            if (!imuRateInterval) {
-                imuRateInterval = setInterval(() => {
-                    imuHz.innerText = imuCount;
-                    imuCount = 0;
-                }, 1000);
-            }
+            });
         }
 
-        // Recording logic
-        recordBtn.addEventListener('click', async () => {
-            if (!cameraPreview.srcObject) {
-                await startCamera();
-                return;
-            }
-            if (!isRecording) {
-                startRecording();
-            } else {
-                stopRecording();
-            }
-        });
-
-        async function startRecording() {
-            const stream = cameraPreview.srcObject;
-            if (!stream) return;
-
-            recordedChunks = [];
-            imuData = [];
-            isRecording = true;
-            startTime = Date.now();
-
-            let options = { mimeType: 'video/webm' };
-            if (!MediaRecorder.isTypeSupported('video/webm')) {
-                if (MediaRecorder.isTypeSupported('video/mp4')) {
-                    options = { mimeType: 'video/mp4' };
-                } else {
-                    options = {};
-                }
-            }
-
-            mediaRecorder = new MediaRecorder(stream, options);
-            mediaRecorder.ondataavailable = (e) => {
-                if (e.data.size > 0) recordedChunks.push(e.data);
-            };
-            mediaRecorder.start(30);
-
-            recDot.classList.add('active');
-            recordBtn.classList.add('recording');
-            btnText.innerText = "STOP RECORDING";
-            statusText.innerText = "Recording demonstration trajectory...";
-
-            timerInterval = setInterval(() => {
-                const elapsed = (Date.now() - startTime) / 1000.0;
-                const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
-                const secs = (elapsed % 60).toFixed(1).padStart(4, '0');
-                recTime.innerText = `${mins}:${secs}`;
-            }, 100);
-        }
-
-        async function stopRecording() {
-            isRecording = false;
-            clearInterval(timerInterval);
-
-            recDot.classList.remove('active');
-            recordBtn.classList.remove('recording');
-            btnText.innerText = "SAVING...";
-            statusText.innerText = "Processing trajectory...";
-
-            mediaRecorder.stop();
-
-            mediaRecorder.onstop = async () => {
-                const blob = new Blob(recordedChunks, { type: recordedChunks[0]?.type || 'video/webm' });
-                await uploadRecording(blob, imuData);
-                btnText.innerText = "START RECORDING";
-            };
-        }
-
-        // Native Video File Capture Fallback
-        nativeVideoInput.addEventListener('change', async (e) => {
+        // When user records video with phone camera
+        cameraFileInput.addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
 
-            statusText.innerText = "Uploading native video recording...";
-            await uploadRecording(file, []);
-        });
+            recordLabel.innerText = "UPLOADING & PROCESSING...";
+            recordSub.innerText = "Calculating 6-DoF trajectory & SO-100 IK...";
+            statusMsg.innerText = `Uploading video (${(file.size / (1024*1024)).toFixed(2)} MB)...`;
 
-        async function uploadRecording(videoBlob, imuList) {
             const task = presetInstruction.value === 'custom' ? customInstruction.value : presetInstruction.value;
 
             const formData = new FormData();
-            formData.append('video', videoBlob, 'recording.mp4');
-            formData.append('imu_data', JSON.stringify(imuList));
+            formData.append('video', file, file.name || 'recording.mp4');
+            formData.append('imu_data', JSON.stringify(imuData.slice(-150)));
             formData.append('task', task);
 
             try {
@@ -536,23 +290,19 @@
                 });
                 const res = await response.json();
                 if (res.status === 'success') {
-                    statusText.innerText = `✅ Saved Episode #${res.episode_index}! Task: "${res.task}"`;
+                    statusMsg.innerText = `🎉 Saved Episode #${res.episode_index} (${res.num_frames} frames)!`;
+                    recordLabel.innerText = "RECORD ANOTHER";
+                    recordSub.innerText = "Tap to record next demonstration";
                 } else {
-                    statusText.innerText = "Error saving recording.";
+                    statusMsg.innerText = "Error processing recording.";
+                    recordLabel.innerText = "RECORD DEMONSTRATION";
                 }
             } catch (err) {
                 console.error("Upload error:", err);
-                statusText.innerText = "Upload failed: " + err.message;
+                statusMsg.innerText = "Upload failed: " + err.message;
+                recordLabel.innerText = "RECORD DEMONSTRATION";
             }
-        }
-
-        window.onload = () => {
-            initIMU();
-            // Try auto-starting if secure
-            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                startCamera();
-            }
-        };
+        });
     </script>
 </body>
 </html>

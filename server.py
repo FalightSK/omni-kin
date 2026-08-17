@@ -1,7 +1,6 @@
 """
 server.py
 FastAPI Server for Mobile Dataset Collector & LeRobot Exporter
-Supports HTTPS with self-signed SSL for mobile camera & IMU permissions.
 """
 
 import os
@@ -17,6 +16,7 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
+
 from fastapi import FastAPI, Request, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -54,49 +54,6 @@ def get_local_ip():
         return ip
     except Exception:
         return "127.0.0.1"
-
-def ensure_ssl_certs():
-    cert_file = os.path.join(BASE_DIR, "cert.pem")
-    key_file = os.path.join(BASE_DIR, "key.pem")
-    if not (os.path.exists(cert_file) and os.path.exists(key_file)):
-        print("Generating self-signed SSL certificates for mobile camera support...")
-        import datetime, ipaddress
-        from cryptography import x509
-        from cryptography.x509.oid import NameOID
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        from cryptography.hazmat.primitives import serialization
-
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, 'LeRobot Mobile Collector'),
-        ])
-        cert = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(issuer)
-            .public_key(key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.datetime.utcnow() - datetime.timedelta(days=1))
-            .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=3650))
-            .add_extension(
-                x509.SubjectAlternativeName([
-                    x509.DNSName('localhost'),
-                    x509.IPAddress(ipaddress.IPv4Address('127.0.0.1')),
-                ]),
-                critical=False,
-            )
-            .sign(key, hashes.SHA256())
-        )
-        with open(key_file, 'wb') as f:
-            f.write(key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
-            ))
-        with open(cert_file, 'wb') as f:
-            f.write(cert.public_bytes(serialization.Encoding.PEM))
-    return cert_file, key_file
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request):
@@ -297,22 +254,13 @@ async def replay_in_isaac_lab(episode_index: int = 0):
 
 if __name__ == "__main__":
     import uvicorn
-    cert_path, key_path = ensure_ssl_certs()
     local_ip = get_local_ip()
 
     print("\n" + "="*60)
     print("LeRobot Mobile Trajectory Collector Server Started!")
     print("="*60)
-    print(f"Desktop Dashboard: https://localhost:8000")
-    print(f"Phone Mobile URL:  https://{local_ip}:8000/mobile")
-    print("="*60)
-    print("NOTE: On mobile browser, accept the self-signed SSL warning")
-    print("      (Click 'Advanced' -> 'Proceed to site') to enable Camera & IMU access.")
+    print(f"Desktop Dashboard: http://localhost:8000")
+    print(f"Phone Mobile URL:  http://{local_ip}:8000/mobile")
     print("="*60 + "\n")
 
-    # Serve with SSL enabled for full mobile camera/sensor access
-    use_ssl = "--no-ssl" not in sys.argv
-    if use_ssl and os.path.exists(cert_path) and os.path.exists(key_path):
-        uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True, ssl_certfile=cert_path, ssl_keyfile=key_path)
-    else:
-        uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
