@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Mobile Dataset Collector - LeRobot Demo</title>
+    <title>Live In-Browser Dataset Collector - LeRobot</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
         * {
@@ -15,42 +15,42 @@
         }
 
         body {
-            background-color: #0b0f19;
+            background-color: #080c14;
             color: #f3f4f6;
-            min-height: 100vh;
+            height: 100vh;
             display: flex;
             flex-direction: column;
-            padding: 16px;
-            gap: 16px;
+            overflow: hidden;
         }
 
+        /* Top Header */
         header {
-            background: rgba(17, 24, 39, 0.85);
+            background: rgba(15, 23, 42, 0.85);
             backdrop-filter: blur(12px);
-            padding: 14px 18px;
+            padding: 12px 16px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            border-radius: 16px;
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            z-index: 20;
         }
 
         .brand {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
         }
 
         .brand-dot {
-            width: 12px;
-            height: 12px;
+            width: 10px;
+            height: 10px;
             background: #6366f1;
             border-radius: 50%;
             box-shadow: 0 0 12px #6366f1;
         }
 
         h1 {
-            font-size: 1.1rem;
+            font-size: 1.05rem;
             font-weight: 700;
             background: linear-gradient(135deg, #a5b4fc 0%, #c084fc 100%);
             -webkit-background-clip: text;
@@ -61,131 +61,217 @@
             background: rgba(99, 102, 241, 0.15);
             color: #818cf8;
             border: 1px solid rgba(99, 102, 241, 0.3);
-            padding: 4px 10px;
-            border-radius: 20px;
-            font-size: 0.75rem;
+            padding: 3px 8px;
+            border-radius: 12px;
+            font-size: 0.72rem;
             font-weight: 600;
         }
 
-        .card {
-            background: rgba(15, 23, 42, 0.7);
+        /* Viewport Container */
+        .viewport {
+            flex: 1;
+            position: relative;
+            background: #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* HUD Overlays */
+        .hud-top {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            right: 12px;
+            display: flex;
+            justify-content: space-between;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .hud-card {
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            padding: 6px 12px;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .rec-indicator {
+            width: 8px;
+            height: 8px;
+            background: #ef4444;
+            border-radius: 50%;
+            opacity: 0.3;
+        }
+
+        .rec-indicator.active {
+            opacity: 1;
+            animation: pulse 1s infinite alternate;
+        }
+
+        @keyframes pulse {
+            from { opacity: 0.3; }
+            to { opacity: 1; box-shadow: 0 0 10px #ef4444; }
+        }
+
+        .hud-bottom {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            right: 12px;
+            display: flex;
+            justify-content: space-between;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .telemetry-card {
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 6px 10px;
+            border-radius: 8px;
+            font-size: 0.7rem;
+            color: #94a3b8;
+            font-family: monospace;
+        }
+
+        /* Help / Permission Card */
+        .guide-card {
+            position: absolute;
+            inset: 16px;
+            background: rgba(15, 23, 42, 0.95);
             backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(99, 102, 241, 0.4);
             border-radius: 20px;
-            padding: 20px;
+            padding: 24px;
             display: flex;
             flex-direction: column;
+            justify-content: center;
+            text-align: center;
             gap: 16px;
+            z-index: 15;
+        }
+
+        .guide-card h2 {
+            font-size: 1.15rem;
+            color: #e0e7ff;
+        }
+
+        .guide-card p {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            line-height: 1.5;
+        }
+
+        .guide-steps {
+            background: rgba(30, 41, 59, 0.6);
+            border-radius: 12px;
+            padding: 12px;
+            text-align: left;
+            font-size: 0.78rem;
+            color: #cbd5e1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .btn-action {
+            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+            color: white;
+            border: none;
+            padding: 14px 20px;
+            border-radius: 14px;
+            font-weight: 700;
+            font-size: 0.95rem;
+            cursor: pointer;
+        }
+
+        /* Controls Panel */
+        .controls {
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(16px);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 14px 18px 24px 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            z-index: 20;
         }
 
         .input-group {
             display: flex;
             flex-direction: column;
-            gap: 8px;
+            gap: 6px;
         }
 
         label {
-            font-size: 0.78rem;
+            font-size: 0.72rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             color: #9ca3af;
             font-weight: 600;
         }
 
+        .instruction-box {
+            display: flex;
+            gap: 8px;
+        }
+
         select, input[type="text"] {
-            width: 100%;
+            flex: 1;
             background: rgba(30, 41, 59, 0.8);
             border: 1px solid rgba(255, 255, 255, 0.12);
             color: #fff;
-            padding: 14px 16px;
-            border-radius: 14px;
-            font-size: 1rem;
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-size: 0.9rem;
             outline: none;
         }
 
-        /* Big Record Button */
-        .record-trigger {
+        /* Record Button */
+        .btn-record {
             background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
             color: white;
             border: none;
-            padding: 22px 18px;
-            border-radius: 18px;
-            font-size: 1.15rem;
+            padding: 16px;
+            border-radius: 16px;
+            font-size: 1.05rem;
             font-weight: 700;
             display: flex;
-            flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 8px;
-            box-shadow: 0 8px 24px rgba(239, 68, 68, 0.4);
+            gap: 10px;
+            box-shadow: 0 4px 20px rgba(239, 68, 68, 0.4);
             cursor: pointer;
-            text-align: center;
             transition: transform 0.1s, box-shadow 0.2s;
         }
 
-        .record-trigger:active {
+        .btn-record:active {
             transform: scale(0.98);
         }
 
-        .record-trigger svg {
-            width: 36px;
-            height: 36px;
+        .btn-record.recording {
+            background: linear-gradient(135deg, #475569 0%, #334155 100%);
+            box-shadow: 0 4px 20px rgba(71, 85, 105, 0.4);
         }
 
-        .record-trigger span {
-            font-size: 1.1rem;
-        }
-
-        .record-trigger small {
-            font-size: 0.8rem;
-            opacity: 0.85;
-            font-weight: 400;
-        }
-
-        /* Status card */
-        .status-card {
-            background: rgba(30, 41, 59, 0.4);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 14px;
-            padding: 16px;
+        .status-text {
+            font-size: 0.78rem;
             text-align: center;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-
-        .status-title {
-            font-size: 0.85rem;
             color: #94a3b8;
-        }
-
-        .status-msg {
-            font-size: 1rem;
-            font-weight: 600;
-            color: #e0e7ff;
-        }
-
-        .hud-stats {
-            display: flex;
-            justify-content: space-around;
-            padding-top: 8px;
-            border-top: 1px solid rgba(255, 255, 255, 0.06);
-            font-size: 0.8rem;
-            color: #64748b;
-        }
-
-        .hud-stats strong {
-            color: #a5b4fc;
-        }
-
-        /* Live Viewport (if active) */
-        #videoPreview {
-            width: 100%;
-            height: 200px;
-            background: #000;
-            border-radius: 14px;
-            object-fit: cover;
-            display: none;
         }
     </style>
 </head>
@@ -194,115 +280,295 @@
     <header>
         <div class="brand">
             <div class="brand-dot"></div>
-            <h1>LeRobot Collector</h1>
+            <h1>LeRobot Live Collector</h1>
         </div>
-        <div class="badge">SO-100 Arm</div>
+        <div class="badge">SO-100</div>
     </header>
 
-    <div class="card">
-        <div class="input-group">
-            <label for="presetInstruction">Task Instruction</label>
-            <select id="presetInstruction">
-                <option value="reach to apple">reach to apple</option>
-                <option value="reach to banana">reach to banana</option>
-                <option value="pick up cup">pick up cup</option>
-                <option value="custom">Custom Instruction...</option>
-            </select>
-            <input type="text" id="customInstruction" placeholder="e.g. push red cube forward" style="display: none; margin-top: 8px;">
+    <div class="viewport">
+        <video id="cameraPreview" autoplay playsinline muted></video>
+
+        <!-- Permission & Activation Card -->
+        <div class="guide-card" id="guideCard">
+            <h2>📷 Live Camera & 100Hz IMU</h2>
+            <p>Captures live camera frames and synchronized IMU accelerometer + gyroscope motion streams inside the browser.</p>
+            
+            <button class="btn-action" id="enableBtn">⚡ START LIVE CAPTURE</button>
+
+            <div class="guide-steps" id="browserHelp" style="display: none;">
+                <strong>💡 If camera is blocked on Android Chrome:</strong>
+                <span>1. Open <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code></span>
+                <span>2. Add <code id="originCode">http://192.168.1.178:8000</code> and select <strong>Enabled</strong></span>
+                <span>3. Tap <strong>Relaunch</strong></span>
+            </div>
         </div>
 
-        <video id="videoPreview" autoplay playsinline muted></video>
+        <!-- HUD Top -->
+        <div class="hud-top">
+            <div class="hud-card">
+                <div class="rec-indicator" id="recDot"></div>
+                <span id="recTimer">00:00.0</span>
+            </div>
+            <div class="hud-card">
+                <span>IMU: <strong id="imuRate">0</strong> Hz (<span id="imuTotal">0</span>)</span>
+            </div>
+        </div>
 
-        <!-- Native Camera Record Trigger (Works 100% on HTTP and HTTPS) -->
-        <label class="record-trigger" id="recordTrigger">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-                <circle cx="12" cy="12" r="9"/>
-            </svg>
-            <span id="recordLabel">RECORD DEMONSTRATION</span>
-            <small id="recordSub">Tap to open phone camera & capture motion</small>
-            <input type="file" id="cameraFileInput" accept="video/*" capture="environment" style="display: none;">
-        </label>
+        <!-- HUD Bottom (Live IMU Readout) -->
+        <div class="hud-bottom">
+            <div class="telemetry-card" id="accelReadout">ACC: [0.0, 0.0, 9.8]</div>
+            <div class="telemetry-card" id="gyroReadout">GYR: [0.0, 0.0, 0.0]</div>
+        </div>
     </div>
 
-    <div class="status-card">
-        <div class="status-title">Status</div>
-        <div class="status-msg" id="statusMsg">Ready to record demonstration</div>
-        <div class="hud-stats">
-            <span>Protocol: <strong id="protocolText">HTTP</strong></span>
-            <span>Target: <strong>SO-100 IK</strong></span>
+    <div class="controls">
+        <div class="input-group">
+            <label for="taskPreset">Task Instruction</label>
+            <div class="instruction-box">
+                <select id="taskPreset">
+                    <option value="reach to apple">reach to apple</option>
+                    <option value="reach to banana">reach to banana</option>
+                    <option value="pick up cup">pick up cup</option>
+                    <option value="custom">Custom...</option>
+                </select>
+                <input type="text" id="taskCustom" placeholder="Enter task..." style="display: none;">
+            </div>
         </div>
+
+        <button class="btn-record" id="recordBtn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="12" r="8"/>
+            </svg>
+            <span id="recordBtnText">START LIVE RECORDING</span>
+        </button>
+
+        <div class="status-text" id="statusText">Ready to start demonstration</div>
     </div>
 
     <script>
-        const cameraFileInput = document.getElementById('cameraFileInput');
-        const recordLabel = document.getElementById('recordLabel');
-        const recordSub = document.getElementById('recordSub');
-        const statusMsg = document.getElementById('statusMsg');
-        const presetInstruction = document.getElementById('presetInstruction');
-        const customInstruction = document.getElementById('customInstruction');
-        const protocolText = document.getElementById('protocolText');
-        const videoPreview = document.getElementById('videoPreview');
+        const cameraPreview = document.getElementById('cameraPreview');
+        const guideCard = document.getElementById('guideCard');
+        const enableBtn = document.getElementById('enableBtn');
+        const browserHelp = document.getElementById('browserHelp');
+        const originCode = document.getElementById('originCode');
+        const recordBtn = document.getElementById('recordBtn');
+        const recordBtnText = document.getElementById('recordBtnText');
+        const recDot = document.getElementById('recDot');
+        const recTimer = document.getElementById('recTimer');
+        const imuRate = document.getElementById('imuRate');
+        const imuTotal = document.getElementById('imuTotal');
+        const accelReadout = document.getElementById('accelReadout');
+        const gyroReadout = document.getElementById('gyroReadout');
+        const statusText = document.getElementById('statusText');
+        const taskPreset = document.getElementById('taskPreset');
+        const taskCustom = document.getElementById('taskCustom');
 
-        protocolText.innerText = window.location.protocol.replace(':', '').toUpperCase();
+        originCode.innerText = `${window.location.protocol}//${window.location.host}`;
+
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let isRecording = false;
+        let startTime = 0;
+        let timerInterval = null;
 
         let imuData = [];
-        let startTime = Date.now();
+        let imuSampleCount = 0;
+        let imuRateInterval = null;
+        let lastAccel = [0, 0, 9.81];
+        let lastGyro = [0, 0, 0];
 
-        // Custom instruction toggle
-        presetInstruction.addEventListener('change', (e) => {
-            customInstruction.style.display = e.target.value === 'custom' ? 'block' : 'none';
+        // Custom task toggle
+        taskPreset.addEventListener('change', (e) => {
+            taskCustom.style.display = e.target.value === 'custom' ? 'block' : 'none';
         });
 
-        // Initialize background IMU listeners if available
-        if (window.DeviceMotionEvent) {
-            window.addEventListener('devicemotion', (event) => {
-                const acc = event.accelerationIncludingGravity || { x: 0, y: 0, z: 9.81 };
-                const rot = event.rotationRate || { alpha: 0, beta: 0, gamma: 0 };
-                
-                imuData.push({
-                    timestamp: (Date.now() - startTime) / 1000.0,
-                    accel: [acc.x || 0, acc.y || 0, acc.z || 9.81],
-                    gyro: [rot.alpha || 0, rot.beta || 0, rot.gamma || 0]
+        // Initialize IMU listeners
+        function setupIMU() {
+            if (window.DeviceMotionEvent) {
+                window.addEventListener('devicemotion', (event) => {
+                    const acc = event.accelerationIncludingGravity || event.acceleration || { x: 0, y: 0, z: 9.81 };
+                    const rot = event.rotationRate || { alpha: 0, beta: 0, gamma: 0 };
+
+                    lastAccel = [acc.x || 0, acc.y || 0, acc.z || 9.81];
+                    lastGyro = [rot.alpha || 0, rot.beta || 0, rot.gamma || 0];
+
+                    accelReadout.innerText = `ACC: [${lastAccel[0].toFixed(1)}, ${lastAccel[1].toFixed(1)}, ${lastAccel[2].toFixed(1)}]`;
+                    gyroReadout.innerText = `GYR: [${lastGyro[0].toFixed(1)}, ${lastGyro[1].toFixed(1)}, ${lastGyro[2].toFixed(1)}]`;
+
+                    if (isRecording) {
+                        const elapsed = (performance.now() - startTime) / 1000.0;
+                        imuData.push({
+                            timestamp: elapsed,
+                            accel: lastAccel,
+                            gyro: lastGyro
+                        });
+                        imuSampleCount++;
+                        imuTotal.innerText = imuData.length;
+                    }
                 });
-            });
+            }
+
+            if (window.DeviceOrientationEvent) {
+                window.addEventListener('deviceorientation', (event) => {
+                    if (isRecording && imuData.length > 0) {
+                        imuData[imuData.length - 1].orientation = [
+                            event.alpha || 0,
+                            event.beta || 0,
+                            event.gamma || 0
+                        ];
+                    }
+                });
+            }
+
+            imuRateInterval = setInterval(() => {
+                imuRate.innerText = imuSampleCount;
+                imuSampleCount = 0;
+            }, 1000);
         }
 
-        // When user records video with phone camera
-        cameraFileInput.addEventListener('change', async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
-            recordLabel.innerText = "UPLOADING & PROCESSING...";
-            recordSub.innerText = "Calculating 6-DoF trajectory & SO-100 IK...";
-            statusMsg.innerText = `Uploading video (${(file.size / (1024*1024)).toFixed(2)} MB)...`;
-
-            const task = presetInstruction.value === 'custom' ? customInstruction.value : presetInstruction.value;
-
-            const formData = new FormData();
-            formData.append('video', file, file.name || 'recording.mp4');
-            formData.append('imu_data', JSON.stringify(imuData.slice(-150)));
-            formData.append('task', task);
+        // Start Camera Stream
+        async function startLiveCapture() {
+            // iOS Permission Request
+            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                try {
+                    await DeviceMotionEvent.requestPermission();
+                } catch (e) {
+                    console.log("Motion permission:", e);
+                }
+            }
 
             try {
-                const response = await fetch('/api/recordings/save', {
-                    method: 'POST',
-                    body: formData
-                });
-                const res = await response.json();
-                if (res.status === 'success') {
-                    statusMsg.innerText = `🎉 Saved Episode #${res.episode_index} (${res.num_frames} frames)!`;
-                    recordLabel.innerText = "RECORD ANOTHER";
-                    recordSub.innerText = "Tap to record next demonstration";
-                } else {
-                    statusMsg.innerText = "Error processing recording.";
-                    recordLabel.innerText = "RECORD DEMONSTRATION";
+                const constraints = {
+                    video: {
+                        facingMode: { ideal: 'environment' },
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        frameRate: { ideal: 30 }
+                    },
+                    audio: false
+                };
+
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("getUserMedia not supported in this context");
                 }
+
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                cameraPreview.srcObject = stream;
+                await cameraPreview.play();
+
+                guideCard.style.display = 'none';
+                setupIMU();
+                statusText.innerText = "Live camera & IMU tracking active.";
             } catch (err) {
-                console.error("Upload error:", err);
-                statusMsg.innerText = "Upload failed: " + err.message;
-                recordLabel.innerText = "RECORD DEMONSTRATION";
+                console.error("Camera access failed:", err);
+                statusText.innerText = "Camera blocked: " + err.message;
+                browserHelp.style.display = 'flex';
+            }
+        }
+
+        enableBtn.addEventListener('click', startLiveCapture);
+
+        // Recording Control
+        recordBtn.addEventListener('click', async () => {
+            if (!cameraPreview.srcObject) {
+                await startLiveCapture();
+                return;
+            }
+            if (!isRecording) {
+                startRecording();
+            } else {
+                stopRecording();
             }
         });
+
+        function startRecording() {
+            const stream = cameraPreview.srcObject;
+            if (!stream) return;
+
+            recordedChunks = [];
+            imuData = [];
+            imuSampleCount = 0;
+            isRecording = true;
+            startTime = performance.now();
+
+            let mimeType = 'video/webm;codecs=vp8';
+            if (!MediaRecorder.isTypeSupported(mimeType)) {
+                if (MediaRecorder.isTypeSupported('video/mp4')) {
+                    mimeType = 'video/mp4';
+                } else if (MediaRecorder.isTypeSupported('video/webm')) {
+                    mimeType = 'video/webm';
+                } else {
+                    mimeType = '';
+                }
+            }
+
+            const options = mimeType ? { mimeType } : {};
+            mediaRecorder = new MediaRecorder(stream, options);
+
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) recordedChunks.push(e.data);
+            };
+            mediaRecorder.start(30);
+
+            recDot.classList.add('active');
+            recordBtn.classList.add('recording');
+            recordBtnText.innerText = "STOP RECORDING";
+            statusText.innerText = "Recording live demonstration...";
+
+            timerInterval = setInterval(() => {
+                const elapsed = (performance.now() - startTime) / 1000.0;
+                const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+                const secs = (elapsed % 60).toFixed(1).padStart(4, '0');
+                recTimer.innerText = `${mins}:${secs}`;
+            }, 100);
+        }
+
+        async function stopRecording() {
+            isRecording = false;
+            clearInterval(timerInterval);
+
+            recDot.classList.remove('active');
+            recordBtn.classList.remove('recording');
+            recordBtnText.innerText = "SAVING...";
+            statusText.innerText = "Uploading demonstration & calculating IK...";
+
+            mediaRecorder.stop();
+
+            mediaRecorder.onstop = async () => {
+                const blob = new Blob(recordedChunks, { type: recordedChunks[0]?.type || 'video/webm' });
+                const task = taskPreset.value === 'custom' ? taskCustom.value : taskPreset.value;
+
+                const formData = new FormData();
+                formData.append('video', blob, 'recording.mp4');
+                formData.append('imu_data', JSON.stringify(imuData));
+                formData.append('task', task);
+
+                try {
+                    const response = await fetch('/api/recordings/save', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    const res = await response.json();
+                    if (res.status === 'success') {
+                        statusText.innerText = `🎉 Saved Episode #${res.episode_index} (${res.num_frames} frames, ${imuData.length} IMU samples)!`;
+                    } else {
+                        statusText.innerText = "Error processing recording.";
+                    }
+                } catch (err) {
+                    console.error("Upload error:", err);
+                    statusText.innerText = "Upload failed: " + err.message;
+                }
+
+                recordBtnText.innerText = "START LIVE RECORDING";
+            };
+        }
+
+        window.onload = () => {
+            // Auto start if available
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                startLiveCapture();
+            }
+        };
     </script>
 </body>
 </html>
