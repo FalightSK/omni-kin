@@ -58,9 +58,9 @@ class LeRobotExporter:
         for ep in episodes_data:
             ep_idx = ep['episode_index']
             task = ep['task']
-            joint_states = ep['joint_states']  # N x 6
-            actions = ep['actions']            # N x 6
-            timestamps = ep['timestamps']      # N
+            joint_states = np.asarray(ep['joint_states'])  # N x 6
+            actions = np.asarray(ep['actions'])            # N x 6
+            timestamps = np.asarray(ep['timestamps'])      # N
             num_frames = len(joint_states)
 
             all_states.append(joint_states)

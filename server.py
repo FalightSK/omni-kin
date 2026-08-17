@@ -38,11 +38,11 @@ lerobot_exporter = LeRobotExporter(output_dir=EXPORT_DIR)
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 @app.get("/mobile", response_class=HTMLResponse)
 async def mobile_page(request: Request):
-    return templates.TemplateResponse("mobile.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="mobile.html")
 
 @app.get("/api/episodes")
 async def get_episodes():
@@ -80,7 +80,6 @@ async def save_recording(
 
     # 5. Compute SO-100 Joint Angles via Inverse Kinematics
     joint_states = []
-    actions = []
 
     for i in range(frame_count):
         phone_pose = poses[i]
@@ -105,10 +104,10 @@ async def save_recording(
         'video_path': video_path,
         'video_url': f"/recordings/episode_{ep_idx:04d}/recording.mp4",
         'num_frames': frame_count,
-        'poses': poses.tolist(),
-        'joint_states': joint_states,
-        'actions': actions,
-        'timestamps': timestamps,
+        'poses': poses.tolist() if isinstance(poses, np.ndarray) else poses,
+        'joint_states': joint_states.tolist() if isinstance(joint_states, np.ndarray) else joint_states,
+        'actions': actions.tolist() if isinstance(actions, np.ndarray) else actions,
+        'timestamps': timestamps.tolist() if isinstance(timestamps, np.ndarray) else timestamps,
         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -173,10 +172,10 @@ async def generate_sample_recording(task: str = "reach to apple"):
         'video_path': video_path,
         'video_url': f"/recordings/episode_{ep_idx:04d}/recording.mp4",
         'num_frames': frame_count,
-        'poses': poses.tolist(),
-        'joint_states': joint_states,
-        'actions': actions,
-        'timestamps': timestamps,
+        'poses': poses.tolist() if isinstance(poses, np.ndarray) else poses,
+        'joint_states': joint_states.tolist() if isinstance(joint_states, np.ndarray) else joint_states,
+        'actions': actions.tolist() if isinstance(actions, np.ndarray) else actions,
+        'timestamps': timestamps.tolist() if isinstance(timestamps, np.ndarray) else timestamps,
         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -206,7 +205,6 @@ async def replay_in_isaac_lab(episode_index: int = 0):
     """
     Triggers Isaac Lab simulation replay using C:\\Users\\SK\\miniconda3\\envs\\isaac_lab\\python.exe
     """
-    # First export dataset if not already exported
     if not EPISODES_DB:
         return JSONResponse({"status": "error", "message": "No episodes to replay."}, status_code=400)
 
@@ -231,7 +229,6 @@ async def replay_in_isaac_lab(episode_index: int = 0):
         "message": f"Isaac Lab replay launched for Episode #{episode_index}!",
         "cmd": " ".join(cmd)
     })
-
 
 if __name__ == "__main__":
     import uvicorn
