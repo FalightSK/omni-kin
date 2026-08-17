@@ -11,6 +11,12 @@ import json
 import socket
 import numpy as np
 import cv2
+
+# Set stdout/stderr to UTF-8
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 from fastapi import FastAPI, Request, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -295,13 +301,13 @@ if __name__ == "__main__":
     local_ip = get_local_ip()
 
     print("\n" + "="*60)
-    print("🚀 LeRobot Mobile Trajectory Collector Server Started!")
+    print("LeRobot Mobile Trajectory Collector Server Started!")
     print("="*60)
-    print(f"💻 Desktop Dashboard: https://localhost:8000  (or http://localhost:8000)")
-    print(f"📱 Phone Mobile URL:  https://{local_ip}:8000/mobile")
+    print(f"Desktop Dashboard: https://localhost:8000")
+    print(f"Phone Mobile URL:  https://{local_ip}:8000/mobile")
     print("="*60)
-    print("📌 NOTE: On mobile browser, accept the self-signed SSL warning")
-    print("        (Click 'Advanced' -> 'Proceed to site') to enable Camera & IMU access.")
+    print("NOTE: On mobile browser, accept the self-signed SSL warning")
+    print("      (Click 'Advanced' -> 'Proceed to site') to enable Camera & IMU access.")
     print("="*60 + "\n")
 
     # Serve with SSL enabled for full mobile camera/sensor access
