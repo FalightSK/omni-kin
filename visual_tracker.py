@@ -41,13 +41,19 @@ class VisualInertialTracker:
             [-hs, -hs, 0.0]
         ], dtype=np.float32)
 
+    def generate_raw_marker(self, marker_id=0, side_pixels=600, dict_name="DICT_6X6_250"):
+        """
+        Generates pure ArUco marker black/white square with NO border padding.
+        """
+        dict_type = getattr(cv2.aruco, dict_name, self.dict_type)
+        custom_dict = cv2.aruco.getPredefinedDictionary(dict_type)
+        return cv2.aruco.generateImageMarker(custom_dict, id=int(marker_id), sidePixels=side_pixels)
+
     def generate_marker_image(self, marker_id=0, side_pixels=400, border_pixels=50, dict_name="DICT_6X6_250"):
         """
         Generates a printable ArUco marker image with a clean white margin.
         """
-        dict_type = getattr(cv2.aruco, dict_name, self.dict_type)
-        custom_dict = cv2.aruco.getPredefinedDictionary(dict_type)
-        marker_img = cv2.aruco.generateImageMarker(custom_dict, id=int(marker_id), sidePixels=side_pixels)
+        marker_img = self.generate_raw_marker(marker_id=marker_id, side_pixels=side_pixels, dict_name=dict_name)
         bordered = cv2.copyMakeBorder(
             marker_img,
             border_pixels, border_pixels, border_pixels, border_pixels,

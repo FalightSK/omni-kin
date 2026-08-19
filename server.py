@@ -63,6 +63,15 @@ async def index_page(request: Request):
 async def mobile_page(request: Request):
     return templates.TemplateResponse(request=request, name="mobile.html")
 
+@app.get("/api/marker/raw")
+async def get_raw_marker(marker_id: int = 0, size: int = 800, dict_name: str = "DICT_6X6_250"):
+    """
+    Returns pure ArUco black/white square with NO extra borders or banners.
+    """
+    marker_img = visual_tracker.generate_raw_marker(marker_id=marker_id, side_pixels=size, dict_name=dict_name)
+    success, buffer = cv2.imencode(".png", marker_img)
+    return Response(content=buffer.tobytes(), media_type="image/png")
+
 @app.get("/api/marker/image")
 async def get_marker_image(marker_id: int = 0, size: int = 600, width_cm: float = 10.0, dict_name: str = "DICT_6X6_250"):
     """
@@ -96,7 +105,7 @@ async def get_marker_image(marker_id: int = 0, size: int = 600, width_cm: float 
 @app.get("/api/marker/print", response_class=HTMLResponse)
 async def print_marker_page(marker_id: int = 0, width_cm: float = 10.0, dict_name: str = "DICT_6X6_250"):
     """
-    Returns an HTML print template with EXACT physical centimeter scaling and a printed verification ruler.
+    Returns an HTML print template where the BLACK ARUCO SQUARE is scaled to EXACTLY width_cm.
     """
     return f"""<!DOCTYPE html>
 <html>
@@ -146,21 +155,19 @@ async def print_marker_page(marker_id: int = 0, width_cm: float = 10.0, dict_nam
             body {{ padding: 0; }}
         }}
 
-        /* EXACT PHYSICAL CENTIMETER DIMENSIONS */
-        .marker-container {{
-            width: {width_cm}cm;
+        /* EXACT PHYSICAL CENTIMETER DIMENSIONS FOR BLACK ARUCO SQUARE */
+        .marker-card {{
             display: flex;
             flex-direction: column;
             align-items: center;
-            border: 1px dashed #94a3b8;
-            padding: 4mm;
+            margin-top: 10mm;
         }}
 
-        .marker-img {{
+        .marker-black-square {{
             width: {width_cm}cm;
             height: {width_cm}cm;
-            object-fit: contain;
             display: block;
+            image-rendering: pixelated;
         }}
 
         .marker-info {{
@@ -168,6 +175,7 @@ async def print_marker_page(marker_id: int = 0, width_cm: float = 10.0, dict_nam
             font-weight: 600;
             margin-top: 4mm;
             text-align: center;
+            width: {width_cm}cm;
         }}
 
         /* Printed Centimeter Ruler for Calibration Verification */
@@ -199,30 +207,32 @@ async def print_marker_page(marker_id: int = 0, width_cm: float = 10.0, dict_nam
     <div class="no-print">
         <h3 style="margin: 0 0 6px 0; color: #1e293b;">🖨️ Physical Scale Printing Instructions</h3>
         <p style="margin: 0; font-size: 13px; color: #475569;">
-            In your printer dialog, set <strong>Scale to 100% (Actual Size)</strong>. Do NOT select "Fit to Printable Area".
+            In your printer dialog, select <strong>Scale: 100% (Actual Size)</strong>. The black square and the ruler will both measure exactly {width_cm} cm.
         </p>
-        <button class="print-btn" onclick="window.print()">PRINT EXACT {width_cm} CM MARKER</button>
+        <button class="print-btn" onclick="window.print()">PRINT EXACT {width_cm} CM ARUCO MARKER</button>
     </div>
 
-    <div class="marker-container">
-        <img class="marker-img" src="/api/marker/image?marker_id={marker_id}&size=800&dict_name={dict_name}" alt="ArUco Marker">
-        <div class="marker-info">ArUco {dict_name.replace('DICT_', '')} | ID {marker_id} | Exactly {width_cm} cm × {width_cm} cm</div>
+    <div class="marker-card">
+        <!-- PURE BLACK ARUCO SQUARE: Exactly width_cm x width_cm -->
+        <img class="marker-black-square" src="/api/marker/raw?marker_id={marker_id}&size=800&dict_name={dict_name}" alt="ArUco Marker">
         
-        <!-- Verification Ruler -->
+        <div class="marker-info">ArUco {dict_name.replace('DICT_', '')} | ID {marker_id} | Black Square: Exactly {width_cm} cm × {width_cm} cm</div>
+        
+        <!-- Verification Ruler matching the black square width -->
         <div class="ruler-container">
-            <div class="ruler-tick" style="left: 0; height: 5mm;"></div>
+            <div class="ruler-tick" style="left: 0; height: 6mm;"></div>
             <div class="ruler-label" style="left: 0;">0cm</div>
             
             <div class="ruler-tick" style="left: 25%; height: 3mm;"></div>
             <div class="ruler-label" style="left: 25%;">{width_cm*0.25:.1f}</div>
 
-            <div class="ruler-tick" style="left: 50%; height: 5mm;"></div>
+            <div class="ruler-tick" style="left: 50%; height: 6mm;"></div>
             <div class="ruler-label" style="left: 50%;">{width_cm*0.5:.1f}cm</div>
 
             <div class="ruler-tick" style="left: 75%; height: 3mm;"></div>
             <div class="ruler-label" style="left: 75%;">{width_cm*0.75:.1f}</div>
 
-            <div class="ruler-tick" style="right: 0; height: 5mm;"></div>
+            <div class="ruler-tick" style="right: 0; height: 6mm;"></div>
             <div class="ruler-label" style="right: 0;">{width_cm:.1f}cm</div>
         </div>
     </div>
