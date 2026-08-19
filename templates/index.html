@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LeRobot Mobile Trajectory Dashboard</title>
+    <title>ArUco 3D Trajectory Manager - LeRobot</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -29,7 +29,7 @@
             background: rgba(15, 23, 42, 0.85);
             backdrop-filter: blur(16px);
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            padding: 14px 28px;
+            padding: 12px 24px;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -40,7 +40,7 @@
             display: flex;
             align-items: center;
             gap: 10px;
-            font-size: 1.2rem;
+            font-size: 1.15rem;
             font-weight: 700;
             background: linear-gradient(135deg, #818cf8 0%, #c084fc 100%);
             -webkit-background-clip: text;
@@ -50,26 +50,14 @@
         .logo-icon {
             width: 14px;
             height: 14px;
-            background: #6366f1;
-            border-radius: 4px;
-            transform: rotate(45deg);
-            box-shadow: 0 0 16px #6366f1;
-        }
-
-        .mobile-url-card {
-            background: rgba(30, 41, 59, 0.6);
-            border: 1px solid rgba(99, 102, 241, 0.3);
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 0.82rem;
-            color: #a5b4fc;
-            display: flex;
-            align-items: center;
-            gap: 8px;
+            background: #10b981;
+            border-radius: 3px;
+            box-shadow: 0 0 16px #10b981;
         }
 
         .nav-actions {
             display: flex;
+            align-items: center;
             gap: 10px;
         }
 
@@ -77,10 +65,10 @@
             background: rgba(255, 255, 255, 0.08);
             border: 1px solid rgba(255, 255, 255, 0.12);
             color: white;
-            padding: 8px 16px;
-            border-radius: 12px;
+            padding: 8px 14px;
+            border-radius: 10px;
             font-weight: 600;
-            font-size: 0.85rem;
+            font-size: 0.82rem;
             cursor: pointer;
             transition: all 0.2s;
             display: flex;
@@ -98,8 +86,14 @@
             box-shadow: 0 4px 16px rgba(99, 102, 241, 0.4);
         }
 
-        .btn-primary:hover {
-            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6);
+        .btn-marker {
+            background: rgba(16, 185, 129, 0.15);
+            border-color: rgba(16, 185, 129, 0.4);
+            color: #34d399;
+        }
+
+        .btn-marker:hover {
+            background: rgba(16, 185, 129, 0.25);
         }
 
         .btn-danger {
@@ -108,29 +102,24 @@
             color: #f87171;
         }
 
-        .btn-danger:hover {
-            background: rgba(239, 68, 68, 0.25);
-        }
-
-        /* Main Grid Layout */
+        /* Container Layout */
         .container {
             flex: 1;
-            padding: 20px 28px;
+            padding: 18px 24px;
             display: grid;
-            grid-template-columns: 1fr 380px;
-            gap: 20px;
+            grid-template-columns: 1fr 370px;
+            gap: 18px;
         }
 
-        /* Cards */
         .card {
             background: rgba(15, 23, 42, 0.6);
             backdrop-filter: blur(12px);
             border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 18px;
-            padding: 18px;
+            border-radius: 16px;
+            padding: 16px;
             display: flex;
             flex-direction: column;
-            gap: 14px;
+            gap: 12px;
         }
 
         .card-header {
@@ -140,7 +129,7 @@
         }
 
         .card-title {
-            font-size: 0.95rem;
+            font-size: 0.92rem;
             font-weight: 600;
             color: #cbd5e1;
             display: flex;
@@ -148,14 +137,14 @@
             gap: 8px;
         }
 
-        /* 3D Canvas Container */
+        /* 3D Canvas */
         .viewport-wrapper {
             position: relative;
             width: 100%;
-            height: 420px;
-            border-radius: 14px;
+            height: 440px;
+            border-radius: 12px;
             overflow: hidden;
-            background: radial-gradient(circle at center, #0a1128 0%, #030611 100%);
+            background: radial-gradient(circle at center, #0b132b 0%, #030611 100%);
         }
 
         #canvas3d {
@@ -165,9 +154,9 @@
 
         .canvas-overlay-hint {
             position: absolute;
-            top: 12px;
-            left: 12px;
-            background: rgba(15, 23, 42, 0.75);
+            top: 10px;
+            left: 10px;
+            background: rgba(15, 23, 42, 0.8);
             backdrop-filter: blur(8px);
             border: 1px solid rgba(255, 255, 255, 0.08);
             padding: 4px 10px;
@@ -175,15 +164,12 @@
             font-size: 0.72rem;
             color: #94a3b8;
             pointer-events: none;
-            display: flex;
-            align-items: center;
-            gap: 6px;
         }
 
         .legend-overlay {
             position: absolute;
-            bottom: 12px;
-            left: 12px;
+            bottom: 10px;
+            left: 10px;
             background: rgba(15, 23, 42, 0.85);
             backdrop-filter: blur(8px);
             border: 1px solid rgba(255, 255, 255, 0.1);
@@ -207,20 +193,20 @@
             border-radius: 50%;
         }
 
-        /* Playback Timeline Controls */
+        /* Timeline Controls */
         .playback-controls {
             background: rgba(30, 41, 59, 0.5);
             border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 14px;
-            padding: 12px 16px;
+            border-radius: 12px;
+            padding: 10px 14px;
             display: flex;
             align-items: center;
-            gap: 14px;
+            gap: 12px;
         }
 
         .btn-play {
-            width: 38px;
-            height: 38px;
+            width: 36px;
+            height: 36px;
             border-radius: 50%;
             background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
             border: none;
@@ -229,11 +215,6 @@
             align-items: center;
             justify-content: center;
             cursor: pointer;
-            transition: transform 0.1s;
-        }
-
-        .btn-play:active {
-            transform: scale(0.95);
         }
 
         .slider-wrapper {
@@ -246,7 +227,7 @@
         .slider-header {
             display: flex;
             justify-content: space-between;
-            font-size: 0.75rem;
+            font-size: 0.72rem;
             color: #94a3b8;
             font-family: 'JetBrains Mono', monospace;
         }
@@ -261,7 +242,7 @@
             accent-color: #6366f1;
         }
 
-        /* Cartesian & Pose Telemetry */
+        /* Telemetry Grid */
         .joint-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
@@ -275,11 +256,11 @@
             padding: 10px 12px;
             display: flex;
             flex-direction: column;
-            gap: 4px;
+            gap: 3px;
         }
 
         .joint-name {
-            font-size: 0.72rem;
+            font-size: 0.7rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             color: #94a3b8;
@@ -312,7 +293,7 @@
         .episode-list {
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 8px;
             max-height: 380px;
             overflow-y: auto;
             padding-right: 4px;
@@ -321,8 +302,8 @@
         .episode-item {
             background: rgba(30, 41, 59, 0.4);
             border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 14px;
-            padding: 12px 14px;
+            border-radius: 12px;
+            padding: 10px 12px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -338,42 +319,36 @@
         .ep-left {
             display: flex;
             flex-direction: column;
-            gap: 4px;
+            gap: 3px;
             flex: 1;
         }
 
         .ep-title {
             font-weight: 600;
-            font-size: 0.9rem;
+            font-size: 0.88rem;
             color: #f8fafc;
         }
 
         .ep-task {
-            font-size: 0.75rem;
+            font-size: 0.72rem;
             color: #a5b4fc;
             background: rgba(99, 102, 241, 0.15);
-            padding: 2px 8px;
-            border-radius: 6px;
+            padding: 2px 6px;
+            border-radius: 5px;
             width: fit-content;
         }
 
         .ep-meta {
-            font-size: 0.72rem;
+            font-size: 0.7rem;
             color: #64748b;
-        }
-
-        .ep-actions {
-            display: flex;
-            align-items: center;
-            gap: 8px;
         }
 
         .btn-del {
             background: rgba(239, 68, 68, 0.12);
             border: 1px solid rgba(239, 68, 68, 0.25);
             color: #f87171;
-            width: 30px;
-            height: 30px;
+            width: 28px;
+            height: 28px;
             border-radius: 8px;
             display: flex;
             align-items: center;
@@ -384,35 +359,79 @@
 
         .btn-del:hover {
             background: rgba(239, 68, 68, 0.3);
-            transform: scale(1.05);
         }
 
         .stat-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 10px;
+            gap: 8px;
         }
 
         .stat-box {
             background: rgba(30, 41, 59, 0.5);
             border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 12px;
-            padding: 10px;
+            border-radius: 10px;
+            padding: 8px 10px;
             display: flex;
             flex-direction: column;
             gap: 2px;
         }
 
         .stat-val {
-            font-size: 1.2rem;
+            font-size: 1.1rem;
             font-weight: 700;
             color: #818cf8;
         }
 
         .stat-lbl {
-            font-size: 0.72rem;
+            font-size: 0.68rem;
             color: #94a3b8;
             text-transform: uppercase;
+        }
+
+        /* ArUco Print Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(8px);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #0f172a;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 20px;
+            padding: 24px;
+            max-width: 480px;
+            width: 90%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+            text-align: center;
+        }
+
+        .marker-preview {
+            width: 240px;
+            height: 240px;
+            background: white;
+            padding: 10px;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+
+        .marker-preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
         }
     </style>
 </head>
@@ -421,29 +440,25 @@
     <nav>
         <div class="logo">
             <div class="logo-icon"></div>
-            LeRobot Mobile Collector
-        </div>
-
-        <div class="mobile-url-card">
-            <span>📱 Mobile URL:</span>
-            <strong id="mobileUrlText">http://localhost:8000/mobile</strong>
+            ArUco 3D Trajectory Manager
         </div>
 
         <div class="nav-actions">
-            <button class="btn" id="addSampleBtn">⚡ Sample Demo</button>
+            <button class="btn btn-marker" id="openMarkerBtn">🖨️ Print ArUco Marker</button>
+            <button class="btn" id="addSampleBtn">⚡ Sample 3D Circle</button>
             <button class="btn" id="isaacBtn" style="border-color: #818cf8; color: #a5b4fc;">🎮 Isaac Lab</button>
             <button class="btn btn-primary" id="exportBtn">📦 Export LeRobot</button>
         </div>
     </nav>
 
     <div class="container">
-        <!-- Left: 3D End-Effector Trajectory Shape & Video Sync -->
-        <div style="display: flex; flex-direction: column; gap: 16px;">
+        <!-- Left: 3D ArUco Table Scene & Video Sync -->
+        <div style="display: flex; flex-direction: column; gap: 14px;">
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">
                         <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-                        3D End-Effector Trajectory Shape & Pose
+                        3D Trajectory Anchored to Table ArUco Marker (0, 0, 0)
                     </div>
                     <span style="font-size: 0.8rem; color: #94a3b8;" id="activeEpText">No episode selected</span>
                 </div>
@@ -452,13 +467,13 @@
                     <div id="canvas3d"></div>
                     <div class="canvas-overlay-hint">🖱️ Drag to orbit • Scroll to zoom • Right-click to pan</div>
                     <div class="legend-overlay">
-                        <div class="legend-item"><div class="legend-dot" style="background: #10b981;"></div> Start</div>
-                        <div class="legend-item"><div class="legend-dot" style="background: #ef4444;"></div> Goal / End</div>
-                        <div class="legend-item"><div class="legend-dot" style="background: #38bdf8;"></div> Motion Path</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #10b981;"></div> ArUco (0,0,0) Table</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #38bdf8;"></div> 3D Shape Trajectory</div>
+                        <div class="legend-item"><div class="legend-dot" style="background: #ef4444;"></div> End/Goal</div>
                     </div>
                 </div>
 
-                <!-- Timeline / Playback Slider -->
+                <!-- Timeline Slider -->
                 <div class="playback-controls">
                     <button class="btn-play" id="playBtn">
                         <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24" id="playIcon">
@@ -467,62 +482,62 @@
                     </button>
                     <div class="slider-wrapper">
                         <div class="slider-header">
-                            <span>TRAJECTORY TIMELINE</span>
+                            <span>SHAPE TIMELINE</span>
                             <span id="frameCounter">0 / 0 (0.00s / 0.00s)</span>
                         </div>
                         <input type="range" id="timelineSlider" min="0" max="0" value="0">
                     </div>
                 </div>
 
-                <!-- End-Effector Cartesian & Pose Telemetry -->
+                <!-- Cartesian Telemetry Gauges -->
                 <div class="joint-grid">
                     <div class="joint-box">
-                        <div class="joint-name">Position X (Forward)</div>
+                        <div class="joint-name">X (Lateral on Table)</div>
                         <div class="joint-val" id="valX">+0.0 cm</div>
                         <div class="joint-bar-bg"><div class="joint-bar-fill" id="barX"></div></div>
                     </div>
                     <div class="joint-box">
-                        <div class="joint-name">Position Y (Lateral)</div>
+                        <div class="joint-name">Y (Forward on Table)</div>
                         <div class="joint-val" id="valY">+0.0 cm</div>
                         <div class="joint-bar-bg"><div class="joint-bar-fill" id="barY"></div></div>
                     </div>
                     <div class="joint-box">
-                        <div class="joint-name">Height Z (Vertical)</div>
-                        <div class="joint-val" id="valZ">+0.0 cm</div>
-                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barZ"></div></div>
+                        <div class="joint-name">Z (Height Above Marker)</div>
+                        <div class="joint-val" id="valZ" style="color: #34d399;">+20.0 cm</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barZ" style="background: #10b981;"></div></div>
                     </div>
                     <div class="joint-box">
-                        <div class="joint-name">Orientation (R, P, Y)</div>
-                        <div class="joint-val" id="valRPY" style="font-size: 0.88rem;">0°, 0°, 0°</div>
-                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barRPY"></div></div>
+                        <div class="joint-name">Distance from Marker</div>
+                        <div class="joint-val" id="valDistMarker">0.0 cm</div>
+                        <div class="joint-bar-bg"><div class="joint-bar-fill" id="barDistMarker"></div></div>
                     </div>
                     <div class="joint-box">
-                        <div class="joint-name">Path Length</div>
+                        <div class="joint-name">Total Shape Path</div>
                         <div class="joint-val" id="valDist">0.0 cm</div>
                         <div class="joint-bar-bg"><div class="joint-bar-fill" id="barDist"></div></div>
                     </div>
                     <div class="joint-box">
                         <div class="joint-name">Gripper Aperture</div>
-                        <div class="joint-val" id="valGrip">50%</div>
+                        <div class="joint-val" id="valGrip">100%</div>
                         <div class="joint-bar-bg"><div class="joint-bar-fill" id="barGrip"></div></div>
                     </div>
                 </div>
             </div>
 
-            <!-- Video Recording Card -->
+            <!-- Synchronized Video Demonstration -->
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">
                         <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
-                        Synchronized Video Demonstration
+                        Recorded Camera Stream
                     </div>
                 </div>
-                <video id="episodeVideo" controls style="width: 100%; height: 220px; background: #000; border-radius: 12px;"></video>
+                <video id="episodeVideo" controls style="width: 100%; height: 210px; background: #000; border-radius: 10px;"></video>
             </div>
         </div>
 
         <!-- Right: Episode Manager & Export Panel -->
-        <div style="display: flex; flex-direction: column; gap: 16px;">
+        <div style="display: flex; flex-direction: column; gap: 14px;">
             <div class="card">
                 <div class="card-header">
                     <div class="card-title">Dataset Summary</div>
@@ -537,12 +552,12 @@
                         <div class="stat-lbl">Total Frames</div>
                     </div>
                     <div class="stat-box">
-                        <div class="stat-val">SO-100</div>
-                        <div class="stat-lbl">Target Embodiment</div>
+                        <div class="stat-val" style="color: #34d399;">ArUco 6x6</div>
+                        <div class="stat-lbl">Origin Anchor</div>
                     </div>
                     <div class="stat-box">
-                        <div class="stat-val">v3.0</div>
-                        <div class="stat-lbl">LeRobot Schema</div>
+                        <div class="stat-val">10.0 cm</div>
+                        <div class="stat-lbl">Marker Width</div>
                     </div>
                 </div>
             </div>
@@ -556,50 +571,64 @@
                     </div>
                 </div>
                 <div class="episode-list" id="epList">
-                    <!-- Dynamic episode items -->
+                    <!-- Dynamic items -->
                 </div>
             </div>
         </div>
     </div>
 
-    <script>
-        document.getElementById('mobileUrlText').innerText = `http://${window.location.hostname}:8000/mobile`;
+    <!-- ArUco Marker Print Modal -->
+    <div class="modal" id="markerModal">
+        <div class="modal-content">
+            <h2 style="font-size: 1.15rem; color: #f8fafc;">🖨️ Printable ArUco 6x6 Marker</h2>
+            <p style="font-size: 0.8rem; color: #94a3b8;">Print this square marker or display it on a flat tablet/screen on your desk as the physical (0, 0, 0) origin.</p>
+            
+            <div class="marker-preview">
+                <img src="/api/marker/image?marker_id=0&size=400" alt="ArUco 6x6 Marker">
+            </div>
 
+            <div style="display: flex; gap: 10px; width: 100%;">
+                <a href="/api/marker/image?marker_id=0&size=800" target="_blank" download="aruco_6x6_id0_10cm.png" class="btn btn-primary" style="flex: 1; justify-content: center; text-decoration: none;">Download PNG</a>
+                <button class="btn" id="closeMarkerBtn" style="flex: 1; justify-content: center;">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
         let episodes = [];
         let selectedEpIdx = -1;
         let currentFrame = 0;
 
-        // UI Element References
+        // UI References
         const playBtn = document.getElementById('playBtn');
         const playIcon = document.getElementById('playIcon');
         const timelineSlider = document.getElementById('timelineSlider');
         const frameCounter = document.getElementById('frameCounter');
         const episodeVideo = document.getElementById('episodeVideo');
 
-        // Telemetry readouts
         const valX = document.getElementById('valX');
         const valY = document.getElementById('valY');
         const valZ = document.getElementById('valZ');
-        const valRPY = document.getElementById('valRPY');
+        const valDistMarker = document.getElementById('valDistMarker');
         const valDist = document.getElementById('valDist');
         const valGrip = document.getElementById('valGrip');
 
         const barX = document.getElementById('barX');
         const barY = document.getElementById('barY');
         const barZ = document.getElementById('barZ');
-        const barRPY = document.getElementById('barRPY');
+        const barDistMarker = document.getElementById('barDistMarker');
         const barDist = document.getElementById('barDist');
         const barGrip = document.getElementById('barGrip');
 
         // ==========================================
-        // 1. THREE.JS 3D END-EFFECTOR TRAJECTORY SCENE
+        // 1. THREE.JS 3D SCENE: TABLE + ARUCO ANCHOR
         // ==========================================
         const container = document.getElementById('canvas3d');
         const scene = new THREE.Scene();
 
         const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.02, 50);
-        camera.position.set(0.35, 0.35, 0.45);
-        camera.lookAt(0.22, 0.14, 0);
+        camera.position.set(0.35, 0.45, 0.45);
+        camera.lookAt(0, 0.15, 0);
 
         const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         renderer.setSize(container.clientWidth, container.clientHeight);
@@ -609,12 +638,12 @@
         const controls = new THREE.OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.dampingFactor = 0.06;
-        controls.target.set(0.22, 0.14, 0);
+        controls.target.set(0, 0.15, 0);
 
-        // Ground Reference Grid & Origin
-        const grid = new THREE.GridHelper(1.2, 24, 0x334155, 0x1e293b);
-        grid.position.y = 0;
-        scene.add(grid);
+        // Table Plane Grid (Z=0 plane)
+        const tableGrid = new THREE.GridHelper(1.2, 24, 0x475569, 0x1e293b);
+        tableGrid.position.y = 0;
+        scene.add(tableGrid);
 
         // Lighting
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
@@ -629,89 +658,86 @@
         scene.add(fillLight);
 
         // ==========================================
-        // 2. 3D TRAJECTORY GEOMETRY OBJECTS
+        // 2. ARUCO MARKER AT (0, 0, 0) TABLE ORIGIN
         // ==========================================
-        let trajectoryTube = null;
-        let waypointDotsGroup = new THREE.Group();
-        scene.add(waypointDotsGroup);
+        const textureLoader = new THREE.TextureLoader();
+        const markerTexture = textureLoader.load('/api/marker/image?marker_id=0&size=400');
+        markerTexture.generateMipmaps = true;
 
-        // Start Beacon Marker (Green)
-        const startBeacon = new THREE.Group();
-        const startSphere = new THREE.Mesh(
-            new THREE.SphereGeometry(0.012, 16, 16),
-            new THREE.MeshStandardMaterial({ color: 0x10b981, emissive: 0x059669, roughness: 0.3 })
-        );
-        const startRing = new THREE.Mesh(
-            new THREE.RingGeometry(0.016, 0.022, 24),
+        const markerPlaneGeo = new THREE.PlaneGeometry(0.10, 0.10); // 10.0 cm square
+        const markerMaterial = new THREE.MeshStandardMaterial({
+            map: markerTexture,
+            roughness: 0.4,
+            metalness: 0.1,
+            side: THREE.DoubleSide
+        });
+
+        const arucoMarkerMesh = new THREE.Mesh(markerPlaneGeo, markerMaterial);
+        arucoMarkerMesh.rotation.x = -Math.PI / 2; // Flat on tabletop
+        arucoMarkerMesh.position.set(0, 0.001, 0); // (0, 0, 0) World Origin Anchor
+        scene.add(arucoMarkerMesh);
+
+        // Marker Origin 3D Coordinate Axes (X: Red, Y: Green, Z: Blue up)
+        const markerAxes = new THREE.AxesHelper(0.06);
+        markerAxes.position.set(0, 0.002, 0);
+        scene.add(markerAxes);
+
+        // Origin Beacon Ring
+        const originRing = new THREE.Mesh(
+            new THREE.RingGeometry(0.055, 0.060, 32),
             new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide })
         );
-        startRing.rotation.x = -Math.PI / 2;
-        startBeacon.add(startSphere, startRing);
-        startBeacon.visible = false;
-        scene.add(startBeacon);
-
-        // Goal/End Beacon Marker (Red)
-        const goalBeacon = new THREE.Group();
-        const goalSphere = new THREE.Mesh(
-            new THREE.SphereGeometry(0.012, 16, 16),
-            new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xdc2626, roughness: 0.3 })
-        );
-        const goalRing = new THREE.Mesh(
-            new THREE.RingGeometry(0.016, 0.022, 24),
-            new THREE.MeshBasicMaterial({ color: 0xef4444, side: THREE.DoubleSide })
-        );
-        goalRing.rotation.x = -Math.PI / 2;
-        goalBeacon.add(goalSphere, goalRing);
-        goalBeacon.visible = false;
-        scene.add(goalBeacon);
+        originRing.rotation.x = -Math.PI / 2;
+        originRing.position.y = 0.0015;
+        scene.add(originRing);
 
         // ==========================================
-        // 3. END-EFFECTOR TOOL / CURSOR GIZMO
+        // 3. FLOATING 3D TRAJECTORY TUBE & EEF CURSOR
         // ==========================================
+        let trajectoryTube = null;
+        const waypointDotsGroup = new THREE.Group();
+        scene.add(waypointDotsGroup);
+
+        // Tool / Cursor Object
         const eeCursorGroup = new THREE.Group();
         scene.add(eeCursorGroup);
 
-        // Focal glowing TCP sphere
         const tcpSphere = new THREE.Mesh(
-            new THREE.SphereGeometry(0.009, 16, 16),
+            new THREE.SphereGeometry(0.008, 16, 16),
             new THREE.MeshStandardMaterial({ color: 0x38bdf8, emissive: 0x0284c7, roughness: 0.2 })
         );
         eeCursorGroup.add(tcpSphere);
 
-        // Stylized Gripper Jaws on the Tool
         const fingerLeft = new THREE.Mesh(
-            new THREE.BoxGeometry(0.006, 0.025, 0.008),
+            new THREE.BoxGeometry(0.005, 0.02, 0.007),
             new THREE.MeshStandardMaterial({ color: 0x818cf8, metalness: 0.6, roughness: 0.3 })
         );
-        fingerLeft.position.set(-0.012, 0.012, 0);
+        fingerLeft.position.set(-0.010, 0.010, 0);
 
         const fingerRight = new THREE.Mesh(
-            new THREE.BoxGeometry(0.006, 0.025, 0.008),
+            new THREE.BoxGeometry(0.005, 0.02, 0.007),
             new THREE.MeshStandardMaterial({ color: 0x818cf8, metalness: 0.6, roughness: 0.3 })
         );
-        fingerRight.position.set(0.012, 0.012, 0);
-
+        fingerRight.position.set(0.010, 0.010, 0);
         eeCursorGroup.add(fingerLeft, fingerRight);
 
-        // Orientation Axes Gizmo (X: Red, Y: Green, Z: Blue)
-        const axesGizmo = new THREE.AxesHelper(0.035);
-        eeCursorGroup.add(axesGizmo);
+        const toolAxes = new THREE.AxesHelper(0.03);
+        eeCursorGroup.add(toolAxes);
 
-        // Height Drop Line & Ground Shadow Disc
+        // Height Drop Line to Table
         const dropLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, -0.2, 0)]);
         const dropLine = new THREE.Line(dropLineGeo, new THREE.LineDashedMaterial({ color: 0x64748b, dashSize: 0.008, gapSize: 0.004 }));
         dropLine.computeLineDistances();
         scene.add(dropLine);
 
         const groundDisc = new THREE.Mesh(
-            new THREE.CircleGeometry(0.02, 20),
+            new THREE.CircleGeometry(0.018, 20),
             new THREE.MeshBasicMaterial({ color: 0x1e293b, side: THREE.DoubleSide, transparent: true, opacity: 0.7 })
         );
         groundDisc.rotation.x = -Math.PI / 2;
         groundDisc.position.y = 0.001;
         scene.add(groundDisc);
 
-        // Animation Render Loop
         function renderLoop() {
             requestAnimationFrame(renderLoop);
             controls.update();
@@ -719,7 +745,6 @@
         }
         renderLoop();
 
-        // Window Resize
         window.addEventListener('resize', () => {
             camera.aspect = container.clientWidth / container.clientHeight;
             camera.updateProjectionMatrix();
@@ -727,7 +752,7 @@
         });
 
         // ==========================================
-        // 4. TRAJECTORY RECONSTRUCTION & RENDERING
+        // 4. TRAJECTORY BUILDER (ANCHORED TO ARUCO)
         // ==========================================
         let currentTrajectoryPoints = [];
         let totalPathLength = 0;
@@ -742,16 +767,11 @@
             }
 
             const numPoints = poses ? poses.length : 0;
-            if (numPoints < 2) {
-                startBeacon.visible = false;
-                goalBeacon.visible = false;
-                return;
-            }
+            if (numPoints < 2) return;
 
             for (let f = 0; f < numPoints; f++) {
                 const p = poses[f];
-                // Pure relative position starting at (0,0,0)
-                // p[0]: X (Forward), p[1]: Y (Lateral), p[2]: Z (Height)
+                // In Three.js: X is lateral, Y is vertical height above table, Z is forward on table
                 const pt = new THREE.Vector3(p[0], p[2], p[1]);
                 currentTrajectoryPoints.push(pt);
 
@@ -760,10 +780,9 @@
                 }
             }
 
-            // Create Smooth 3D Spline Curve
+            // Continuous 3D Spline Curve Tube
             const curve = new THREE.CatmullRomCurve3(currentTrajectoryPoints);
             const tubeGeo = new THREE.TubeGeometry(curve, 100, 0.004, 12, false);
-
             const tubeMat = new THREE.MeshStandardMaterial({
                 color: 0x38bdf8,
                 emissive: 0x0284c7,
@@ -774,8 +793,8 @@
             trajectoryTube = new THREE.Mesh(tubeGeo, tubeMat);
             scene.add(trajectoryTube);
 
-            // Add Waypoint Density Beads along the trajectory shape
-            const dotGeo = new THREE.SphereGeometry(0.003, 8, 8);
+            // Waypoint density beads
+            const dotGeo = new THREE.SphereGeometry(0.0025, 8, 8);
             const dotMat = new THREE.MeshBasicMaterial({ color: 0xa5b4fc });
             for (let i = 0; i < currentTrajectoryPoints.length; i += 2) {
                 const dot = new THREE.Mesh(dotGeo, dotMat);
@@ -783,34 +802,22 @@
                 waypointDotsGroup.add(dot);
             }
 
-            // Position Start Beacon at Origin (0,0,0) & Goal Beacon at End
-            startBeacon.position.set(0, 0, 0);
-            startBeacon.visible = true;
-
-            goalBeacon.position.copy(currentTrajectoryPoints[currentTrajectoryPoints.length - 1]);
-            goalBeacon.visible = true;
-
-            // Auto-focus Camera on Trajectory Center
+            // Center view around trajectory center
             const center = new THREE.Vector3();
             currentTrajectoryPoints.forEach(p => center.add(p));
             center.divideScalar(currentTrajectoryPoints.length);
 
-            controls.target.set(center.x, Math.max(0.05, center.y), center.z);
-            camera.position.set(center.x + 0.25, center.y + 0.25, center.z + 0.35);
+            controls.target.set(center.x * 0.5, Math.max(0.10, center.y), center.z * 0.5);
+            camera.position.set(center.x + 0.30, center.y + 0.25, center.z + 0.35);
         }
 
-        // ==========================================
-        // 5. UPDATE END-EFFECTOR POSE & TELEMETRY
-        // ==========================================
         function updateEndEffectorPose(frameIdx) {
             if (!currentTrajectoryPoints || currentTrajectoryPoints.length === 0) return;
             const idx = Math.min(currentTrajectoryPoints.length - 1, Math.max(0, frameIdx));
             const pt = currentTrajectoryPoints[idx];
 
-            // Update End-Effector 3D Position
             eeCursorGroup.position.copy(pt);
 
-            // Update Ground Drop Line & Disc
             const linePositions = new Float32Array([
                 pt.x, pt.y, pt.z,
                 pt.x, 0.0, pt.z
@@ -819,54 +826,41 @@
             dropLine.computeLineDistances();
             groundDisc.position.set(pt.x, 0.001, pt.z);
 
-            // Retrieve Orientation & Gripper
             let p = [0, 0, 0, 0, 0, 0];
-            let gripper = 50;
+            let gripper = 100;
             if (episodes[selectedEpIdx]) {
                 const ep = episodes[selectedEpIdx];
-                if (ep.poses && ep.poses[idx]) {
-                    p = ep.poses[idx];
-                }
-                if (ep.gripper_states && ep.gripper_states[idx] !== undefined) {
-                    gripper = ep.gripper_states[idx];
-                }
+                if (ep.poses && ep.poses[idx]) p = ep.poses[idx];
+                if (ep.gripper_states && ep.gripper_states[idx] !== undefined) gripper = ep.gripper_states[idx];
             }
 
-            const rollDeg = THREE.MathUtils.radToDeg(p[3] || 0);
-            const pitchDeg = THREE.MathUtils.radToDeg(p[4] || 0);
-            const yawDeg = THREE.MathUtils.radToDeg(p[5] || 0);
+            eeCursorGroup.rotation.set(p[4] || 0, p[5] || 0, p[3] || 0, 'ZYX');
 
-            // Rotate End-Effector Tool Axes
-            eeCursorGroup.rotation.set(
-                p[4] || 0,
-                p[5] || 0,
-                p[3] || 0,
-                'ZYX'
-            );
-
-            // Animate Gripper Finger Aperture
-            const fingerOffset = 0.006 + (gripper / 100.0) * 0.012;
+            const fingerOffset = 0.005 + (gripper / 100.0) * 0.010;
             fingerLeft.position.x = -fingerOffset;
             fingerRight.position.x = fingerOffset;
 
-            // Update Telemetry Display (in cm from (0,0,0))
+            // Compute distance from (0,0,0) ArUco Marker
+            const distFromMarker = Math.sqrt(p[0]*p[0] + p[1]*p[1] + p[2]*p[2]);
+
+            // Telemetry Readouts
             valX.innerText = `${p[0] >= 0 ? '+' : ''}${(p[0] * 100).toFixed(1)} cm`;
             valY.innerText = `${p[1] >= 0 ? '+' : ''}${(p[1] * 100).toFixed(1)} cm`;
-            valZ.innerText = `${p[2] >= 0 ? '+' : ''}${(p[2] * 100).toFixed(1)} cm`;
-            valRPY.innerText = `${rollDeg.toFixed(0)}°, ${pitchDeg.toFixed(0)}°, ${yawDeg.toFixed(0)}°`;
+            valZ.innerText = `${(p[2] * 100).toFixed(1)} cm`;
+            valDistMarker.innerText = `${(distFromMarker * 100).toFixed(1)} cm`;
             valDist.innerText = `${(totalPathLength * 100).toFixed(1)} cm`;
             valGrip.innerText = `${gripper.toFixed(0)}%`;
 
-            barX.style.width = `${Math.min(100, Math.max(0, (Math.abs(p[0]) / 0.3) * 100))}%`;
-            barY.style.width = `${Math.min(100, Math.max(0, (Math.abs(p[1]) / 0.2) * 100))}%`;
-            barZ.style.width = `${Math.min(100, Math.max(0, (Math.abs(p[2]) / 0.2) * 100))}%`;
-            barRPY.style.width = `80%`;
+            barX.style.width = `${Math.min(100, Math.max(0, (Math.abs(p[0]) / 0.25) * 100))}%`;
+            barY.style.width = `${Math.min(100, Math.max(0, (Math.abs(p[1]) / 0.25) * 100))}%`;
+            barZ.style.width = `${Math.min(100, Math.max(0, (p[2] / 0.40) * 100))}%`;
+            barDistMarker.style.width = `${Math.min(100, Math.max(0, (distFromMarker / 0.50) * 100))}%`;
             barDist.style.width = `100%`;
             barGrip.style.width = `${Math.min(100, Math.max(0, gripper))}%`;
         }
 
         // ==========================================
-        // 6. EPISODE MANAGER & EVENT HANDLERS
+        // 5. EPISODE MANAGER & API INTEGRATION
         // ==========================================
         async function fetchEpisodes() {
             try {
@@ -922,7 +916,7 @@
             if (idx < 0 || idx >= episodes.length) return;
             selectedEpIdx = idx;
             const ep = episodes[idx];
-            document.getElementById('activeEpText').innerText = `Episode #${ep.episode_index} - "${ep.task}"`;
+            document.getElementById('activeEpText').innerText = `Episode #${ep.episode_index} - "${ep.task}" (ArUco Anchored)`;
             renderEpisodes();
 
             if (ep.video_url) {
@@ -933,13 +927,11 @@
             timelineSlider.value = 0;
             currentFrame = 0;
 
-            // Reconstruct 3D End-Effector Trajectory Path starting at (0, 0, 0)
             buildTrajectoryGeometry(ep.poses || ep.ee_poses);
             updateEndEffectorPose(0);
             syncFrameUI();
         }
 
-        // Delete Episode Action
         async function deleteEpisode(e, episodeIndex) {
             e.stopPropagation();
             if (!confirm(`Are you sure you want to delete Episode #${episodeIndex}?`)) return;
@@ -958,7 +950,6 @@
             }
         }
 
-        // Clear All Episodes
         document.getElementById('clearAllBtn').onclick = async () => {
             if (!confirm("Are you sure you want to clear ALL recorded episodes?")) return;
             await fetch('/api/episodes/clear', { method: 'POST' });
@@ -966,7 +957,7 @@
             fetchEpisodes();
         };
 
-        // Bi-directional Synchronization between HTML5 Video, 3D Trajectory, and Timeline Slider
+        // Timeline & Video Sync
         function syncFrameUI() {
             if (selectedEpIdx < 0 || !episodes[selectedEpIdx]) return;
             const ep = episodes[selectedEpIdx];
@@ -978,7 +969,6 @@
             updateEndEffectorPose(currentFrame);
         }
 
-        // When user drags timeline slider
         timelineSlider.addEventListener('input', (e) => {
             if (selectedEpIdx < 0 || !episodes[selectedEpIdx]) return;
             const ep = episodes[selectedEpIdx];
@@ -991,7 +981,6 @@
             syncFrameUI();
         });
 
-        // When HTML5 video updates its playback time
         episodeVideo.addEventListener('timeupdate', () => {
             if (selectedEpIdx < 0 || !episodes[selectedEpIdx] || !episodeVideo.duration) return;
             const ep = episodes[selectedEpIdx];
@@ -1006,7 +995,6 @@
             syncFrameUI();
         });
 
-        // Play / Pause Synchronized Toggle
         playBtn.addEventListener('click', () => {
             if (episodeVideo.paused) {
                 episodeVideo.play().catch(() => {});
@@ -1025,9 +1013,9 @@
             playIcon.innerHTML = `<polygon points="5 3 19 12 5 21 5 3"/>`;
         });
 
-        // Generate Sample Recording
+        // Sample 3D Shape Generator
         document.getElementById('addSampleBtn').onclick = async () => {
-            await fetch('/api/recordings/sample', { method: 'POST' });
+            await fetch('/api/recordings/sample?shape=circle', { method: 'POST' });
             fetchEpisodes();
         };
 
@@ -1049,6 +1037,12 @@
                 alert(`Error: ${data.message}`);
             }
         };
+
+        // Marker Modal Controls
+        const markerModal = document.getElementById('markerModal');
+        document.getElementById('openMarkerBtn').onclick = () => markerModal.classList.add('active');
+        document.getElementById('closeMarkerBtn').onclick = () => markerModal.classList.remove('active');
+        markerModal.onclick = (e) => { if (e.target === markerModal) markerModal.classList.remove('active'); };
 
         document.getElementById('refreshBtn').onclick = fetchEpisodes;
         window.onload = fetchEpisodes;

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Mobile Dataset Collector - Multi-Orientation</title>
+    <title>Mobile 3D Trajectory Logger (ArUco Anchored)</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <style>
         * {
@@ -26,9 +26,9 @@
 
         /* Top Header */
         header {
-            background: rgba(15, 23, 42, 0.9);
+            background: rgba(15, 23, 42, 0.92);
             backdrop-filter: blur(12px);
-            padding: 10px 16px;
+            padding: 8px 16px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -52,7 +52,7 @@
         }
 
         h1 {
-            font-size: 1rem;
+            font-size: 0.95rem;
             font-weight: 700;
             background: linear-gradient(135deg, #a5b4fc 0%, #c084fc 100%);
             -webkit-background-clip: text;
@@ -75,13 +75,13 @@
             font-weight: 600;
         }
 
-        .badge-orientation {
+        .badge-anchor {
             background: rgba(16, 185, 129, 0.15);
             color: #34d399;
             border-color: rgba(16, 185, 129, 0.3);
         }
 
-        /* Main Workspace Container */
+        /* Workspace */
         .main-workspace {
             flex: 1;
             display: flex;
@@ -90,7 +90,7 @@
             overflow: hidden;
         }
 
-        /* Camera Viewport */
+        /* Viewport */
         .viewport {
             flex: 1;
             position: relative;
@@ -107,7 +107,31 @@
             object-fit: cover;
         }
 
-        /* HUD Overlays */
+        /* ArUco Aiming Reticle */
+        .reticle-box {
+            position: absolute;
+            width: 150px;
+            height: 150px;
+            border: 2px dashed rgba(52, 211, 153, 0.5);
+            border-radius: 12px;
+            pointer-events: none;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            padding-bottom: 6px;
+            z-index: 10;
+        }
+
+        .reticle-label {
+            background: rgba(15, 23, 42, 0.75);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.65rem;
+            color: #34d399;
+            font-weight: 600;
+        }
+
+        /* HUD */
         .hud-top {
             position: absolute;
             top: 10px;
@@ -116,16 +140,16 @@
             display: flex;
             justify-content: space-between;
             pointer-events: none;
-            z-index: 10;
+            z-index: 12;
         }
 
         .hud-card {
             background: rgba(15, 23, 42, 0.82);
             backdrop-filter: blur(8px);
             border: 1px solid rgba(255, 255, 255, 0.12);
-            padding: 6px 12px;
+            padding: 5px 10px;
             border-radius: 10px;
-            font-size: 0.75rem;
+            font-size: 0.72rem;
             display: flex;
             align-items: center;
             gap: 6px;
@@ -157,7 +181,7 @@
             display: flex;
             justify-content: space-between;
             pointer-events: none;
-            z-index: 10;
+            z-index: 12;
         }
 
         .telemetry-card {
@@ -174,7 +198,7 @@
         /* Permission & Help Card */
         .guide-card {
             position: absolute;
-            inset: 16px;
+            inset: 14px;
             background: rgba(15, 23, 42, 0.95);
             backdrop-filter: blur(16px);
             border: 1px solid rgba(99, 102, 241, 0.4);
@@ -222,12 +246,12 @@
             gap: 4px;
         }
 
-        /* Controls Panel - Default (Portrait) */
+        /* Controls Panel */
         .controls-panel {
             background: rgba(15, 23, 42, 0.95);
             backdrop-filter: blur(16px);
             border-top: 1px solid rgba(255, 255, 255, 0.1);
-            padding: 14px 18px 20px 18px;
+            padding: 12px 16px 18px 16px;
             display: flex;
             flex-direction: column;
             gap: 10px;
@@ -297,9 +321,7 @@
             color: #94a3b8;
         }
 
-        /* =======================================================
-           LANDSCAPE / HORIZONTAL AXIS RESPONSIVE LAYOUT
-           ======================================================= */
+        /* Landscape Mode Layout */
         @media (orientation: landscape) or (max-height: 500px) {
             header {
                 padding: 6px 14px;
@@ -331,11 +353,6 @@
                 flex-direction: column;
                 gap: 4px;
             }
-
-            .btn-record svg {
-                width: 24px;
-                height: 24px;
-            }
         }
     </style>
 </head>
@@ -344,30 +361,35 @@
     <header>
         <div class="brand">
             <div class="brand-dot"></div>
-            <h1>LeRobot Collector</h1>
+            <h1>ArUco 3D Logger</h1>
         </div>
         <div class="header-badges">
-            <div class="badge badge-orientation" id="orientBadge">📱 HORIZONTAL (Landscape)</div>
-            <div class="badge">SO-100</div>
+            <div class="badge badge-anchor">🎯 ArUco Anchor (0, 0, 0)</div>
+            <div class="badge" id="orientBadge">📱 Horizontal</div>
         </div>
     </header>
 
     <div class="main-workspace">
-        <!-- Viewport Area -->
+        <!-- Viewport -->
         <div class="viewport">
             <video id="cameraPreview" autoplay playsinline muted></video>
 
+            <!-- ArUco Aiming Reticle -->
+            <div class="reticle-box">
+                <span class="reticle-label">ArUco Marker</span>
+            </div>
+
             <!-- Permission / Startup Card -->
             <div class="guide-card" id="guideCard">
-                <h2>📷 Live Camera & 100Hz IMU</h2>
-                <p>Orient your phone horizontally (Landscape) or vertically to record demonstrations.</p>
+                <h2>🎯 ArUco 3D Trajectory Anchor</h2>
+                <p>Aim your camera at the printed 6x6 ArUco marker on your table and draw your 3D motion shape in the air.</p>
                 
-                <button class="btn-action" id="enableBtn">⚡ START LIVE CAPTURE</button>
+                <button class="btn-action" id="enableBtn">⚡ START CAMERA & IMU</button>
 
                 <div class="guide-steps" id="browserHelp" style="display: none;">
                     <strong>💡 If camera is blocked on Android Chrome:</strong>
                     <span>1. Go to <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code></span>
-                    <span>2. Add <code id="originCode">http://192.168.1.178:8000</code> & set <strong>Enabled</strong></span>
+                    <span>2. Add <code id="originCode">http://192.168.1.178:8000</code> & select <strong>Enabled</strong></span>
                     <span>3. Tap <strong>Relaunch</strong></span>
                 </div>
             </div>
@@ -383,19 +405,20 @@
                 </div>
             </div>
 
-            <!-- HUD Bottom (Live IMU Readout) -->
+            <!-- HUD Bottom (Telemetry) -->
             <div class="hud-bottom">
                 <div class="telemetry-card" id="accelReadout">ACC: [0.0, 0.0, 9.8]</div>
                 <div class="telemetry-card" id="gyroReadout">GYR: [0.0, 0.0, 0.0]</div>
             </div>
         </div>
 
-        <!-- Controls Area (Side on Landscape, Bottom on Portrait) -->
+        <!-- Controls Area -->
         <div class="controls-panel">
             <div class="input-group">
-                <label for="taskPreset">Task Instruction</label>
+                <label for="taskPreset">Task / Shape</label>
                 <div class="instruction-box">
                     <select id="taskPreset">
+                        <option value="draw 3d circle">draw 3d circle</option>
                         <option value="reach to apple">reach to apple</option>
                         <option value="reach to banana">reach to banana</option>
                         <option value="pick up cup">pick up cup</option>
@@ -412,7 +435,7 @@
                 <span id="recordBtnText">START RECORDING</span>
             </button>
 
-            <div class="status-text" id="statusText">Ready to start demonstration</div>
+            <div class="status-text" id="statusText">Point at ArUco marker on table</div>
         </div>
     </div>
 
@@ -440,7 +463,7 @@
         let mediaRecorder = null;
         let recordedChunks = [];
         let isRecording = false;
-        let startTime = 0;
+        let recordingStartEpochMs = 0;
         let timerInterval = null;
 
         let imuData = [];
@@ -450,7 +473,6 @@
         let lastGyro = [0, 0, 0];
         let currentScreenAngle = 0;
 
-        // Update Orientation Display & Tracking Angle
         function updateOrientation() {
             const angle = (screen.orientation && screen.orientation.angle !== undefined)
                 ? screen.orientation.angle
@@ -459,13 +481,9 @@
             currentScreenAngle = angle;
 
             if (Math.abs(angle) === 90 || Math.abs(angle) === 270 || window.innerWidth > window.innerHeight) {
-                orientBadge.innerText = "📱 Horizontal (Landscape)";
-                orientBadge.style.color = "#34d399";
-                orientBadge.style.borderColor = "rgba(16, 185, 129, 0.3)";
+                orientBadge.innerText = "📱 Horizontal";
             } else {
-                orientBadge.innerText = "📱 Vertical (Portrait)";
-                orientBadge.style.color = "#818cf8";
-                orientBadge.style.borderColor = "rgba(99, 102, 241, 0.3)";
+                orientBadge.innerText = "📱 Vertical";
             }
         }
 
@@ -476,12 +494,11 @@
         }
         updateOrientation();
 
-        // Custom task toggle
         taskPreset.addEventListener('change', (e) => {
             taskCustom.style.display = e.target.value === 'custom' ? 'block' : 'none';
         });
 
-        // Initialize IMU listeners
+        // Initialize IMU listeners with exact epoch millisecond timestamps
         function setupIMU() {
             if (window.DeviceMotionEvent) {
                 window.addEventListener('devicemotion', (event) => {
@@ -495,9 +512,12 @@
                     gyroReadout.innerText = `GYR: [${lastGyro[0].toFixed(1)}, ${lastGyro[1].toFixed(1)}, ${lastGyro[2].toFixed(1)}]`;
 
                     if (isRecording) {
-                        const elapsed = (performance.now() - startTime) / 1000.0;
+                        const nowEpoch = performance.timeOrigin + performance.now();
+                        const elapsedSec = (nowEpoch - recordingStartEpochMs) / 1000.0;
+
                         imuData.push({
-                            timestamp: elapsed,
+                            timestamp: elapsedSec,
+                            epoch_ms: nowEpoch,
                             accel: lastAccel,
                             gyro: lastGyro,
                             screen_angle: currentScreenAngle
@@ -530,7 +550,6 @@
 
         // Start Camera Stream
         async function startLiveCapture() {
-            // iOS Permission Request
             if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
                 try {
                     await DeviceMotionEvent.requestPermission();
@@ -560,7 +579,7 @@
 
                 guideCard.style.display = 'none';
                 setupIMU();
-                statusText.innerText = "Live camera & IMU active.";
+                statusText.innerText = "Point at ArUco marker & press record.";
             } catch (err) {
                 console.error("Camera access failed:", err);
                 statusText.innerText = "Camera blocked: " + err.message;
@@ -570,7 +589,7 @@
 
         enableBtn.addEventListener('click', startLiveCapture);
 
-        // Recording Control
+        // Recording Controls
         recordBtn.addEventListener('click', async () => {
             if (!cameraPreview.srcObject) {
                 await startLiveCapture();
@@ -591,7 +610,7 @@
             imuData = [];
             imuSampleCount = 0;
             isRecording = true;
-            startTime = performance.now();
+            recordingStartEpochMs = performance.timeOrigin + performance.now();
 
             let mimeType = 'video/webm;codecs=vp8';
             if (!MediaRecorder.isTypeSupported(mimeType)) {
@@ -615,10 +634,11 @@
             recDot.classList.add('active');
             recordBtn.classList.add('recording');
             recordBtnText.innerText = "STOP RECORDING";
-            statusText.innerText = "Recording live demonstration...";
+            statusText.innerText = "Drawing 3D shape relative to marker...";
 
             timerInterval = setInterval(() => {
-                const elapsed = (performance.now() - startTime) / 1000.0;
+                const nowEpoch = performance.timeOrigin + performance.now();
+                const elapsed = (nowEpoch - recordingStartEpochMs) / 1000.0;
                 const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
                 const secs = (elapsed % 60).toFixed(1).padStart(4, '0');
                 recTimer.innerText = `${mins}:${secs}`;
@@ -631,8 +651,8 @@
 
             recDot.classList.remove('active');
             recordBtn.classList.remove('recording');
-            recordBtnText.innerText = "SAVING...";
-            statusText.innerText = "Processing demonstration...";
+            recordBtnText.innerText = "CALCULATING 3D SHAPE...";
+            statusText.innerText = "Running ArUco PnP & Visual-Inertial Fusion...";
 
             mediaRecorder.stop();
 
@@ -652,7 +672,7 @@
                     });
                     const res = await response.json();
                     if (res.status === 'success') {
-                        statusText.innerText = `🎉 Saved Episode #${res.episode_index} (${res.num_frames} frames, ${imuData.length} IMU samples)!`;
+                        statusText.innerText = `🎉 3D Trajectory Saved! Episode #${res.episode_index} (${res.num_frames} frames).`;
                     } else {
                         statusText.innerText = "Error processing recording.";
                     }

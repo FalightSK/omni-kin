@@ -1,7 +1,6 @@
 """
 server.py
-FastAPI Server for Mobile Dataset Collector & LeRobot Exporter
-Focuses on pure relative 6-DoF End-Effector Trajectory starting at (0, 0, 0).
+FastAPI Server for ArUco-Anchored Mobile Dataset Collector & 3D Trajectory Visualizer
 """
 
 import os
@@ -10,6 +9,7 @@ import time
 import json
 import socket
 import shutil
+import io
 import numpy as np
 import cv2
 
@@ -19,16 +19,15 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-from fastapi import FastAPI, Request, File, UploadFile, Form
+from fastapi import FastAPI, Request, File, UploadFile, Form, Response
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from trajectory_estimator import TrajectoryEstimator
-from robot_kinematics import SO100Kinematics
+from visual_tracker import VisualInertialTracker
 from lerobot_exporter import LeRobotExporter
 
-app = FastAPI(title="LeRobot Mobile Trajectory Collector")
+app = FastAPI(title="ArUco-Anchored 3D Trajectory Collector")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
@@ -41,10 +40,9 @@ os.makedirs(EXPORT_DIR, exist_ok=True)
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 app.mount("/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
 
-# Global In-Memory Episode Storage
+# Global In-Memory Episode Storage & Visual-Inertial Tracker
 EPISODES_DB = []
-ik_solver = SO100Kinematics()
-trajectory_estimator = TrajectoryEstimator()
+visual_tracker = VisualInertialTracker(marker_size_meters=0.10)
 lerobot_exporter = LeRobotExporter(output_dir=EXPORT_DIR)
 
 def get_local_ip():
@@ -64,6 +62,31 @@ async def index_page(request: Request):
 @app.get("/mobile", response_class=HTMLResponse)
 async def mobile_page(request: Request):
     return templates.TemplateResponse(request=request, name="mobile.html")
+
+@app.get("/api/marker/image")
+async def get_marker_image(marker_id: int = 0, size: int = 600):
+    """
+    Generates and returns a high-resolution printable 6x6 ArUco marker PNG with clean borders.
+    """
+    marker_img = visual_tracker.generate_marker_image(marker_id=marker_id, side_pixels=size, border_pixels=int(size * 0.12))
+    
+    # Add title text banner
+    h, w = marker_img.shape
+    banner_h = 60
+    full_img = np.ones((h + banner_h, w), dtype=np.uint8) * 255
+    full_img[banner_h:, :] = marker_img
+    cv2.putText(
+        full_img,
+        f"ArUco 6x6 (DICT_6X6_250) - ID {marker_id}  [Width: 10.0 cm]",
+        (int(w * 0.08), 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        0,
+        2
+    )
+
+    success, buffer = cv2.imencode(".png", full_img)
+    return Response(content=buffer.tobytes(), media_type="image/png")
 
 @app.get("/api/episodes")
 async def get_episodes():
@@ -140,32 +163,34 @@ async def save_recording(
     if frame_count <= 0:
         frame_count = 60
 
-    # 4. Estimate 6-DoF End-Effector Trajectory (Starts at 0, 0, 0)
-    ee_poses = trajectory_estimator.estimate_trajectory_from_imu(parsed_imu, num_video_frames=frame_count, video_fps=fps)
+    # 4. ArUco PnP & Visual-Inertial 3D Trajectory Reconstruction (Anchored at (0,0,0) Table Marker)
+    anchored_poses = visual_tracker.process_video_and_imu(video_path, parsed_imu, fps=fps)
 
     # 5. Append gripper state (100% open early, 10% closed near grasp)
     gripper_states = []
-    for i in range(frame_count):
-        g = 100.0 if i < (frame_count * 0.7) else 10.0
+    for i in range(len(anchored_poses)):
+        g = 100.0 if i < (len(anchored_poses) * 0.7) else 10.0
         gripper_states.append(g)
 
-    # Target actions (next-step Cartesian EEF poses + gripper)
-    ee_poses = np.array(ee_poses)
-    actions = np.roll(ee_poses, -1, axis=0)
-    actions[-1] = ee_poses[-1]
+    # Target actions (next-step Cartesian poses + gripper)
+    anchored_poses = np.array(anchored_poses)
+    actions = np.roll(anchored_poses, -1, axis=0)
+    actions[-1] = anchored_poses[-1]
 
-    timestamps = np.linspace(0, frame_count / fps, frame_count)
+    timestamps = np.linspace(0, len(anchored_poses) / fps, len(anchored_poses))
 
     episode_data = {
         'episode_index': ep_idx,
         'task': task,
         'video_path': video_path,
         'video_url': f"/recordings/episode_{ep_idx:04d}/recording.mp4",
-        'num_frames': frame_count,
+        'num_frames': len(anchored_poses),
         'fps': fps,
-        'duration': frame_count / fps,
-        'ee_poses': ee_poses.tolist(),
-        'poses': ee_poses.tolist(),
+        'duration': len(anchored_poses) / fps,
+        'anchor': 'aruco_dict_6x6_250_id0',
+        'marker_size_cm': 10.0,
+        'poses': anchored_poses.tolist(),
+        'ee_poses': anchored_poses.tolist(),
         'gripper_states': gripper_states,
         'actions': actions.tolist(),
         'timestamps': timestamps.tolist(),
@@ -178,13 +203,14 @@ async def save_recording(
         "status": "success",
         "episode_index": ep_idx,
         "task": task,
-        "num_frames": frame_count
+        "num_frames": len(anchored_poses),
+        "anchor": "ArUco (0, 0, 0) Table Center"
     })
 
 @app.post("/api/recordings/sample")
-async def generate_sample_recording(task: str = "reach to apple"):
+async def generate_sample_recording(task: str = "reach to apple", shape: str = "circle"):
     """
-    Generates a synthetic demonstration episode starting at (0, 0, 0) for instant testing.
+    Generates a synthetic 3D shape demonstration (e.g. 3D circle floating 20cm above ArUco marker).
     """
     ep_idx = len(EPISODES_DB)
     ep_dir = os.path.join(RECORDINGS_DIR, f"episode_{ep_idx:04d}")
@@ -194,31 +220,42 @@ async def generate_sample_recording(task: str = "reach to apple"):
     fps = 30.0
     video_path = os.path.join(ep_dir, "recording.mp4")
 
-    # Generate synthetic video stream
+    # Generate synthetic video stream showing the table and ArUco marker
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(video_path, fourcc, fps, (640, 480))
 
-    ee_poses = trajectory_estimator.estimate_trajectory_from_imu([], num_video_frames=frame_count, video_fps=fps)
+    marker_img = visual_tracker.generate_marker_image(marker_id=0, side_pixels=140, border_pixels=10)
+    mh, mw = marker_img.shape
+
+    anchored_poses = visual_tracker.generate_synthetic_anchored_trajectory(num_frames=frame_count, shape=shape)
     gripper_states = []
 
     for i in range(frame_count):
-        frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.putText(frame, f"Task: {task}", (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-        cv2.putText(frame, f"Frame {i+1}/{frame_count}", (30, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (129, 140, 248), 2)
+        # Draw wooden table background
+        frame = np.full((480, 640, 3), (35, 45, 60), dtype=np.uint8)
         
-        cx = int(320 + 150 * np.sin(i * 0.05))
-        cy = int(240 + 80 * np.cos(i * 0.05))
-        cv2.circle(frame, (cx, cy), 20, (0, 255, 0) if "apple" in task else (0, 255, 255), -1)
-        out.write(frame)
+        # Draw ArUco marker flat on table center
+        my, mx = 240, 250
+        frame[my:my+mh, mx:mx+mw] = cv2.cvtColor(marker_img, cv2.COLOR_GRAY2BGR)
 
+        # Draw hand trajectory target
+        p = anchored_poses[i]
+        # Project 3D point (p[0], p[1], p[2]) to 2D image preview
+        px = int(320 + p[0] * 800)
+        py = int(240 - p[2] * 400 + p[1] * 300)
+        cv2.circle(frame, (px, py), 12, (0, 255, 255), -1)
+        cv2.putText(frame, f"Task: {task}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, f"Z (Height above marker): {p[2]*100:.1f} cm", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (129, 140, 248), 2)
+        
+        out.write(frame)
         g = 100.0 if i < 60 else 10.0
         gripper_states.append(g)
 
     out.release()
 
-    ee_poses = np.array(ee_poses)
-    actions = np.roll(ee_poses, -1, axis=0)
-    actions[-1] = ee_poses[-1]
+    anchored_poses = np.array(anchored_poses)
+    actions = np.roll(anchored_poses, -1, axis=0)
+    actions[-1] = anchored_poses[-1]
     timestamps = np.linspace(0, frame_count / fps, frame_count)
 
     episode_data = {
@@ -229,8 +266,10 @@ async def generate_sample_recording(task: str = "reach to apple"):
         'num_frames': frame_count,
         'fps': fps,
         'duration': frame_count / fps,
-        'ee_poses': ee_poses.tolist(),
-        'poses': ee_poses.tolist(),
+        'anchor': 'aruco_dict_6x6_250_id0',
+        'marker_size_cm': 10.0,
+        'poses': anchored_poses.tolist(),
+        'ee_poses': anchored_poses.tolist(),
         'gripper_states': gripper_states,
         'actions': actions.tolist(),
         'timestamps': timestamps.tolist(),
@@ -250,7 +289,7 @@ async def export_lerobot():
     if not EPISODES_DB:
         return JSONResponse({"status": "error", "message": "No episodes recorded yet."}, status_code=400)
 
-    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_eef_trajectory_demo")
+    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_aruco_3d_trajectories")
 
     return JSONResponse({
         "status": "success",
@@ -263,7 +302,7 @@ async def replay_in_isaac_lab(episode_index: int = 0):
     if not EPISODES_DB:
         return JSONResponse({"status": "error", "message": "No episodes to replay."}, status_code=400)
 
-    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_eef_trajectory_demo")
+    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_aruco_3d_trajectories")
     parquet_path = os.path.join(export_path, "data", "chunk-000", "file-000.parquet")
 
     isaac_python = r"C:\Users\SK\miniconda3\envs\isaac_lab\python.exe"
@@ -290,10 +329,11 @@ if __name__ == "__main__":
     local_ip = get_local_ip()
 
     print("\n" + "="*60)
-    print("LeRobot Mobile End-Effector Trajectory Collector Server Started!")
+    print("ArUco-Anchored 3D Trajectory Collector Server Started!")
     print("="*60)
     print(f"Desktop Dashboard: http://localhost:8000")
     print(f"Phone Mobile URL:  http://{local_ip}:8000/mobile")
+    print(f"Print ArUco Marker: http://localhost:8000/api/marker/image")
     print("="*60 + "\n")
 
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
