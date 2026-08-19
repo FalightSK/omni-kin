@@ -577,19 +577,40 @@
         </div>
     </div>
 
-    <!-- ArUco Marker Print Modal -->
+    <!-- ArUco Marker Generator & Print Modal -->
     <div class="modal" id="markerModal">
         <div class="modal-content">
-            <h2 style="font-size: 1.15rem; color: #f8fafc;">🖨️ Printable ArUco 6x6 Marker</h2>
-            <p style="font-size: 0.8rem; color: #94a3b8;">Print this square marker or display it on a flat tablet/screen on your desk as the physical (0, 0, 0) origin.</p>
+            <h2 style="font-size: 1.15rem; color: #f8fafc;">🖨️ ArUco Marker Generator & Anchor</h2>
+            <p style="font-size: 0.78rem; color: #94a3b8;">Generate any ArUco marker or print one to place flat on your table as the physical (0, 0, 0) origin anchor.</p>
             
-            <div class="marker-preview">
-                <img src="/api/marker/image?marker_id=0&size=400" alt="ArUco 6x6 Marker">
+            <!-- Generator Options -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; text-align: left;">
+                <div>
+                    <label style="font-size: 0.7rem; color: #94a3b8; text-transform: uppercase;">Marker ID</label>
+                    <input type="number" id="genMarkerId" value="0" min="0" max="249" style="width: 100%; background: rgba(30,41,59,0.8); border: 1px solid rgba(255,255,255,0.15); color: #fff; padding: 6px 10px; border-radius: 8px; font-size: 0.85rem; outline: none;">
+                </div>
+                <div>
+                    <label style="font-size: 0.7rem; color: #94a3b8; text-transform: uppercase;">Dictionary</label>
+                    <select id="genMarkerDict" style="width: 100%; background: rgba(30,41,59,0.8); border: 1px solid rgba(255,255,255,0.15); color: #fff; padding: 6px 10px; border-radius: 8px; font-size: 0.85rem; outline: none;">
+                        <option value="DICT_6X6_250">6x6 (DICT_6X6_250)</option>
+                        <option value="DICT_4X4_50">4x4 (DICT_4X4_50)</option>
+                        <option value="DICT_5X5_100">5x5 (DICT_5X5_100)</option>
+                    </select>
+                </div>
             </div>
 
-            <div style="display: flex; gap: 10px; width: 100%;">
-                <a href="/api/marker/image?marker_id=0&size=800" target="_blank" download="aruco_6x6_id0_10cm.png" class="btn btn-primary" style="flex: 1; justify-content: center; text-decoration: none;">Download PNG</a>
-                <button class="btn" id="closeMarkerBtn" style="flex: 1; justify-content: center;">Close</button>
+            <div class="marker-preview" style="position: relative;">
+                <img id="markerPreviewImg" src="/api/marker/image?marker_id=0&size=400&dict_name=DICT_6X6_250" alt="ArUco Marker">
+            </div>
+
+            <p style="font-size: 0.72rem; color: #34d399; background: rgba(16,185,129,0.1); padding: 6px 10px; border-radius: 8px; width: 100%;">
+                💡 <strong>Persistent Anchor:</strong> Once printed or displayed, this exact marker remains valid forever across all server restarts!
+            </p>
+
+            <div style="display: flex; gap: 8px; width: 100%;">
+                <a id="downloadMarkerLink" href="/api/marker/image?marker_id=0&size=800&dict_name=DICT_6X6_250" target="_blank" download="aruco_marker.png" class="btn btn-primary" style="flex: 1; justify-content: center; text-decoration: none;">Download PNG</a>
+                <button class="btn btn-marker" id="printMarkerBtn" style="flex: 1; justify-content: center;">Print</button>
+                <button class="btn" id="closeMarkerBtn" style="padding: 8px 14px;">Close</button>
             </div>
         </div>
     </div>
@@ -1038,8 +1059,34 @@
             }
         };
 
-        // Marker Modal Controls
+        // Marker Modal Controls & Generator
         const markerModal = document.getElementById('markerModal');
+        const genMarkerId = document.getElementById('genMarkerId');
+        const genMarkerDict = document.getElementById('genMarkerDict');
+        const markerPreviewImg = document.getElementById('markerPreviewImg');
+        const downloadMarkerLink = document.getElementById('downloadMarkerLink');
+
+        function updateMarkerPreview() {
+            const id = Math.max(0, parseInt(genMarkerId.value) || 0);
+            const dict = genMarkerDict.value;
+            const previewUrl = `/api/marker/image?marker_id=${id}&size=400&dict_name=${dict}`;
+            const downloadUrl = `/api/marker/image?marker_id=${id}&size=800&dict_name=${dict}`;
+
+            markerPreviewImg.src = previewUrl;
+            downloadMarkerLink.href = downloadUrl;
+            downloadMarkerLink.download = `aruco_${dict}_id${id}.png`;
+        }
+
+        genMarkerId.addEventListener('input', updateMarkerPreview);
+        genMarkerDict.addEventListener('change', updateMarkerPreview);
+
+        document.getElementById('printMarkerBtn').onclick = () => {
+            const w = window.open(downloadMarkerLink.href, '_blank');
+            if (w) {
+                w.onload = () => w.print();
+            }
+        };
+
         document.getElementById('openMarkerBtn').onclick = () => markerModal.classList.add('active');
         document.getElementById('closeMarkerBtn').onclick = () => markerModal.classList.remove('active');
         markerModal.onclick = (e) => { if (e.target === markerModal) markerModal.classList.remove('active'); };

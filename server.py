@@ -64,11 +64,16 @@ async def mobile_page(request: Request):
     return templates.TemplateResponse(request=request, name="mobile.html")
 
 @app.get("/api/marker/image")
-async def get_marker_image(marker_id: int = 0, size: int = 600):
+async def get_marker_image(marker_id: int = 0, size: int = 600, width_cm: float = 10.0, dict_name: str = "DICT_6X6_250"):
     """
-    Generates and returns a high-resolution printable 6x6 ArUco marker PNG with clean borders.
+    Generates and returns a high-resolution printable ArUco marker PNG with clean borders and label.
     """
-    marker_img = visual_tracker.generate_marker_image(marker_id=marker_id, side_pixels=size, border_pixels=int(size * 0.12))
+    marker_img = visual_tracker.generate_marker_image(
+        marker_id=marker_id,
+        side_pixels=size,
+        border_pixels=int(size * 0.12),
+        dict_name=dict_name
+    )
     
     # Add title text banner
     h, w = marker_img.shape
@@ -77,10 +82,10 @@ async def get_marker_image(marker_id: int = 0, size: int = 600):
     full_img[banner_h:, :] = marker_img
     cv2.putText(
         full_img,
-        f"ArUco 6x6 (DICT_6X6_250) - ID {marker_id}  [Width: 10.0 cm]",
-        (int(w * 0.08), 40),
+        f"ArUco {dict_name.replace('DICT_', '')} - ID {marker_id}  [Target Width: {width_cm:.1f} cm]",
+        (int(w * 0.05), 40),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
+        0.58,
         0,
         2
     )

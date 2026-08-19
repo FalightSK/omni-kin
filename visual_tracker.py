@@ -41,11 +41,13 @@ class VisualInertialTracker:
             [-hs, -hs, 0.0]
         ], dtype=np.float32)
 
-    def generate_marker_image(self, marker_id=0, side_pixels=400, border_pixels=50):
+    def generate_marker_image(self, marker_id=0, side_pixels=400, border_pixels=50, dict_name="DICT_6X6_250"):
         """
         Generates a printable ArUco marker image with a clean white margin.
         """
-        marker_img = cv2.aruco.generateImageMarker(self.dictionary, id=marker_id, sidePixels=side_pixels)
+        dict_type = getattr(cv2.aruco, dict_name, self.dict_type)
+        custom_dict = cv2.aruco.getPredefinedDictionary(dict_type)
+        marker_img = cv2.aruco.generateImageMarker(custom_dict, id=int(marker_id), sidePixels=side_pixels)
         bordered = cv2.copyMakeBorder(
             marker_img,
             border_pixels, border_pixels, border_pixels, border_pixels,
