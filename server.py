@@ -93,6 +93,142 @@ async def get_marker_image(marker_id: int = 0, size: int = 600, width_cm: float 
     success, buffer = cv2.imencode(".png", full_img)
     return Response(content=buffer.tobytes(), media_type="image/png")
 
+@app.get("/api/marker/print", response_class=HTMLResponse)
+async def print_marker_page(marker_id: int = 0, width_cm: float = 10.0, dict_name: str = "DICT_6X6_250"):
+    """
+    Returns an HTML print template with EXACT physical centimeter scaling and a printed verification ruler.
+    """
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Print ArUco Marker (Exact {width_cm}cm)</title>
+    <style>
+        @page {{
+            size: A4 portrait;
+            margin: 15mm;
+        }}
+        * {{
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }}
+        body {{
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #fff;
+            color: #000;
+        }}
+        .no-print {{
+            background: #f1f5f9;
+            border: 1px solid #cbd5e1;
+            padding: 12px 18px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+            max-width: 500px;
+        }}
+        .print-btn {{
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-weight: bold;
+            font-size: 14px;
+            cursor: pointer;
+            margin-top: 8px;
+        }}
+        @media print {{
+            .no-print {{ display: none !important; }}
+            body {{ padding: 0; }}
+        }}
+
+        /* EXACT PHYSICAL CENTIMETER DIMENSIONS */
+        .marker-container {{
+            width: {width_cm}cm;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            border: 1px dashed #94a3b8;
+            padding: 4mm;
+        }}
+
+        .marker-img {{
+            width: {width_cm}cm;
+            height: {width_cm}cm;
+            object-fit: contain;
+            display: block;
+        }}
+
+        .marker-info {{
+            font-size: 12px;
+            font-weight: 600;
+            margin-top: 4mm;
+            text-align: center;
+        }}
+
+        /* Printed Centimeter Ruler for Calibration Verification */
+        .ruler-container {{
+            width: {width_cm}cm;
+            margin-top: 4mm;
+            border-top: 2px solid #000;
+            position: relative;
+            height: 12mm;
+        }}
+
+        .ruler-tick {{
+            position: absolute;
+            top: 0;
+            width: 1px;
+            background: #000;
+        }}
+
+        .ruler-label {{
+            position: absolute;
+            top: 6mm;
+            font-size: 9px;
+            font-family: monospace;
+            transform: translateX(-50%);
+        }}
+    </style>
+</head>
+<body>
+    <div class="no-print">
+        <h3 style="margin: 0 0 6px 0; color: #1e293b;">🖨️ Physical Scale Printing Instructions</h3>
+        <p style="margin: 0; font-size: 13px; color: #475569;">
+            In your printer dialog, set <strong>Scale to 100% (Actual Size)</strong>. Do NOT select "Fit to Printable Area".
+        </p>
+        <button class="print-btn" onclick="window.print()">PRINT EXACT {width_cm} CM MARKER</button>
+    </div>
+
+    <div class="marker-container">
+        <img class="marker-img" src="/api/marker/image?marker_id={marker_id}&size=800&dict_name={dict_name}" alt="ArUco Marker">
+        <div class="marker-info">ArUco {dict_name.replace('DICT_', '')} | ID {marker_id} | Exactly {width_cm} cm × {width_cm} cm</div>
+        
+        <!-- Verification Ruler -->
+        <div class="ruler-container">
+            <div class="ruler-tick" style="left: 0; height: 5mm;"></div>
+            <div class="ruler-label" style="left: 0;">0cm</div>
+            
+            <div class="ruler-tick" style="left: 25%; height: 3mm;"></div>
+            <div class="ruler-label" style="left: 25%;">{width_cm*0.25:.1f}</div>
+
+            <div class="ruler-tick" style="left: 50%; height: 5mm;"></div>
+            <div class="ruler-label" style="left: 50%;">{width_cm*0.5:.1f}cm</div>
+
+            <div class="ruler-tick" style="left: 75%; height: 3mm;"></div>
+            <div class="ruler-label" style="left: 75%;">{width_cm*0.75:.1f}</div>
+
+            <div class="ruler-tick" style="right: 0; height: 5mm;"></div>
+            <div class="ruler-label" style="right: 0;">{width_cm:.1f}cm</div>
+        </div>
+    </div>
+</body>
+</html>"""
+
 @app.get("/api/episodes")
 async def get_episodes():
     return JSONResponse(EPISODES_DB)

@@ -584,18 +584,22 @@
             <p style="font-size: 0.78rem; color: #94a3b8;">Generate any ArUco marker or print one to place flat on your table as the physical (0, 0, 0) origin anchor.</p>
             
             <!-- Generator Options -->
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; text-align: left;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; width: 100%; text-align: left;">
                 <div>
-                    <label style="font-size: 0.7rem; color: #94a3b8; text-transform: uppercase;">Marker ID</label>
-                    <input type="number" id="genMarkerId" value="0" min="0" max="249" style="width: 100%; background: rgba(30,41,59,0.8); border: 1px solid rgba(255,255,255,0.15); color: #fff; padding: 6px 10px; border-radius: 8px; font-size: 0.85rem; outline: none;">
+                    <label style="font-size: 0.68rem; color: #94a3b8; text-transform: uppercase;">Marker ID</label>
+                    <input type="number" id="genMarkerId" value="0" min="0" max="249" style="width: 100%; background: rgba(30,41,59,0.8); border: 1px solid rgba(255,255,255,0.15); color: #fff; padding: 6px 8px; border-radius: 8px; font-size: 0.85rem; outline: none;">
                 </div>
                 <div>
-                    <label style="font-size: 0.7rem; color: #94a3b8; text-transform: uppercase;">Dictionary</label>
-                    <select id="genMarkerDict" style="width: 100%; background: rgba(30,41,59,0.8); border: 1px solid rgba(255,255,255,0.15); color: #fff; padding: 6px 10px; border-radius: 8px; font-size: 0.85rem; outline: none;">
-                        <option value="DICT_6X6_250">6x6 (DICT_6X6_250)</option>
-                        <option value="DICT_4X4_50">4x4 (DICT_4X4_50)</option>
-                        <option value="DICT_5X5_100">5x5 (DICT_5X5_100)</option>
+                    <label style="font-size: 0.68rem; color: #94a3b8; text-transform: uppercase;">Dictionary</label>
+                    <select id="genMarkerDict" style="width: 100%; background: rgba(30,41,59,0.8); border: 1px solid rgba(255,255,255,0.15); color: #fff; padding: 6px 8px; border-radius: 8px; font-size: 0.85rem; outline: none;">
+                        <option value="DICT_6X6_250">6x6</option>
+                        <option value="DICT_4X4_50">4x4</option>
+                        <option value="DICT_5X5_100">5x5</option>
                     </select>
+                </div>
+                <div>
+                    <label style="font-size: 0.68rem; color: #94a3b8; text-transform: uppercase;">Width (cm)</label>
+                    <input type="number" id="genMarkerWidth" value="10.0" min="1.0" max="50.0" step="0.5" style="width: 100%; background: rgba(30,41,59,0.8); border: 1px solid rgba(255,255,255,0.15); color: #fff; padding: 6px 8px; border-radius: 8px; font-size: 0.85rem; outline: none;">
                 </div>
             </div>
 
@@ -1063,28 +1067,33 @@
         const markerModal = document.getElementById('markerModal');
         const genMarkerId = document.getElementById('genMarkerId');
         const genMarkerDict = document.getElementById('genMarkerDict');
+        const genMarkerWidth = document.getElementById('genMarkerWidth');
         const markerPreviewImg = document.getElementById('markerPreviewImg');
         const downloadMarkerLink = document.getElementById('downloadMarkerLink');
 
         function updateMarkerPreview() {
             const id = Math.max(0, parseInt(genMarkerId.value) || 0);
             const dict = genMarkerDict.value;
-            const previewUrl = `/api/marker/image?marker_id=${id}&size=400&dict_name=${dict}`;
-            const downloadUrl = `/api/marker/image?marker_id=${id}&size=800&dict_name=${dict}`;
+            const widthCm = parseFloat(genMarkerWidth.value) || 10.0;
+
+            const previewUrl = `/api/marker/image?marker_id=${id}&size=400&dict_name=${dict}&width_cm=${widthCm}`;
+            const downloadUrl = `/api/marker/image?marker_id=${id}&size=800&dict_name=${dict}&width_cm=${widthCm}`;
 
             markerPreviewImg.src = previewUrl;
             downloadMarkerLink.href = downloadUrl;
-            downloadMarkerLink.download = `aruco_${dict}_id${id}.png`;
+            downloadMarkerLink.download = `aruco_${dict}_id${id}_${widthCm}cm.png`;
         }
 
         genMarkerId.addEventListener('input', updateMarkerPreview);
         genMarkerDict.addEventListener('change', updateMarkerPreview);
+        genMarkerWidth.addEventListener('input', updateMarkerPreview);
 
         document.getElementById('printMarkerBtn').onclick = () => {
-            const w = window.open(downloadMarkerLink.href, '_blank');
-            if (w) {
-                w.onload = () => w.print();
-            }
+            const id = Math.max(0, parseInt(genMarkerId.value) || 0);
+            const dict = genMarkerDict.value;
+            const widthCm = parseFloat(genMarkerWidth.value) || 10.0;
+            const printUrl = `/api/marker/print?marker_id=${id}&dict_name=${dict}&width_cm=${widthCm}`;
+            window.open(printUrl, '_blank');
         };
 
         document.getElementById('openMarkerBtn').onclick = () => markerModal.classList.add('active');
