@@ -22,6 +22,9 @@ test_export_output/
 *.parquet
 *.h5
 
+# Certificates & Keys
+*.pem
+
 # IDE & System Files
 .vscode/
 .idea/

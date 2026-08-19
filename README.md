@@ -1,22 +1,36 @@
-# Mobile Smartphone Trajectory Collector & LeRobot Exporter with Isaac Lab Simulation Replay
+# ArUco-Anchored Visual-Inertial 3D Trajectory Collector & LeRobot Exporter
 
-A complete end-to-end framework that captures human manipulation demonstration trajectories using a smartphone (built-in Camera + high-frequency IMU sensors), computes 6-DoF end-effector motion mapped to a target robot arm (**SO-100**), exports the dataset into Hugging Face **LeRobot** format, and replays demonstrations in **NVIDIA Isaac Lab** 3D physics simulation.
+A high-precision end-to-end framework that captures human manipulation and 3D motion demonstrations using a smartphone (Rear Camera + High-Frequency IMU), anchors the motion relative to a physical table origin via **ArUco solvePnP**, performs **Visual-Inertial Dead-Reckoning Fusion**, visualizes the 3D trajectory in a **Side-by-Side Synchronized Web Dashboard**, and exports demonstrations into Hugging Face **LeRobot** format with **NVIDIA Isaac Lab** simulation replay.
 
 ---
 
 ## 🌟 Key Features
 
-*   **📱 Mobile Web Capture Interface**: Accessible via any smartphone browser over local Wi-Fi. Captures synchronized video stream + 50–100 Hz IMU sensor data (`DeviceMotionEvent`) along with task instructions (e.g., `"reach to apple"`, `"reach to banana"`).
-*   **📐 Robot Kinematics Engine (`robot_kinematics.py`)**: Analytical Forward & Inverse Kinematics (IK) solver tailored for the **SO-100** 5-DoF/6-DoF robot arm (the default embodiment in Hugging Face LeRobot). Maps phone 6-DoF workspace trajectories into target joint angles $(q_0, q_1, q_2, q_3, q_4, \text{gripper})$.
-*   **🛰️ Sensor Fusion & Trajectory Estimator (`trajectory_estimator.py`)**: Integrates IMU acceleration & angular velocity with orientation smoothing and gravity removal to output 6-DoF camera/end-effector poses $(x, y, z, \text{roll}, \text{pitch}, \text{yaw})$.
-*   **📦 Hugging Face LeRobot Dataset Exporter (`lerobot_exporter.py`)**: Formats collected episodes into the official LeRobot v3.0 / v2.0 schema:
-    *   `data/chunk-000/file-000.parquet`: Stores `observation.state`, `action`, `task`, `timestamp`, `frame_index`.
-    *   `meta/info.json`: Robot parameters, features schema, total episodes & frames count.
-    *   `meta/stats.json`: Normalization statistics (mean, std, min, max).
-    *   `meta/episodes/file-000.parquet`: Episode boundary lookup table.
-    *   `videos/`: Video feeds encoded per episode.
-*   **🖥️ Desktop 3D Web Dashboard (`templates/index.html`)**: Interactive dashboard with Three.js 3D trajectory visualizer, video playback player, sample recording generator, and 1-click dataset exporter.
-*   **🎮 NVIDIA Isaac Lab Physics Simulation Replay (`isaac_lab_replay.py`)**: Replays recorded trajectories and joint angles step-by-step inside NVIDIA Isaac Lab 3D physics simulation.
+*   🎯 **Physical Table Anchor (ArUco Marker Origin $(0, 0, 0)$)**:
+    *   Uses a standard printed ArUco 6x6 marker (`DICT_6X6_250`, ID 0, 10.0 cm width) placed flat on the table.
+    *   Defines the absolute physical origin $(0, 0, 0)$ with $Z=0$ on the tabletop surface and $+Z$ pointing upward.
+    *   Persistent across all server restarts — the same printed paper remains valid forever.
+*   📐 **Visual-Inertial Sensor Fusion (`visual_tracker.py`)**:
+    *   **Algorithm B (ArUco PnP Pose Estimation)**: Uses `cv2.solvePnP` with `SOLVEPNP_IPPE_SQUARE` to compute exact millimeter-accurate 6-DoF camera poses $(\mathbf{p}_{\text{cam}} = -R^T \mathbf{t})$ in real metric space.
+    *   **Algorithm A (High-Frequency IMU Dead-Reckoning)**: Integrates 100–200 Hz accelerometer and gyroscope data with tilt orientation correction, gravity compensation, and Butterworth filtering.
+    *   **Algorithm C (Matrix Offset Fusion)**: Fuses PnP anchors with relative inertial displacement to bridge temporary marker occlusions or steep tilt angles without scale drift.
+*   📱 **Mobile Web Data Logger (`templates/mobile.html`)**:
+    *   Runs on any smartphone browser (Chrome/Safari) over local Wi-Fi.
+    *   Captures 720p 30 FPS rear camera video + 100Hz+ IMU motion telemetry.
+    *   High-precision UNIX epoch timestamps (`performance.timeOrigin + performance.now()`) for millisecond-accurate sync.
+    *   Built-in ArUco aiming viewfinder reticle and responsive landscape thumb-controls.
+*   🖥️ **50/50 Side-by-Side Dual-Pane Dashboard (`templates/index.html`)**:
+    *   **Left Pane**: Real-time Three.js 3D WebGL viewport showing the virtual table grid, physical ArUco marker at $(0, 0, 0)$, floating 3D spline trajectory tube, and end-effector tool.
+    *   **Right Pane**: Synchronized recorded camera video feed.
+    *   **Master Playback Bar**: Unified frame slider and Play/Pause control advancing both 3D trajectory and video simultaneously.
+    *   **Live Cartesian Telemetry**: Real-time readouts for $X$ (lateral on table), $Y$ (forward on table), and $Z$ (height above marker in cm).
+*   🖨️ **1:1 Exact Physical Scale Marker Generator (`/api/marker/print`)**:
+    *   Interactive generator supporting customizable Marker IDs (0–249), dictionary sizes (4x4, 5x5, 6x6), and physical widths (e.g. 10.0 cm, 5.0 cm).
+    *   Dedicated CSS print page scaling the pure black ArUco square to exact physical centimeters with a built-in verification ruler.
+*   📦 **Hugging Face LeRobot Dataset Exporter (`lerobot_exporter.py`)**:
+    *   Exports datasets into official LeRobot schema (`.parquet` files, `meta/info.json`, `meta/stats.json`, `meta/episodes/`).
+*   🎮 **NVIDIA Isaac Lab Simulation Replay (`isaac_lab_replay.py`)**:
+    *   Direct 1-click launch from dashboard or CLI to replay recorded Cartesian trajectories in 3D physics simulation.
 
 ---
 
@@ -24,111 +38,132 @@ A complete end-to-end framework that captures human manipulation demonstration t
 
 ```
  ┌─────────────────────────────────────────────────────────────┐
- │                Mobile Phone Browser / App                   │
- │   - Video Camera Stream (MP4/WebM)                         │
- │   - High-Frequency IMU Sensors (DeviceMotionEvent @ 50-100Hz) │
- │   - Task Prompts ("reach to apple", "reach to banana")     │
+ │                Physical Setup (The Anchor)                  │
+ │   - 6x6 ArUco Marker (10.0 cm width) taped flat on table    │
+ │   - Establishes Absolute World Origin (0, 0, 0) with Z=0    │
+ └──────────────────────────────┬──────────────────────────────┘
+                                │
+ ┌──────────────────────────────▼──────────────────────────────┐
+ │                Mobile Web App (Data Logging)                │
+ │   - 720p 30 FPS Rear Camera (HTML5 MediaRecorder)           │
+ │   - 100-200 Hz IMU Accelerometer + Gyro (DeviceMotionEvent) │
+ │   - Millisecond Epoch Timestamping (performance.timeOrigin) │
  └──────────────────────────────┬──────────────────────────────┘
                                 │ Upload over Wi-Fi
-                                ▼
- ┌─────────────────────────────────────────────────────────────┐
- │               Python Backend Server (FastAPI)               │
- ├─────────────────────────────────────────────────────────────┤
- │ 1. Trajectory Estimator (Sensor Fusion & Gravity Removal)   │
- │ 2. Robot Kinematics Solver (SO-100 Arm Inverse Kinematics)  │
- │ 3. LeRobot Exporter (Parquet + MP4 + Metadata JSON)         │
- └──────────────┬──────────────────────────────┬───────────────┘
-                │                              │
-                ▼                              ▼
- ┌──────────────────────────────┐ ┌───────────────────────────┐
- │ 3D Web Dashboard (Three.js)  │ │ NVIDIA Isaac Lab Replay   │
- │  - Real-time 3D Preview      │ │  - AppLauncher (GUI/GPU)  │
- │  - Episode Manager           │ │  - 3D Articulation Replay │
- └──────────────────────────────┘ └───────────────────────────┘
+ ┌──────────────────────────────▼──────────────────────────────┐
+ │               FastAPI Backend (Visual Tracker)              │
+ │   - Algorithm B: ArUco solvePnP 6-DoF Pose Extraction       │
+ │   - Algorithm A: High-Frequency IMU Dead-Reckoning          │
+ │   - Algorithm C: Matrix Offset Transformation & Fusion      │
+ └──────────────────────────────┬──────────────────────────────┘
+                                │
+        ┌───────────────────────┴───────────────────────┐
+        ▼                                               ▼
+ ┌──────────────────────────────┐        ┌──────────────────────────────┐
+ │  50/50 Side-by-Side Dashboard│        │    LeRobot & Isaac Lab       │
+ │  - 3D Spline Trajectory      │        │  - Parquet Dataset Export    │
+ │  - Synchronized Video Stream │        │  - NVIDIA Isaac Lab Replay   │
+ │  - Cartesian Telemetry (XYZ) │        │  - Embodiment Mapping        │
+ └──────────────────────────────┘        └──────────────────────────────┘
 ```
 
 ---
 
 ## 🚀 Quickstart Guide
 
-### 1. Prerequisites & Miniconda Environments
+### 1. Prerequisites & Conda Environment
 
-This project uses two Miniconda virtual environments:
-*   `lerobot_collector`: Main web server, kinematics solver, and dataset exporter.
-*   `isaac_lab`: Isaac Lab simulation visualizer.
-
-#### Setting up `lerobot_collector` environment:
 ```bash
-# Create conda environment with Python 3.10
-conda create -n lerobot_collector python=3.10 -y
-
-# Activate environment & install requirements
+# Main environment for collector & LeRobot exporter
 conda activate lerobot_collector
+
+# Install dependencies (if not already installed)
 pip install -r requirements.txt
 ```
 
 ---
 
-### 2. Start Backend Web Server
-
-Launch the web server using the `lerobot_collector` environment:
+### 2. Start the Backend Server
 
 ```bash
-conda activate lerobot_collector
-python server.py
+cd F:\work\mobile_dataset_collector
+C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe server.py
 ```
 
-*   **Desktop Dashboard**: Open [http://localhost:8000](http://localhost:8000) on your PC browser.
-*   **Mobile Collector App**: Open `http://<YOUR_LOCAL_IP>:8000/mobile` on your smartphone browser (connected to the same Wi-Fi).
+Output:
+```text
+============================================================
+ArUco-Anchored 3D Trajectory Collector Server Started!
+============================================================
+Desktop Dashboard: http://localhost:8000
+Phone Mobile URL:  http://192.168.1.178:8000/mobile
+Print ArUco Marker: http://localhost:8000/api/marker/image
+============================================================
+```
 
 ---
 
-### 3. Recording a Demonstration Trajectory
+### 3. Print or Display Your ArUco Marker
 
-1. Open `http://<YOUR_LOCAL_IP>:8000/mobile` on your mobile device.
-2. Grant camera and motion sensor permissions.
-3. Select or enter a task prompt (e.g., `"reach to apple"`).
-4. Tap **"START RECORDING"**, move the phone towards the target object, and tap **"STOP RECORDING"**.
-5. The recording will upload and process automatically.
-
----
-
-### 4. Exporting to LeRobot Dataset Format
-
-On the Desktop Dashboard ([http://localhost:8000](http://localhost:8000)):
-*   Click **"📦 Export LeRobot Dataset"**.
-*   The generated dataset will be saved to `lerobot_exports/mobile_so100_demo/` matching the standard Hugging Face LeRobot directory schema.
+1. Open **[http://localhost:8000](http://localhost:8000)** and click **"🖨️ Print ArUco Marker"**.
+2. Set **Width (cm)** to `10.0` (or `5.0`) and click **"Print"**:
+   * Opens: `http://localhost:8000/api/marker/print?marker_id=0&width_cm=10.0`
+3. In your print dialog, select **Scale: 100% (Actual Size)**.
+4. Place the printed marker flat on your table.
 
 ---
 
-### 5. Replaying Trajectories in NVIDIA Isaac Lab Simulation
+### 4. Record a 3D Trajectory on Your Phone
 
-You can trigger Isaac Lab replay directly from the Web Dashboard by clicking **"🎮 Replay in Isaac Lab"**, or run it from terminal:
+1. On your smartphone browser (Chrome/Safari), navigate to:
+   `http://<YOUR_LOCAL_IP>:8000/mobile` (e.g. `http://192.168.1.178:8000/mobile`).
+2. Hold your phone horizontally (Landscape) and tap **"START CAMERA & IMU"**.
+3. Aim at the ArUco marker on your desk.
+4. Tap **"START RECORDING"**, draw your 3D motion path in the air (e.g. circle, reaching motion, wave), and tap **"STOP RECORDING"**.
 
-```bash
-# Run using isaac_lab conda environment
-C:\Users\SK\miniconda3\envs\isaac_lab\python.exe isaac_lab_replay.py --parquet_path lerobot_exports/mobile_so100_demo/data/chunk-000/file-000.parquet --episode_index 0
-```
+---
 
-To run in headless mode (no GUI window):
-```bash
-C:\Users\SK\miniconda3\envs\isaac_lab\python.exe isaac_lab_replay.py --headless
-```
+### 5. Inspect in Side-by-Side Dashboard & Export
+
+1. Switch back to **[http://localhost:8000](http://localhost:8000)**.
+2. The **Left Pane** renders the 3D trajectory hovering over the table marker, while the **Right Pane** plays the synchronized video feed.
+3. Scrub the bottom timeline slider to compare the 3D path with the video frame-by-frame.
+4. Click **"📦 Export LeRobot"** to save to Hugging Face LeRobot format.
+5. Click **"🎮 Isaac Lab"** to launch simulation replay.
 
 ---
 
 ## 🧪 Testing
 
-Run the automated verification suite:
+Run the automated test suite for the ArUco pipeline:
 
 ```bash
-python test_pipeline.py
+C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_aruco_pipeline.py
 ```
 
-This verifies:
-1. SO-100 Inverse Kinematics (IK) convergence and joint limit bounds.
-2. Trajectory estimation & orientation smoothing.
-3. LeRobot parquet export schema and metadata generation (`info.json` & `stats.json`).
+Tests verified:
+*   `[PASS]` `test_marker_generation`: Generates pure and bordered ArUco 6x6 markers.
+*   `[PASS]` `test_pnp_detection_on_synthetic_frame`: Tests `cv2.solvePnP` metric recovery $(X, Y, Z)$ on camera frames.
+*   `[PASS]` `test_trajectory_fusion`: Verifies smooth visual-inertial trajectory estimation.
+
+---
+
+## 📡 API Reference
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/` | Desktop 50/50 side-by-side 3D comparison dashboard |
+| `GET` | `/mobile` | Mobile web data logging interface with IMU HUD |
+| `GET` | `/api/marker/image` | Returns high-res ArUco marker PNG with label |
+| `GET` | `/api/marker/raw` | Returns pure black/white ArUco square without borders |
+| `GET` | `/api/marker/print` | Dedicated HTML page with exact 1:1 physical centimeter scale & calibration ruler |
+| `GET` | `/api/episodes` | Retrieves list of recorded episodes |
+| `POST` | `/api/recordings/save` | Processes video + IMU JSON through ArUco visual-inertial tracker |
+| `POST` | `/api/recordings/sample` | Generates synthetic 3D shape (e.g. 3D circle floating 20cm above marker) |
+| `DELETE`| `/api/episodes/{id}` | Deletes a specific recorded episode |
+| `POST` | `/api/episodes/clear` | Clears all recorded episodes |
+| `POST` | `/api/export_lerobot` | Exports episodes to Hugging Face LeRobot format (`.parquet` + metadata) |
+| `POST` | `/api/isaac_lab/replay` | Launches Isaac Lab simulation replay |
 
 ---
 
