@@ -546,9 +546,10 @@
                             <div id="canvas3d"></div>
                             <div class="canvas-overlay-hint">🖱️ Orbit / Zoom / Pan</div>
                             <div class="legend-overlay">
-                                <div class="legend-item"><div class="legend-dot" style="background: #10b981;"></div> Marker (0,0,0)</div>
-                                <div class="legend-item"><div class="legend-dot" style="background: #38bdf8;"></div> Motion Shape</div>
-                                <div class="legend-item"><div class="legend-dot" style="background: #ef4444;"></div> End Point</div>
+                                <div class="legend-item"><div class="legend-dot" style="background: #22c55e;"></div> Start (🟢)</div>
+                                <div class="legend-item"><div class="legend-dot" style="background: #38bdf8;"></div> Trajectory</div>
+                                <div class="legend-item"><div class="legend-dot" style="background: #ef4444;"></div> Goal (🔴)</div>
+                                <div class="legend-item"><div class="legend-dot" style="background: #10b981;"></div> Origin (0,0,0)</div>
                             </div>
                         </div>
                     </div>
@@ -770,7 +771,7 @@
         // 2. ARUCO MARKER AT (0, 0, 0) TABLE ORIGIN
         // ==========================================
         const textureLoader = new THREE.TextureLoader();
-        const markerTexture = textureLoader.load('/api/marker/image?marker_id=0&size=400');
+        const markerTexture = textureLoader.load('/api/marker/raw?marker_id=0&size=400');
         markerTexture.generateMipmaps = true;
 
         const markerPlaneGeo = new THREE.PlaneGeometry(0.10, 0.10); // 10.0 cm square
@@ -782,14 +783,16 @@
         });
 
         const arucoMarkerMesh = new THREE.Mesh(markerPlaneGeo, markerMaterial);
-        arucoMarkerMesh.rotation.x = -Math.PI / 2; // Flat on tabletop
+        arucoMarkerMesh.rotation.x = -Math.PI / 2; // Flat on tabletop (Top edge points along -Z into screen)
         arucoMarkerMesh.position.set(0, 0.001, 0); // (0, 0, 0) World Origin Anchor
         scene.add(arucoMarkerMesh);
 
-        // Marker Origin 3D Coordinate Axes (X: Red, Y: Green, Z: Blue up)
-        const markerAxes = new THREE.AxesHelper(0.06);
-        markerAxes.position.set(0, 0.002, 0);
-        scene.add(markerAxes);
+        // Marker Origin 3D Coordinate Arrows (Standard Robotics / World Frame)
+        // +X: Red (Right), +Y: Green (Forward on table / -Z three), +Z: Blue (Up in air / +Y three)
+        const arrowX = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0.002, 0), 0.07, 0xef4444, 0.015, 0.008);
+        const arrowY = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 0.002, 0), 0.07, 0x10b981, 0.015, 0.008);
+        const arrowZ = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0.002, 0), 0.07, 0x38bdf8, 0.015, 0.008);
+        scene.add(arrowX, arrowY, arrowZ);
 
         // Origin Beacon Ring
         const originRing = new THREE.Mesh(
@@ -804,6 +807,8 @@
         // 3. FLOATING 3D TRAJECTORY TUBE & EEF CURSOR
         // ==========================================
         let trajectoryTube = null;
+        let startMarkerMesh = null;
+        let goalMarkerMesh = null;
         const waypointDotsGroup = new THREE.Group();
         scene.add(waypointDotsGroup);
 
@@ -874,6 +879,9 @@
             totalPathLength = 0;
 
             if (trajectoryTube) scene.remove(trajectoryTube);
+            if (startMarkerMesh) scene.remove(startMarkerMesh);
+            if (goalMarkerMesh) scene.remove(goalMarkerMesh);
+
             while (waypointDotsGroup.children.length > 0) {
                 waypointDotsGroup.remove(waypointDotsGroup.children[0]);
             }
@@ -883,8 +891,11 @@
 
             for (let f = 0; f < numPoints; f++) {
                 const p = poses[f];
-                // In Three.js: X is lateral, Y is vertical height above table, Z is forward on table
-                const pt = new THREE.Vector3(p[0], p[2], p[1]);
+                // Real-World to Three.js Frame Alignment:
+                // p[0]: X_world (Right)        -> X_three = +p[0]
+                // p[1]: Y_world (Forward/Away) -> Z_three = -p[1] (Forward into scene is -Z)
+                // p[2]: Z_world (Height/Up)    -> Y_three = +p[2] (Height is +Y)
+                const pt = new THREE.Vector3(p[0], p[2], -p[1]);
                 currentTrajectoryPoints.push(pt);
 
                 if (f > 0) {
@@ -904,6 +915,22 @@
 
             trajectoryTube = new THREE.Mesh(tubeGeo, tubeMat);
             scene.add(trajectoryTube);
+
+            // Start Point Marker (🟢 Green)
+            startMarkerMesh = new THREE.Mesh(
+                new THREE.SphereGeometry(0.009, 16, 16),
+                new THREE.MeshStandardMaterial({ color: 0x22c55e, emissive: 0x15803d, roughness: 0.3 })
+            );
+            startMarkerMesh.position.copy(currentTrajectoryPoints[0]);
+            scene.add(startMarkerMesh);
+
+            // Goal Point Marker (🔴 Red)
+            goalMarkerMesh = new THREE.Mesh(
+                new THREE.SphereGeometry(0.009, 16, 16),
+                new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xb91c1c, roughness: 0.3 })
+            );
+            goalMarkerMesh.position.copy(currentTrajectoryPoints[numPoints - 1]);
+            scene.add(goalMarkerMesh);
 
             // Waypoint density beads
             const dotGeo = new THREE.SphereGeometry(0.0025, 8, 8);
