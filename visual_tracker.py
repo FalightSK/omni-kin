@@ -1,45 +1,223 @@
 """
 visual_tracker.py
-ArUco Marker-Anchored Visual-Inertial 6-DoF Trajectory Reconstruction Engine.
+Dual-ArUco Rigid Board PnP & Extended Kalman Filter (EKF) Visual-Inertial Fusion Engine.
 
 Implements:
-  - Algorithm A: Visual Feature Tracking (KLT / Optical Flow) + IMU Fusion
-  - Algorithm B: Origin Mapping & Absolute Pose Estimation via ArUco Marker & PnP
-  - Algorithm C: Coordinate Transformation to ArUco World Anchor (0, 0, 0)
+  - Phase 1 & 2: Rigid 8-point 3D world geometry for dual-sized ArUco tags (10cm + 5cm).
+  - Phase 3: Sub-pixel 2D corner refinement and dynamic point matching (Scenarios A, B, and C).
+  - Phase 4: Over-determined 8-point PnP solver (eliminates planar flipping ambiguity).
+  - Extended Kalman Filter (EKF): 12-state strapdown inertial propagation with adaptive visual measurement updates.
 """
 
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from scipy.signal import butter, filtfilt
+
+
+class VisualInertialEKF:
+    """
+    12-State Extended Kalman Filter for 6-DoF Visual-Inertial Odometry:
+      State Vector x in R^12:
+        x[0:3]   = 3D Position (p_x, p_y, p_z) in World Frame (meters)
+        x[3:6]   = 3D Velocity (v_x, v_y, v_z) in World Frame (m/s)
+        x[6:9]   = 3D Euler Orientation (roll, pitch, yaw) in radians
+        x[9:12]  = 3D Accelerometer Bias (b_ax, b_ay, b_az) in m/s^2
+    """
+
+    def __init__(self):
+        self.state_dim = 12
+        self.x = np.zeros(self.state_dim, dtype=np.float64)
+        self.P = np.eye(self.state_dim, dtype=np.float64) * 0.1
+
+        # Process Noise Covariance Q (continuous-time spectral densities)
+        # Position, Velocity, Orientation, Accelerometer Bias Random Walk
+        self.Q = np.zeros((self.state_dim, self.state_dim), dtype=np.float64)
+        self.Q[0:3, 0:3] = np.eye(3) * 1e-4       # Position drift
+        self.Q[3:6, 3:6] = np.eye(3) * 1e-2       # Velocity noise
+        self.Q[6:9, 6:9] = np.eye(3) * 1e-3       # Orientation gyro noise
+        self.Q[9:12, 9:12] = np.eye(3) * 1e-5     # Accel bias random walk
+
+        self.g_world = np.array([0.0, 0.0, 9.81], dtype=np.float64)
+        self.is_initialized = False
+
+    def reset(self, initial_position=None, initial_euler=None):
+        self.x = np.zeros(self.state_dim, dtype=np.float64)
+        if initial_position is not None:
+            self.x[0:3] = np.array(initial_position, dtype=np.float64)
+        if initial_euler is not None:
+            self.x[6:9] = np.array(initial_euler, dtype=np.float64)
+
+        self.P = np.eye(self.state_dim, dtype=np.float64) * 0.05
+        self.P[9:12, 9:12] = np.eye(3) * 0.01
+        self.is_initialized = True
+
+    @staticmethod
+    def _skew_symmetric(v):
+        return np.array([
+            [0.0, -v[2], v[1]],
+            [v[2], 0.0, -v[0]],
+            [-v[1], v[0], 0.0]
+        ], dtype=np.float64)
+
+    def predict(self, dt, accel_body, gyro_rates):
+        """
+        Non-linear strapdown inertial propagation step.
+        """
+        if not self.is_initialized:
+            return
+
+        dt = float(np.clip(dt, 0.001, 0.2))
+
+        # 1. Orientation update
+        euler = self.x[6:9]
+        euler_new = euler + gyro_rates * dt
+        # Normalize angles to [-pi, pi]
+        euler_new = (euler_new + np.pi) % (2.0 * np.pi) - np.pi
+
+        # 2. Body-to-World acceleration rotation
+        r = R.from_euler('xyz', euler)
+        R_mat = r.as_matrix()
+
+        accel_unbiased = accel_body - self.x[9:12]
+        accel_world = R_mat @ accel_unbiased - self.g_world
+
+        # 3. Velocity and Position integration
+        v = self.x[3:6]
+        p = self.x[0:3]
+
+        v_new = v + accel_world * dt
+        p_new = p + v * dt + 0.5 * accel_world * (dt ** 2)
+
+        # Update state vector
+        self.x[0:3] = p_new
+        self.x[3:6] = v_new
+        self.x[6:9] = euler_new
+
+        # 4. Compute Jacobian F for Covariance Propagation
+        F = np.eye(self.state_dim, dtype=np.float64)
+        F[0:3, 3:6] = np.eye(3) * dt
+        F[0:3, 9:12] = -0.5 * R_mat * (dt ** 2)
+        F[3:6, 9:12] = -R_mat * dt
+
+        # Orientation sensitivity on acceleration
+        skew_a = self._skew_symmetric(R_mat @ accel_unbiased)
+        F[3:6, 6:9] = -skew_a * dt
+        F[0:3, 6:9] = -0.5 * skew_a * (dt ** 2)
+
+        # Covariance propagation P_k = F P_{k-1} F^T + Q * dt
+        self.P = F @ self.P @ F.T + self.Q * dt
+
+    def update_visual(self, p_meas, euler_meas, is_dual=True):
+        """
+        EKF Measurement update with 6-DoF visual pose from ArUco PnP.
+        Adaptive measurement covariance R_meas provides tighter confidence for 8-point dual tags.
+        """
+        if not self.is_initialized:
+            self.reset(p_meas, euler_meas)
+            return
+
+        z = np.hstack([p_meas, euler_meas])  # 6D observation
+
+        # Measurement Matrix H (6 x 12)
+        H = np.zeros((6, self.state_dim), dtype=np.float64)
+        H[0:3, 0:3] = np.eye(3)
+        H[3:6, 6:9] = np.eye(3)
+
+        # Adaptive Measurement Noise Covariance
+        if is_dual:
+            # High confidence (8-point over-determined rigid board): ~1mm pos error, ~0.2 deg rot error
+            r_pos = (1e-3) ** 2
+            r_rot = (np.radians(0.3)) ** 2
+        else:
+            # Single tag (4-point): ~4mm pos error, ~0.8 deg rot error
+            r_pos = (4e-3) ** 2
+            r_rot = (np.radians(0.8)) ** 2
+
+        R_meas = np.diag([
+            r_pos, r_pos, r_pos,
+            r_rot, r_rot, r_rot
+        ]).astype(np.float64)
+
+        # Predicted measurement
+        z_pred = np.hstack([self.x[0:3], self.x[6:9]])
+
+        # Innovation (residual) with angular wrapping
+        y = z - z_pred
+        y[3:6] = (y[3:6] + np.pi) % (2.0 * np.pi) - np.pi
+
+        # Innovation covariance
+        S = H @ self.P @ H.T + R_meas
+
+        # Kalman Gain
+        K = self.P @ H.T @ np.linalg.inv(S)
+
+        # State update
+        self.x = self.x + K @ y
+        self.x[6:9] = (self.x[6:9] + np.pi) % (2.0 * np.pi) - np.pi
+
+        # Joseph Form Covariance Update for numerical stability
+        I_KH = np.eye(self.state_dim, dtype=np.float64) - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ R_meas @ K.T
+
 
 class VisualInertialTracker:
     """
-    Reconstructs 3D hand/camera trajectories anchored to a physical ArUco marker on a table.
-    The center of the ArUco marker is defined as the absolute World Origin (0, 0, 0),
-    with Z=0 on the tabletop and +Z pointing upward into 3D space.
+    Reconstructs 3D hand/camera trajectories anchored to a Dual-ArUco Rigid Board on a table.
+    
+    Rigid Board Geometry:
+      - Tag A (Primary Origin): 10.0 cm ArUco (ID 0 default), Bottom-Left corner is (0, 0, 0).
+      - Tag B (Secondary Offset): 5.0 cm ArUco (ID 1 default), Bottom-Left corner is at (0.15, 0.0, 0.0).
     """
 
-    def __init__(self, marker_size_meters=0.10, aruco_dict_type=cv2.aruco.DICT_6X6_250):
-        self.marker_size = marker_size_meters
-        self.dict_type = aruco_dict_type
+    def __init__(
+        self,
+        tag_a_size=0.10,
+        tag_b_size=0.05,
+        tag_a_id=0,
+        tag_b_id=1,
+        tag_b_offset=(0.15, 0.0, 0.0),
+        dict_name="DICT_6X6_250"
+    ):
+        self.tag_a_size = float(tag_a_size)
+        self.tag_b_size = float(tag_b_size)
+        self.tag_a_id = int(tag_a_id)
+        self.tag_b_id = int(tag_b_id)
+        self.tag_b_offset = np.array(tag_b_offset, dtype=np.float32)
+        self.dict_name = dict_name
 
         # Initialize ArUco Dictionary & Detector
+        self.dict_type = getattr(cv2.aruco, dict_name, cv2.aruco.DICT_6X6_250)
         self.dictionary = cv2.aruco.getPredefinedDictionary(self.dict_type)
+
         if hasattr(cv2.aruco, 'ArucoDetector'):
-            self.detector = cv2.aruco.ArucoDetector(self.dictionary)
+            params = cv2.aruco.DetectorParameters()
+            params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+            self.detector = cv2.aruco.ArucoDetector(self.dictionary, params)
         else:
             self.detector = None
 
-        # Standard 3D Object Points for ArUco Marker Corners (centered at (0,0,0) on table plane Z=0)
-        # Order: Top-Left, Top-Right, Bottom-Right, Bottom-Left
-        hs = self.marker_size / 2.0
-        self.marker_3d_corners = np.array([
-            [-hs,  hs, 0.0],
-            [ hs,  hs, 0.0],
-            [ hs, -hs, 0.0],
-            [-hs, -hs, 0.0]
+        # Build Master 3D Object Points (OpenCV corner order: 0:TL, 1:TR, 2:BR, 3:BL)
+        # Tag A (Origin at Bottom-Left (0, 0, 0))
+        sa = self.tag_a_size
+        self.tag_a_3d = np.array([
+            [0.0, sa,  0.0],   # TL (0)
+            [sa,  sa,  0.0],   # TR (1)
+            [sa,  0.0, 0.0],   # BR (2)
+            [0.0, 0.0, 0.0]    # BL (3) - World Origin (0,0,0)
         ], dtype=np.float32)
+
+        # Tag B (Offset at tag_b_offset)
+        sb = self.tag_b_size
+        xb, yb, zb = self.tag_b_offset
+        self.tag_b_3d = np.array([
+            [xb,      yb + sb, zb],  # TL (0)
+            [xb + sb, yb + sb, zb],  # TR (1)
+            [xb + sb, yb,      zb],  # BR (2)
+            [xb,      yb,      zb]   # BL (3)
+        ], dtype=np.float32)
+
+        # Master Combined 8-point Object Array
+        self.board_8p_3d = np.vstack([self.tag_a_3d, self.tag_b_3d])
 
     def generate_raw_marker(self, marker_id=0, side_pixels=600, dict_name="DICT_6X6_250"):
         """
@@ -80,12 +258,13 @@ class VisualInertialTracker:
 
     def detect_marker_pnp(self, frame, camera_matrix, dist_coeffs):
         """
-        Detects ArUco marker in frame and solves PnP to find camera pose relative to marker.
+        Phase 3 & 4: Dual-ArUco Rigid Board Detection & Dynamic PnP Solver.
         Returns:
             detected: bool
-            p_marker: np.array([X, Y, Z]) camera position in table marker coordinates (meters)
-            R_marker: 3x3 rotation matrix of camera in marker frame
+            p_world: np.array([X, Y, Z]) camera position in world coordinates (meters)
+            R_world: 3x3 rotation matrix of camera in world frame
             rvec, tvec: raw PnP outputs
+            is_dual: bool (True if both tags detected in 8-point mode)
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
 
@@ -95,56 +274,91 @@ class VisualInertialTracker:
             corners, ids, rejected = cv2.aruco.detectMarkers(gray, self.dictionary)
 
         if ids is None or len(ids) == 0:
-            return False, None, None, None, None
+            return False, None, None, None, None, False
 
-        # Use first detected marker (ID 0 or first available)
-        idx = 0
-        img_corners = corners[idx][0].astype(np.float32)
+        # Sub-pixel corner refinement
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        refined_corners = []
+        for c in corners:
+            c_sub = cv2.cornerSubPix(gray, np.copy(c), (5, 5), (-1, -1), criteria)
+            refined_corners.append(c_sub)
+
+        ids_flat = ids.flatten().tolist()
+        has_tag_a = self.tag_a_id in ids_flat
+        has_tag_b = self.tag_b_id in ids_flat
+
+        matched_3d = []
+        matched_2d = []
+        is_dual = False
+
+        if has_tag_a and has_tag_b:
+            # Scenario A: Both tags visible (8 points) -> Highest confidence, no planar flipping!
+            idx_a = ids_flat.index(self.tag_a_id)
+            idx_b = ids_flat.index(self.tag_b_id)
+            matched_3d = self.board_8p_3d
+            matched_2d = np.vstack([
+                refined_corners[idx_a][0].astype(np.float32),
+                refined_corners[idx_b][0].astype(np.float32)
+            ])
+            is_dual = True
+            flags = cv2.SOLVEPNP_ITERATIVE
+        elif has_tag_a:
+            # Scenario B: Only Tag A visible (4 points, far/medium distance)
+            idx_a = ids_flat.index(self.tag_a_id)
+            matched_3d = self.tag_a_3d
+            matched_2d = refined_corners[idx_a][0].astype(np.float32)
+            flags = cv2.SOLVEPNP_IPPE_SQUARE
+        elif has_tag_b:
+            # Scenario C: Only Tag B visible (4 points, zoomed-in / close distance)
+            idx_b = ids_flat.index(self.tag_b_id)
+            matched_3d = self.tag_b_3d
+            matched_2d = refined_corners[idx_b][0].astype(np.float32)
+            flags = cv2.SOLVEPNP_IPPE_SQUARE
+        else:
+            # Fallback: Use first detected marker as Tag A anchor
+            matched_3d = self.tag_a_3d
+            matched_2d = refined_corners[0][0].astype(np.float32)
+            flags = cv2.SOLVEPNP_IPPE_SQUARE
 
         # Solve Perspective-n-Point
         success, rvec, tvec = cv2.solvePnP(
-            self.marker_3d_corners,
-            img_corners,
+            matched_3d,
+            matched_2d,
             camera_matrix,
             dist_coeffs,
-            flags=cv2.SOLVEPNP_IPPE_SQUARE
+            flags=flags
         )
 
-        if not success:
+        if not success and flags != cv2.SOLVEPNP_ITERATIVE:
+            # Fallback to standard iterative solver
             success, rvec, tvec = cv2.solvePnP(
-                self.marker_3d_corners,
-                img_corners,
+                matched_3d,
+                matched_2d,
                 camera_matrix,
-                dist_coeffs
+                dist_coeffs,
+                flags=cv2.SOLVEPNP_ITERATIVE
             )
 
         if not success:
-            return False, None, None, None, None
+            return False, None, None, None, None, False
 
-        # Convert rvec to rotation matrix R_cam_to_marker
-        R_cam_to_marker, _ = cv2.Rodrigues(rvec)
+        # Invert pose: camera position in World (Tag A Bottom-Left Origin) Frame
+        # p_cam_in_world = -R^T * tvec
+        R_cam_to_world, _ = cv2.Rodrigues(rvec)
+        R_world_to_cam = R_cam_to_world.T
+        p_cam_in_world = -R_world_to_cam @ tvec.reshape(3, 1)
 
-        # Invert to find camera position & orientation in the ArUco marker's World frame
-        # p_cam_in_marker = -R^T * tvec
-        R_marker_to_cam = R_cam_to_marker.T
-        p_cam_in_marker = -R_marker_to_cam @ tvec.reshape(3, 1)
+        X_world = float(p_cam_in_world[0, 0])
+        Y_world = float(p_cam_in_world[1, 0])
+        Z_world = abs(float(p_cam_in_world[2, 0]))  # Height above tabletop
 
-        # Transform coordinate frame to Standard Robotics / Table convention:
-        # ArUco plane: X is right on table, Y is forward on table, Z is height above table (+Z up)
-        X_world = float(p_cam_in_marker[0, 0])
-        Y_world = float(p_cam_in_marker[1, 0])
-        Z_world = float(p_cam_in_marker[2, 0])
-
-        # If Z is negative due to camera look direction, take absolute height above table
-        Z_world = abs(Z_world)
-
-        p_world = np.array([X_world, Y_world, Z_world])
-        return True, p_world, R_marker_to_cam, rvec, tvec
+        p_world = np.array([X_world, Y_world, Z_world], dtype=np.float64)
+        return True, p_world, R_world_to_cam, rvec, tvec, is_dual
 
     def process_video_and_imu(self, video_path, imu_samples, fps=30.0):
         """
-        Processes recorded video file and IMU log to produce a smooth,
-        ArUco-anchored 3D Cartesian trajectory.
+        Processes recorded video file and IMU log with Extended Kalman Filter (EKF)
+        to produce a continuous, jitter-free 6-DoF trajectory.
         """
         cap = cv2.VideoCapture(video_path)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
@@ -153,63 +367,56 @@ class VisualInertialTracker:
 
         camera_matrix, dist_coeffs = self.estimate_camera_matrix(width, height)
 
-        frames = []
-        pnp_poses = []       # List of (frame_idx, p_world, R_world)
-        pnp_detected = []
-
-        # 1. First Pass: Scan video for ArUco Marker PnP in all frames
+        video_detections = []  # (frame_idx, p_world, euler, is_dual)
         frame_idx = 0
+
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            frames.append(frame)
-            det, p_world, R_world, rvec, tvec = self.detect_marker_pnp(frame, camera_matrix, dist_coeffs)
+            det, p_world, R_world, rvec, tvec, is_dual = self.detect_marker_pnp(
+                frame, camera_matrix, dist_coeffs
+            )
 
             if det:
-                pnp_poses.append((frame_idx, p_world, R_world))
-                pnp_detected.append(True)
-            else:
-                pnp_detected.append(False)
+                r = R.from_matrix(R_world)
+                euler = r.as_euler('xyz', degrees=False)
+                video_detections.append((frame_idx, p_world, euler, is_dual))
 
             frame_idx += 1
 
         cap.release()
-        num_frames = len(frames)
+        num_frames = frame_idx
         if num_frames == 0:
             return self.generate_synthetic_anchored_trajectory()
 
-        # 2. Extract Relative Visual / IMU Motion for Inter-Frame Smoothing
-        raw_imu_poses = self._integrate_imu(imu_samples, num_frames, fps)
+        # Parse IMU samples
+        parsed_imu = self._parse_imu_samples(imu_samples, num_frames, fps)
 
-        # 3. Fuse ArUco PnP Anchors with Relative Motion (Algorithm C)
-        final_trajectory = self._fuse_pnp_and_relative_motion(
-            num_frames, pnp_poses, pnp_detected, raw_imu_poses, frames
-        )
-
+        # Run EKF Fusion
+        final_trajectory = self._run_ekf_fusion(num_frames, fps, video_detections, parsed_imu)
         return final_trajectory
 
-    def _integrate_imu(self, imu_samples, num_frames, fps):
+    def _parse_imu_samples(self, imu_samples, num_frames, fps):
         """
-        Integrates raw IMU acceleration and gyroscope readings into relative motion.
+        Converts raw browser IMU samples into formatted timestamps, accelerations, and gyro rates.
         """
         if not imu_samples or len(imu_samples) < 5:
-            # Fallback smooth motion curve
-            t = np.linspace(0, 1.0, num_frames)
-            x = 0.20 * np.sin(np.pi * t)
-            y = 0.10 * np.sin(2 * np.pi * t)
-            z = 0.12 * (1.0 - np.cos(np.pi * t))
-            roll = 0.05 * np.sin(np.pi * t)
-            pitch = -0.10 * np.sin(np.pi * t)
-            yaw = 0.08 * np.sin(2 * np.pi * t)
-            return np.column_stack([x, y, z, roll, pitch, yaw])
+            # Fallback synthetic IMU stream
+            timestamps = np.linspace(0, num_frames / fps, num_frames)
+            accels = np.zeros((num_frames, 3))
+            accels[:, 2] = 9.81
+            gyros = np.zeros((num_frames, 3))
+            return {'timestamps': timestamps, 'accels': accels, 'gyros': gyros}
 
         n = len(imu_samples)
-        timestamps = np.array([s.get('timestamp', i / 50.0) for i, s in enumerate(imu_samples)])
+        timestamps = np.array([s.get('timestamp', i / 50.0) for i, s in enumerate(imu_samples)], dtype=np.float64)
+        if timestamps[-1] <= timestamps[0]:
+            timestamps = np.linspace(0, num_frames / fps, n)
 
         accels = []
-        orientations = []
+        gyros = []
 
         for s in imu_samples:
             acc = list(s.get('accel', [0.0, 0.0, 9.81]))
@@ -220,146 +427,105 @@ class VisualInertialTracker:
                 acc = [acc[1], -acc[0], acc[2]]
             elif angle == 180:
                 acc = [-acc[0], -acc[1], acc[2]]
-
             accels.append(acc)
 
-            ori = s.get('orientation', None)
-            if ori is not None:
-                yaw, pitch, roll = np.radians(ori[0]), np.radians(ori[1]), np.radians(ori[2])
-            else:
-                yaw, pitch, roll = 0.0, 0.0, 0.0
-            orientations.append([roll, pitch, yaw])
+            gyro = s.get('gyro', [0.0, 0.0, 0.0])
+            gyros.append([np.radians(gyro[0]), np.radians(gyro[1]), np.radians(gyro[2])])
 
-        accels = np.array(accels)
-        orientations = np.array(orientations)
+        accels = np.array(accels, dtype=np.float64)
+        gyros = np.array(gyros, dtype=np.float64)
 
-        # Smooth orientations
-        if n > 15:
-            b, a = butter(2, 0.1, btype='low')
-            for j in range(3):
-                orientations[:, j] = filtfilt(b, a, orientations[:, j])
+        return {'timestamps': timestamps, 'accels': accels, 'gyros': gyros}
 
-        # Integrate acceleration
-        positions = np.zeros((n, 3))
-        velocities = np.zeros((n, 3))
-
-        for i in range(1, n):
-            dt = timestamps[i] - timestamps[i - 1]
-            if dt <= 0 or dt > 0.5:
-                dt = 0.02
-            r = R.from_euler('xyz', orientations[i])
-            world_acc = r.apply(accels[i])
-            world_acc[2] -= 9.81  # subtract gravity
-
-            damping = 0.95
-            velocities[i] = (velocities[i - 1] + world_acc * dt) * damping
-            positions[i] = positions[i - 1] + velocities[i] * dt
-
-        # High-pass filter positions
-        if n > 15:
-            b_hp, a_hp = butter(2, 0.05, btype='high')
-            for j in range(3):
-                positions[:, j] = filtfilt(b_hp, a_hp, positions[:, j])
-
-        positions -= positions[0:1]
-
-        # Resample to video frames
-        video_t = np.linspace(timestamps[0], timestamps[-1], num_frames)
-        pos_x = np.interp(video_t, timestamps, positions[:, 0])
-        pos_y = np.interp(video_t, timestamps, positions[:, 1])
-        pos_z = np.interp(video_t, timestamps, positions[:, 2])
-
-        ori_r = np.interp(video_t, timestamps, orientations[:, 0])
-        ori_p = np.interp(video_t, timestamps, orientations[:, 1])
-        ori_y = np.interp(video_t, timestamps, orientations[:, 2])
-
-        return np.column_stack([pos_x, pos_y, pos_z, ori_r, ori_p, ori_y])
-
-    def _fuse_pnp_and_relative_motion(self, num_frames, pnp_poses, pnp_detected, rel_motion, frames):
+    def _run_ekf_fusion(self, num_frames, fps, video_detections, imu_data):
         """
-        Algorithm C: Matrix Offset & Fusion.
-        Anchors the relative motion trajectory onto the ArUco marker origin (0, 0, 0).
+        Full EKF propagation and measurement update loop across video and IMU timelines.
         """
-        final_poses = np.zeros((num_frames, 6))
+        ekf = VisualInertialEKF()
 
-        if len(pnp_poses) > 0:
-            # We have direct ArUco PnP detections!
-            # 1. Fill detected frames with PnP coordinates
-            pnp_indices = []
-            pnp_points = []
-            pnp_euler = []
+        # Build map of video frame index to detection
+        vis_map = {f_idx: (p, euler, dual) for (f_idx, p, euler, dual) in video_detections}
 
-            for f_idx, p_w, R_w in pnp_poses:
-                pnp_indices.append(f_idx)
-                pnp_points.append(p_w)
-                r = R.from_matrix(R_w)
-                euler = r.as_euler('xyz', degrees=False)
-                pnp_euler.append(euler)
-
-            pnp_points = np.array(pnp_points)
-            pnp_euler = np.array(pnp_euler)
-
-            # Interpolate or extrapolate across all frames
-            for j in range(3):
-                final_poses[:, j] = np.interp(
-                    np.arange(num_frames),
-                    pnp_indices,
-                    pnp_points[:, j]
-                )
-                final_poses[:, 3 + j] = np.interp(
-                    np.arange(num_frames),
-                    pnp_indices,
-                    pnp_euler[:, j]
-                )
-
-            # Blend with fine high-frequency relative motion details
-            if len(pnp_indices) < num_frames:
-                # Add high-frequency relative displacements from IMU / feature tracking
-                rel_delta = rel_motion[:, :3] - rel_motion[pnp_indices[0], :3]
-                weight = 0.3
-                final_poses[:, :3] = (1.0 - weight) * final_poses[:, :3] + weight * (final_poses[0, :3] + rel_delta)
-
+        # Initialize EKF state at first detection or default table anchor
+        if len(video_detections) > 0:
+            first_f, first_p, first_e, _ = video_detections[0]
+            ekf.reset(first_p, first_e)
         else:
-            # Fallback if marker was not in view: use relative motion placed 25cm above table
-            base_anchor = np.array([0.0, 0.15, 0.25, 0.0, 0.0, 0.0])
-            final_poses = base_anchor + rel_motion
+            default_p = np.array([0.075, 0.05, 0.30])  # Centered above Dual-ArUco board
+            ekf.reset(default_p, np.zeros(3))
 
-        # Ensure Z is above tabletop
-        final_poses[:, 2] = np.maximum(0.02, final_poses[:, 2])
+        final_poses = np.zeros((num_frames, 6), dtype=np.float64)
+        imu_times = imu_data['timestamps']
+        imu_accels = imu_data['accels']
+        imu_gyros = imu_data['gyros']
+        num_imu = len(imu_times)
+
+        # Video frame timestamps
+        video_times = np.linspace(imu_times[0], imu_times[-1], num_frames)
+
+        imu_idx = 0
+        current_time = imu_times[0]
+
+        for f in range(num_frames):
+            target_time = video_times[f]
+
+            # Step IMU up to target video frame time
+            while imu_idx < num_imu - 1 and imu_times[imu_idx + 1] <= target_time:
+                dt = imu_times[imu_idx + 1] - imu_times[imu_idx]
+                if dt > 0:
+                    ekf.predict(dt, imu_accels[imu_idx], imu_gyros[imu_idx])
+                imu_idx += 1
+
+            # Final prediction step to exact frame timestamp
+            dt_rem = target_time - current_time
+            if dt_rem > 0:
+                acc_sample = imu_accels[min(imu_idx, num_imu - 1)]
+                gyro_sample = imu_gyros[min(imu_idx, num_imu - 1)]
+                ekf.predict(dt_rem, acc_sample, gyro_sample)
+                current_time = target_time
+
+            # Visual measurement update if ArUco detected in this frame
+            if f in vis_map:
+                p_meas, euler_meas, is_dual = vis_map[f]
+                ekf.update_visual(p_meas, euler_meas, is_dual=is_dual)
+
+            # Store filtered 6-DoF pose [X, Y, Z, Roll, Pitch, Yaw]
+            pos = ekf.x[0:3].copy()
+            pos[2] = max(0.01, pos[2])  # Keep above table surface
+            rot = ekf.x[6:9].copy()
+            final_poses[f] = np.hstack([pos, rot])
 
         return final_poses
 
     def generate_synthetic_anchored_trajectory(self, num_frames=90, shape="circle"):
         """
         Generates a pristine 3D geometric shape (e.g. 3D circle / arch)
-        floating exactly 20cm above the ArUco marker at (0, 0, 0).
+        anchored directly above the Dual-ArUco Board origin.
         """
         t = np.linspace(0, 2 * np.pi, num_frames)
 
         if shape == "circle":
-            # 3D Circle of radius 12cm floating 20cm above table marker
-            radius = 0.12
-            x = radius * np.cos(t)
-            y = radius * np.sin(t) + 0.10
-            z = 0.20 + 0.04 * np.sin(2 * t)
+            # 3D Circle of radius 10cm centered over dual marker board at (X=0.10, Y=0.05)
+            radius = 0.10
+            x = 0.10 + radius * np.cos(t)
+            y = 0.05 + radius * np.sin(t)
+            z = 0.22 + 0.04 * np.sin(2 * t)
         else:
             # Arch / reach motion
-            x = 0.25 * np.sin(t / 2)
-            y = 0.10 * np.sin(t)
-            z = 0.15 + 0.10 * np.sin(t / 2)
+            x = 0.05 + 0.20 * np.sin(t / 2)
+            y = 0.05 + 0.10 * np.sin(t)
+            z = 0.18 + 0.10 * np.sin(t / 2)
 
-        roll = 0.05 * np.sin(t)
-        pitch = -0.15 + 0.08 * np.cos(t)
-        yaw = 0.10 * np.sin(t)
+        roll = 0.04 * np.sin(t)
+        pitch = -0.12 + 0.06 * np.cos(t)
+        yaw = 0.08 * np.sin(t)
 
         return np.column_stack([x, y, z, roll, pitch, yaw])
 
-if __name__ == "__main__":
-    tracker = VisualInertialTracker(marker_size_meters=0.10)
-    marker = tracker.generate_marker_image(marker_id=0)
-    print("Generated ArUco marker shape:", marker.shape)
 
-    traj = tracker.generate_synthetic_anchored_trajectory(num_frames=60)
-    print("Anchored 3D trajectory shape:", traj.shape)
-    print("Start point (relative to marker):", traj[0, :3])
-    print("Mid point (relative to marker):", traj[30, :3])
+if __name__ == "__main__":
+    tracker = VisualInertialTracker()
+    print("Dual-ArUco Rigid Board Tracker initialized:")
+    print("Tag A 3D Corners:\n", tracker.tag_a_3d)
+    print("Tag B 3D Corners:\n", tracker.tag_b_3d)
+    print("Board 8-point 3D Points:\n", tracker.board_8p_3d)

@@ -512,7 +512,8 @@
         </div>
 
         <div class="nav-actions">
-            <button class="btn btn-marker" id="openMarkerBtn">🖨️ Print ArUco Marker</button>
+            <button class="btn btn-marker" id="openDualMarkerBtn" onclick="window.open('/api/marker/print_dual', '_blank')">🖨️ Print Dual-ArUco Board</button>
+            <button class="btn" id="openMarkerBtn">Custom Marker</button>
             <button class="btn" id="addSampleBtn">⚡ Sample 3D Circle</button>
             <button class="btn" id="isaacBtn" style="border-color: #818cf8; color: #a5b4fc;">🎮 Isaac Lab</button>
             <button class="btn btn-primary" id="exportBtn">📦 Export LeRobot</button>
@@ -696,9 +697,10 @@
                 💡 <strong>Persistent Anchor:</strong> Once printed or displayed, this exact marker remains valid forever across all server restarts!
             </p>
 
-            <div style="display: flex; gap: 8px; width: 100%;">
+            <div style="display: flex; gap: 8px; width: 100%; flex-wrap: wrap;">
+                <button class="btn btn-marker" onclick="window.open('/api/marker/print_dual', '_blank')" style="width: 100%; justify-content: center; background: rgba(37,99,235,0.2); border-color: #2563eb; color: #60a5fa;">📄 Print Pre-Spaced Dual Board (10cm + 5cm)</button>
                 <a id="downloadMarkerLink" href="/api/marker/image?marker_id=0&size=800&dict_name=DICT_6X6_250" target="_blank" download="aruco_marker.png" class="btn btn-primary" style="flex: 1; justify-content: center; text-decoration: none;">Download PNG</a>
-                <button class="btn btn-marker" id="printMarkerBtn" style="flex: 1; justify-content: center;">Print</button>
+                <button class="btn btn-marker" id="printMarkerBtn" style="flex: 1; justify-content: center;">Print Single</button>
                 <button class="btn" id="closeMarkerBtn" style="padding: 8px 14px;">Close</button>
             </div>
         </div>
@@ -768,39 +770,68 @@
         scene.add(fillLight);
 
         // ==========================================
-        // 2. ARUCO MARKER AT (0, 0, 0) TABLE ORIGIN
+        // 2. DUAL-ARUCO RIGID BOARD AT TABLE ORIGIN
         // ==========================================
         const textureLoader = new THREE.TextureLoader();
-        const markerTexture = textureLoader.load('/api/marker/raw?marker_id=0&size=400');
-        markerTexture.generateMipmaps = true;
 
-        const markerPlaneGeo = new THREE.PlaneGeometry(0.10, 0.10); // 10.0 cm square
-        const markerMaterial = new THREE.MeshStandardMaterial({
-            map: markerTexture,
+        // Tag A (10.0 cm, ID 0)
+        // World: Bottom-Left at (0, 0, 0), Center at (0.05, 0.05, 0) -> Three.js (0.05, 0.001, -0.05)
+        const tagATexture = textureLoader.load('/api/marker/raw?marker_id=0&size=400');
+        tagATexture.generateMipmaps = true;
+        const tagAGeo = new THREE.PlaneGeometry(0.10, 0.10);
+        const tagAMat = new THREE.MeshStandardMaterial({
+            map: tagATexture,
             roughness: 0.4,
             metalness: 0.1,
             side: THREE.DoubleSide
         });
+        const tagAMesh = new THREE.Mesh(tagAGeo, tagAMat);
+        tagAMesh.rotation.x = -Math.PI / 2;
+        tagAMesh.position.set(0.05, 0.001, -0.05);
+        scene.add(tagAMesh);
 
-        const arucoMarkerMesh = new THREE.Mesh(markerPlaneGeo, markerMaterial);
-        arucoMarkerMesh.rotation.x = -Math.PI / 2; // Flat on tabletop (Top edge points along -Z into screen)
-        arucoMarkerMesh.position.set(0, 0.001, 0); // (0, 0, 0) World Origin Anchor
-        scene.add(arucoMarkerMesh);
+        // Tag B (5.0 cm, ID 1)
+        // World: Bottom-Left at (0.15, 0.0, 0), Center at (0.175, 0.025, 0) -> Three.js (0.175, 0.001, -0.025)
+        const tagBTexture = textureLoader.load('/api/marker/raw?marker_id=1&size=300');
+        tagBTexture.generateMipmaps = true;
+        const tagBGeo = new THREE.PlaneGeometry(0.05, 0.05);
+        const tagBMat = new THREE.MeshStandardMaterial({
+            map: tagBTexture,
+            roughness: 0.4,
+            metalness: 0.1,
+            side: THREE.DoubleSide
+        });
+        const tagBMesh = new THREE.Mesh(tagBGeo, tagBMat);
+        tagBMesh.rotation.x = -Math.PI / 2;
+        tagBMesh.position.set(0.175, 0.001, -0.025);
+        scene.add(tagBMesh);
 
-        // Marker Origin 3D Coordinate Arrows (Standard Robotics / World Frame)
+        // Rigid Board Table Outline
+        const boardOutlineGeo = new THREE.PlaneGeometry(0.22, 0.12);
+        const boardOutlineMat = new THREE.MeshBasicMaterial({
+            color: 0x334155,
+            wireframe: true,
+            side: THREE.DoubleSide
+        });
+        const boardOutlineMesh = new THREE.Mesh(boardOutlineGeo, boardOutlineMat);
+        boardOutlineMesh.rotation.x = -Math.PI / 2;
+        boardOutlineMesh.position.set(0.10, 0.0005, -0.05);
+        scene.add(boardOutlineMesh);
+
+        // Marker Origin 3D Coordinate Arrows (at Tag A Bottom-Left World (0,0,0))
         // +X: Red (Right), +Y: Green (Forward on table / -Z three), +Z: Blue (Up in air / +Y three)
-        const arrowX = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0.002, 0), 0.07, 0xef4444, 0.015, 0.008);
-        const arrowY = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 0.002, 0), 0.07, 0x10b981, 0.015, 0.008);
-        const arrowZ = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0.002, 0), 0.07, 0x38bdf8, 0.015, 0.008);
+        const arrowX = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 0.002, 0), 0.08, 0xef4444, 0.016, 0.009);
+        const arrowY = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 0.002, 0), 0.08, 0x10b981, 0.016, 0.009);
+        const arrowZ = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0.002, 0), 0.08, 0x38bdf8, 0.016, 0.009);
         scene.add(arrowX, arrowY, arrowZ);
 
-        // Origin Beacon Ring
+        // Origin Beacon Indicator at (0,0,0)
         const originRing = new THREE.Mesh(
-            new THREE.RingGeometry(0.055, 0.060, 32),
-            new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide })
+            new THREE.RingGeometry(0.008, 0.014, 32),
+            new THREE.MeshBasicMaterial({ color: 0xef4444, side: THREE.DoubleSide })
         );
         originRing.rotation.x = -Math.PI / 2;
-        originRing.position.y = 0.0015;
+        originRing.position.set(0, 0.002, 0);
         scene.add(originRing);
 
         // ==========================================

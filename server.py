@@ -42,7 +42,13 @@ app.mount("/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings
 
 # Global In-Memory Episode Storage & Visual-Inertial Tracker
 EPISODES_DB = []
-visual_tracker = VisualInertialTracker(marker_size_meters=0.10)
+visual_tracker = VisualInertialTracker(
+    tag_a_size=0.10,
+    tag_b_size=0.05,
+    tag_a_id=0,
+    tag_b_id=1,
+    tag_b_offset=(0.15, 0.0, 0.0)
+)
 lerobot_exporter = LeRobotExporter(output_dir=EXPORT_DIR)
 
 def get_local_ip():
@@ -210,6 +216,9 @@ async def print_marker_page(marker_id: int = 0, width_cm: float = 10.0, dict_nam
             In your printer dialog, select <strong>Scale: 100% (Actual Size)</strong>. The black square and the ruler will both measure exactly {width_cm} cm.
         </p>
         <button class="print-btn" onclick="window.print()">PRINT EXACT {width_cm} CM ARUCO MARKER</button>
+        <div style="margin-top: 8px;">
+            <a href="/api/marker/print_dual" style="font-size: 13px; color: #2563eb; text-decoration: underline;">Switch to Dual-ArUco Rigid Board (10cm + 5cm)</a>
+        </div>
     </div>
 
     <div class="marker-card">
@@ -234,6 +243,216 @@ async def print_marker_page(marker_id: int = 0, width_cm: float = 10.0, dict_nam
 
             <div class="ruler-tick" style="right: 0; height: 6mm;"></div>
             <div class="ruler-label" style="right: 0;">{width_cm:.1f}cm</div>
+        </div>
+    </div>
+</body>
+</html>"""
+
+@app.get("/api/marker/print_dual", response_class=HTMLResponse)
+async def print_dual_marker_page(
+    tag_a_id: int = 0,
+    tag_a_cm: float = 10.0,
+    tag_b_id: int = 1,
+    tag_b_cm: float = 5.0,
+    spacing_cm: float = 5.0,
+    dict_name: str = "DICT_6X6_250"
+):
+    """
+    Returns an HTML print template rendering the Dual-ArUco Rigid Board
+    with Tag A (10cm) and Tag B (5cm) separated by exact spacing on a single page.
+    """
+    total_span_cm = tag_a_cm + spacing_cm + tag_b_cm
+    tag_b_offset_x = tag_a_cm + spacing_cm
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Print Dual-ArUco Rigid Board (10cm + 5cm)</title>
+    <style>
+        @page {{
+            size: A4 landscape;
+            margin: 10mm;
+        }}
+        * {{
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }}
+        body {{
+            margin: 0;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #fff;
+            color: #000;
+        }}
+        .no-print {{
+            background: #f1f5f9;
+            border: 1px solid #cbd5e1;
+            padding: 12px 18px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            text-align: center;
+            max-width: 650px;
+        }}
+        .print-btn {{
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 10px 22px;
+            border-radius: 6px;
+            font-weight: bold;
+            font-size: 14px;
+            cursor: pointer;
+            margin-top: 8px;
+        }}
+        @media print {{
+            .no-print {{ display: none !important; }}
+            body {{ padding: 0; }}
+        }}
+
+        /* RIGID BOARD DUAL LAYOUT WITH EXACT CENTIMETER SIZING */
+        .board-container {{
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            margin-top: 5mm;
+            border: 1px dashed #cbd5e1;
+            padding: 10mm;
+        }}
+
+        .tags-row {{
+            display: flex;
+            flex-direction: row;
+            align-items: flex-end; /* Baseline-align bottom edges (y=0) */
+            height: {tag_a_cm}cm;
+        }}
+
+        .tag-wrapper {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+
+        .tag-a-img {{
+            width: {tag_a_cm}cm;
+            height: {tag_a_cm}cm;
+            display: block;
+            image-rendering: pixelated;
+        }}
+
+        .tag-b-img {{
+            width: {tag_b_cm}cm;
+            height: {tag_b_cm}cm;
+            display: block;
+            image-rendering: pixelated;
+        }}
+
+        .gap-spacer {{
+            width: {spacing_cm}cm;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-bottom: 2px dashed #94a3b8;
+            position: relative;
+        }}
+
+        .gap-label {{
+            font-size: 11px;
+            color: #64748b;
+            font-weight: 600;
+            background: white;
+            padding: 0 4px;
+        }}
+
+        .origin-marker {{
+            position: absolute;
+            bottom: -20px;
+            left: 0;
+            font-size: 11px;
+            font-weight: bold;
+            color: #dc2626;
+        }}
+
+        .tag-title {{
+            font-size: 12px;
+            font-weight: 600;
+            margin-top: 4mm;
+            text-align: center;
+        }}
+
+        /* Printed Centimeter Ruler for Physical Calibration Verification */
+        .ruler-container {{
+            width: {total_span_cm}cm;
+            margin-top: 8mm;
+            border-top: 2px solid #000;
+            position: relative;
+            height: 12mm;
+        }}
+
+        .ruler-tick {{
+            position: absolute;
+            top: 0;
+            width: 1px;
+            background: #000;
+        }}
+
+        .ruler-label {{
+            position: absolute;
+            top: 6mm;
+            font-size: 9px;
+            font-family: monospace;
+            transform: translateX(-50%);
+        }}
+    </style>
+</head>
+<body>
+    <div class="no-print">
+        <h3 style="margin: 0 0 6px 0; color: #1e293b;">🖨️ Dual-ArUco Rigid Board Calibration Sheet</h3>
+        <p style="margin: 0; font-size: 13px; color: #475569;">
+            In your printer dialog, select <strong>Paper: A4 Landscape</strong> and <strong>Scale: 100% (Actual Size)</strong>.<br>
+            Tag A is exactly {tag_a_cm}cm, Tag B is exactly {tag_b_cm}cm, with {spacing_cm}cm physical spacing.
+        </p>
+        <button class="print-btn" onclick="window.print()">PRINT DUAL-ARUCO RIGID BOARD (1:1 SCALE)</button>
+    </div>
+
+    <div class="board-container">
+        <!-- Dual ArUco Tags Row -->
+        <div class="tags-row" style="position: relative;">
+            <!-- Tag A (Primary Origin Anchor at Bottom-Left) -->
+            <div class="tag-wrapper">
+                <img class="tag-a-img" src="/api/marker/raw?marker_id={tag_a_id}&size=800&dict_name={dict_name}" alt="Tag A (10cm)">
+                <div class="tag-title">Tag A (ID {tag_a_id}) - {tag_a_cm:.0f}cm [Origin Anchor (0,0,0)]</div>
+            </div>
+
+            <!-- Exact Spacing -->
+            <div class="gap-spacer">
+                <span class="gap-label">↔ {spacing_cm:.1f} cm</span>
+            </div>
+
+            <!-- Tag B (Secondary Offset Anchor) -->
+            <div class="tag-wrapper">
+                <img class="tag-b-img" src="/api/marker/raw?marker_id={tag_b_id}&size=400&dict_name={dict_name}" alt="Tag B (5cm)">
+                <div class="tag-title">Tag B (ID {tag_b_id}) - {tag_b_cm:.0f}cm [Offset X={tag_b_offset_x/100.0:.2f}m]</div>
+            </div>
+        </div>
+
+        <!-- Metric Calibration Ruler spanning entire board width -->
+        <div class="ruler-container">
+            <div class="ruler-tick" style="left: 0; height: 8mm; background: #dc2626; width: 2px;"></div>
+            <div class="ruler-label" style="left: 0; color: #dc2626; font-weight: bold;">(0,0,0) Origin</div>
+
+            <div class="ruler-tick" style="left: {tag_a_cm/total_span_cm*100}%; height: 6mm;"></div>
+            <div class="ruler-label" style="left: {tag_a_cm/total_span_cm*100}%;">{tag_a_cm:.0f}cm</div>
+
+            <div class="ruler-tick" style="left: {tag_b_offset_x/total_span_cm*100}%; height: 6mm;"></div>
+            <div class="ruler-label" style="left: {tag_b_offset_x/total_span_cm*100}%;">{tag_b_offset_x:.0f}cm</div>
+
+            <div class="ruler-tick" style="right: 0; height: 8mm;"></div>
+            <div class="ruler-label" style="right: 0;">{total_span_cm:.0f}cm</div>
         </div>
     </div>
 </body>
