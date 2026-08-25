@@ -512,6 +512,7 @@
         </div>
 
         <div class="nav-actions">
+            <button class="btn" id="openEkfBtn" style="border-color: #38bdf8; color: #38bdf8;">⚙️ EKF Tuning</button>
             <button class="btn btn-marker" id="openDualMarkerBtn" onclick="window.open('/api/marker/print_dual', '_blank')">🖨️ Print Dual-ArUco Board</button>
             <button class="btn" id="openMarkerBtn">Custom Marker</button>
             <button class="btn" id="addSampleBtn">⚡ Sample 3D Circle</button>
@@ -702,6 +703,85 @@
                 <a id="downloadMarkerLink" href="/api/marker/image?marker_id=0&size=800&dict_name=DICT_6X6_250" target="_blank" download="aruco_marker.png" class="btn btn-primary" style="flex: 1; justify-content: center; text-decoration: none;">Download PNG</a>
                 <button class="btn btn-marker" id="printMarkerBtn" style="flex: 1; justify-content: center;">Print Single</button>
                 <button class="btn" id="closeMarkerBtn" style="padding: 8px 14px;">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Extended Kalman Filter (EKF) Tuning Modal -->
+    <div class="modal" id="ekfModal">
+        <div class="modal-content" style="max-width: 580px; text-align: left;">
+            <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                <h2 style="font-size: 1.15rem; color: #f8fafc; margin: 0;">⚙️ Extended Kalman Filter (EKF) Tuning</h2>
+                <span class="pane-badge" style="background: rgba(56,189,248,0.15); color: #38bdf8; border-color: rgba(56,189,248,0.25);">12-State Fusion</span>
+            </div>
+            <p style="font-size: 0.78rem; color: #94a3b8; margin: 6px 0 12px 0;">
+                Dynamically tune the balance between high-frequency IMU dead-reckoning and ArUco 8-point PnP visual corrections.
+            </p>
+
+            <!-- Quick Presets -->
+            <div style="width: 100%; margin-bottom: 14px;">
+                <label style="font-size: 0.70rem; color: #94a3b8; text-transform: uppercase; font-weight: bold; display: block; margin-bottom: 6px;">Tuning Presets</label>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn btn-preset" id="presetBalanced" style="flex: 1; font-size: 0.75rem; justify-content: center;">⚖️ Balanced</button>
+                    <button class="btn btn-preset" id="presetSmooth" style="flex: 1; font-size: 0.75rem; justify-content: center;">🎯 Smooth (Precision)</button>
+                    <button class="btn btn-preset" id="presetAgile" style="flex: 1; font-size: 0.75rem; justify-content: center;">⚡ Agile (Fast)</button>
+                </div>
+            </div>
+
+            <!-- Sliders Grid -->
+            <div style="display: flex; flex-direction: column; gap: 12px; width: 100%; background: rgba(15,23,42,0.6); padding: 12px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                <!-- Velocity Process Noise Q_vel -->
+                <div>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.78rem; margin-bottom: 4px;">
+                        <span style="color: #e2e8f0; font-weight: 500;">⚡ Velocity Dynamics (Q_vel)</span>
+                        <span id="readoutQVel" style="color: #38bdf8; font-family: monospace;">0.0100</span>
+                    </div>
+                    <input type="range" id="sliderQVel" min="0.0005" max="0.08" step="0.0005" value="0.01" style="width: 100%; accent-color: #38bdf8;">
+                    <div style="font-size: 0.68rem; color: #64748b;">Higher = faster response to rapid hand jerks; Lower = heavily damps velocity jitter.</div>
+                </div>
+
+                <!-- Dual Tag Position Measurement Noise R_pos_dual -->
+                <div>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.78rem; margin-bottom: 4px;">
+                        <span style="color: #e2e8f0; font-weight: 500;">🎯 Dual-Tag Position Error (R_dual)</span>
+                        <span id="readoutRDual" style="color: #38bdf8; font-family: monospace;">1.0 mm</span>
+                    </div>
+                    <input type="range" id="sliderRDual" min="0.1" max="5.0" step="0.1" value="1.0" style="width: 100%; accent-color: #38bdf8;">
+                    <div style="font-size: 0.68rem; color: #64748b;">Expected 8-point measurement noise in millimeters (Lower = tighter lock to camera).</div>
+                </div>
+
+                <!-- Single Tag Position Measurement Noise R_pos_single -->
+                <div>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.78rem; margin-bottom: 4px;">
+                        <span style="color: #e2e8f0; font-weight: 500;">📐 Single-Tag Position Error (R_single)</span>
+                        <span id="readoutRSingle" style="color: #38bdf8; font-family: monospace;">4.0 mm</span>
+                    </div>
+                    <input type="range" id="sliderRSingle" min="0.5" max="15.0" step="0.5" value="4.0" style="width: 100%; accent-color: #38bdf8;">
+                    <div style="font-size: 0.68rem; color: #64748b;">Expected 4-point measurement noise when only one marker is in view.</div>
+                </div>
+
+                <!-- Gyroscope Orientation Noise Q_gyro -->
+                <div>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.78rem; margin-bottom: 4px;">
+                        <span style="color: #e2e8f0; font-weight: 500;">🔄 Gyroscope Trust (Q_gyro)</span>
+                        <span id="readoutQGyro" style="color: #38bdf8; font-family: monospace;">0.0010</span>
+                    </div>
+                    <input type="range" id="sliderQGyro" min="0.0001" max="0.01" step="0.0001" value="0.001" style="width: 100%; accent-color: #38bdf8;">
+                    <div style="font-size: 0.68rem; color: #64748b;">Controls how quickly orientation updates from the phone's gyroscope propagate into the 3D frame.</div>
+                </div>
+            </div>
+
+            <!-- Bottom Controls -->
+            <div style="display: flex; justify-content: space-between; align-items: center; width: 100%; margin-top: 14px; flex-wrap: wrap; gap: 10px;">
+                <label style="font-size: 0.75rem; color: #94a3b8; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                    <input type="checkbox" id="autoReprocessCheck" checked style="accent-color: #38bdf8;">
+                    <span>Live Re-Filter active episode on change</span>
+                </label>
+
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn btn-primary" id="reprocessBtn">⚡ Re-Filter Now</button>
+                    <button class="btn" id="closeEkfBtn" style="padding: 8px 14px;">Close</button>
+                </div>
             </div>
         </div>
     </div>
@@ -1246,9 +1326,147 @@
         document.getElementById('closeMarkerBtn').onclick = () => markerModal.classList.remove('active');
         markerModal.onclick = (e) => { if (e.target === markerModal) markerModal.classList.remove('active'); };
 
+        // ==========================================
+        // EKF TUNING MODAL & LIVE RE-FILTER ENGINE
+        // ==========================================
+        const ekfModal = document.getElementById('ekfModal');
+        const sliderQVel = document.getElementById('sliderQVel');
+        const sliderRDual = document.getElementById('sliderRDual');
+        const sliderRSingle = document.getElementById('sliderRSingle');
+        const sliderQGyro = document.getElementById('sliderQGyro');
+
+        const readoutQVel = document.getElementById('readoutQVel');
+        const readoutRDual = document.getElementById('readoutRDual');
+        const readoutRSingle = document.getElementById('readoutRSingle');
+        const readoutQGyro = document.getElementById('readoutQGyro');
+        const autoReprocessCheck = document.getElementById('autoReprocessCheck');
+        const reprocessBtn = document.getElementById('reprocessBtn');
+
+        let ekfDebounceTimer = null;
+        let ekfPresets = {};
+
+        async function initEkfControls() {
+            try {
+                const res = await fetch('/api/ekf/params');
+                const data = await res.json();
+                if (data.params) {
+                    sliderQVel.value = data.params.q_vel;
+                    sliderRDual.value = (data.params.r_pos_dual * 1000.0).toFixed(1);
+                    sliderRSingle.value = (data.params.r_pos_single * 1000.0).toFixed(1);
+                    sliderQGyro.value = data.params.q_gyro;
+                    updateEkfReadouts();
+                }
+                if (data.presets) {
+                    ekfPresets = data.presets;
+                }
+            } catch (err) {
+                console.error("Failed to load EKF parameters", err);
+            }
+        }
+
+        function updateEkfReadouts() {
+            readoutQVel.innerText = parseFloat(sliderQVel.value).toFixed(4);
+            readoutRDual.innerText = parseFloat(sliderRDual.value).toFixed(1) + ' mm';
+            readoutRSingle.innerText = parseFloat(sliderRSingle.value).toFixed(1) + ' mm';
+            readoutQGyro.innerText = parseFloat(sliderQGyro.value).toFixed(4);
+        }
+
+        async function applyEkfParams(triggerReprocess = true) {
+            const params = {
+                q_vel: parseFloat(sliderQVel.value),
+                r_pos_dual: parseFloat(sliderRDual.value) / 1000.0,
+                r_pos_single: parseFloat(sliderRSingle.value) / 1000.0,
+                q_gyro: parseFloat(sliderQGyro.value)
+            };
+
+            await fetch('/api/ekf/params', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(params)
+            });
+
+            if (triggerReprocess && selectedEpIdx >= 0) {
+                await reprocessActiveEpisode();
+            }
+        }
+
+        async function reprocessActiveEpisode() {
+            if (selectedEpIdx < 0) return;
+            const res = await fetch(`/api/episodes/${selectedEpIdx}/reprocess`, { method: 'POST' });
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data.status === 'success' && data.poses) {
+                const ep = episodes[selectedEpIdx];
+                if (ep) {
+                    ep.poses = data.poses;
+                    buildTrajectoryTube(ep.poses);
+                    updatePlayback(currentFrame);
+                }
+            }
+        }
+
+        function onSliderInput() {
+            updateEkfReadouts();
+            if (autoReprocessCheck.checked) {
+                clearTimeout(ekfDebounceTimer);
+                ekfDebounceTimer = setTimeout(() => applyEkfParams(true), 200);
+            } else {
+                clearTimeout(ekfDebounceTimer);
+                ekfDebounceTimer = setTimeout(() => applyEkfParams(false), 200);
+            }
+        }
+
+        sliderQVel.addEventListener('input', onSliderInput);
+        sliderRDual.addEventListener('input', onSliderInput);
+        sliderRSingle.addEventListener('input', onSliderInput);
+        sliderQGyro.addEventListener('input', onSliderInput);
+
+        // Presets
+        document.getElementById('presetBalanced').onclick = () => {
+            if (ekfPresets.balanced) {
+                sliderQVel.value = ekfPresets.balanced.q_vel;
+                sliderRDual.value = (ekfPresets.balanced.r_pos_dual * 1000.0).toFixed(1);
+                sliderRSingle.value = (ekfPresets.balanced.r_pos_single * 1000.0).toFixed(1);
+                sliderQGyro.value = ekfPresets.balanced.q_gyro;
+                updateEkfReadouts();
+                applyEkfParams(true);
+            }
+        };
+
+        document.getElementById('presetSmooth').onclick = () => {
+            if (ekfPresets.smooth) {
+                sliderQVel.value = ekfPresets.smooth.q_vel;
+                sliderRDual.value = (ekfPresets.smooth.r_pos_dual * 1000.0).toFixed(1);
+                sliderRSingle.value = (ekfPresets.smooth.r_pos_single * 1000.0).toFixed(1);
+                sliderQGyro.value = ekfPresets.smooth.q_gyro;
+                updateEkfReadouts();
+                applyEkfParams(true);
+            }
+        };
+
+        document.getElementById('presetAgile').onclick = () => {
+            if (ekfPresets.agile) {
+                sliderQVel.value = ekfPresets.agile.q_vel;
+                sliderRDual.value = (ekfPresets.agile.r_pos_dual * 1000.0).toFixed(1);
+                sliderRSingle.value = (ekfPresets.agile.r_pos_single * 1000.0).toFixed(1);
+                sliderQGyro.value = ekfPresets.agile.q_gyro;
+                updateEkfReadouts();
+                applyEkfParams(true);
+            }
+        };
+
+        reprocessBtn.onclick = () => applyEkfParams(true);
+        document.getElementById('openEkfBtn').onclick = () => {
+            initEkfControls();
+            ekfModal.classList.add('active');
+        };
+        document.getElementById('closeEkfBtn').onclick = () => ekfModal.classList.remove('active');
+        ekfModal.onclick = (e) => { if (e.target === ekfModal) ekfModal.classList.remove('active'); };
+
         document.getElementById('refreshBtn').onclick = fetchEpisodes;
         window.onload = () => {
             fetchEpisodes();
+            initEkfControls();
             setTimeout(resize3D, 100);
         };
     </script>

@@ -24,21 +24,49 @@ class VisualInertialEKF:
         x[9:12]  = 3D Accelerometer Bias (b_ax, b_ay, b_az) in m/s^2
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        q_pos=1e-4,
+        q_vel=1e-2,
+        q_gyro=1e-3,
+        q_bias=1e-5,
+        r_pos_dual=1e-3,       # meters (e.g. 0.001 m = 1mm)
+        r_rot_dual=0.3,        # degrees
+        r_pos_single=4e-3,     # meters (e.g. 0.004 m = 4mm)
+        r_rot_single=0.8       # degrees
+    ):
         self.state_dim = 12
         self.x = np.zeros(self.state_dim, dtype=np.float64)
         self.P = np.eye(self.state_dim, dtype=np.float64) * 0.1
 
-        # Process Noise Covariance Q (continuous-time spectral densities)
-        # Position, Velocity, Orientation, Accelerometer Bias Random Walk
+        self.q_pos = float(q_pos)
+        self.q_vel = float(q_vel)
+        self.q_gyro = float(q_gyro)
+        self.q_bias = float(q_bias)
+
+        self.r_pos_dual = float(r_pos_dual)
+        self.r_rot_dual = float(r_rot_dual)
+        self.r_pos_single = float(r_pos_single)
+        self.r_rot_single = float(r_rot_single)
+
+        # Process Noise Covariance Q
         self.Q = np.zeros((self.state_dim, self.state_dim), dtype=np.float64)
-        self.Q[0:3, 0:3] = np.eye(3) * 1e-4       # Position drift
-        self.Q[3:6, 3:6] = np.eye(3) * 1e-2       # Velocity noise
-        self.Q[6:9, 6:9] = np.eye(3) * 1e-3       # Orientation gyro noise
-        self.Q[9:12, 9:12] = np.eye(3) * 1e-5     # Accel bias random walk
+        self._rebuild_q()
 
         self.g_world = np.array([0.0, 0.0, 9.81], dtype=np.float64)
         self.is_initialized = False
+
+    def _rebuild_q(self):
+        self.Q[0:3, 0:3] = np.eye(3) * self.q_pos
+        self.Q[3:6, 3:6] = np.eye(3) * self.q_vel
+        self.Q[6:9, 6:9] = np.eye(3) * self.q_gyro
+        self.Q[9:12, 9:12] = np.eye(3) * self.q_bias
+
+    def set_params(self, **kwargs):
+        for k, v in kwargs.items():
+            if hasattr(self, k):
+                setattr(self, k, float(v))
+        self._rebuild_q()
 
     def reset(self, initial_position=None, initial_euler=None):
         self.x = np.zeros(self.state_dim, dtype=np.float64)
@@ -125,13 +153,11 @@ class VisualInertialEKF:
 
         # Adaptive Measurement Noise Covariance
         if is_dual:
-            # High confidence (8-point over-determined rigid board): ~1mm pos error, ~0.2 deg rot error
-            r_pos = (1e-3) ** 2
-            r_rot = (np.radians(0.3)) ** 2
+            r_pos = (self.r_pos_dual) ** 2
+            r_rot = (np.radians(self.r_rot_dual)) ** 2
         else:
-            # Single tag (4-point): ~4mm pos error, ~0.8 deg rot error
-            r_pos = (4e-3) ** 2
-            r_rot = (np.radians(0.8)) ** 2
+            r_pos = (self.r_pos_single) ** 2
+            r_rot = (np.radians(self.r_rot_single)) ** 2
 
         R_meas = np.diag([
             r_pos, r_pos, r_pos,
@@ -218,6 +244,68 @@ class VisualInertialTracker:
 
         # Master Combined 8-point Object Array
         self.board_8p_3d = np.vstack([self.tag_a_3d, self.tag_b_3d])
+
+        # Extended Kalman Filter Tuning Parameters
+        self.ekf_params = {
+            "q_pos": 1e-4,
+            "q_vel": 1e-2,
+            "q_gyro": 1e-3,
+            "q_bias": 1e-5,
+            "r_pos_dual": 0.001,       # 1.0 mm
+            "r_rot_dual": 0.3,         # 0.3 degrees
+            "r_pos_single": 0.004,     # 4.0 mm
+            "r_rot_single": 0.8        # 0.8 degrees
+        }
+
+    def get_ekf_params(self):
+        """
+        Returns current EKF parameters along with predefined presets.
+        """
+        presets = {
+            "balanced": {
+                "q_pos": 1e-4,
+                "q_vel": 1e-2,
+                "q_gyro": 1e-3,
+                "q_bias": 1e-5,
+                "r_pos_dual": 0.001,
+                "r_rot_dual": 0.3,
+                "r_pos_single": 0.004,
+                "r_rot_single": 0.8
+            },
+            "smooth": {
+                "q_pos": 1e-5,
+                "q_vel": 2e-3,
+                "q_gyro": 5e-4,
+                "q_bias": 1e-6,
+                "r_pos_dual": 0.003,
+                "r_rot_dual": 0.6,
+                "r_pos_single": 0.008,
+                "r_rot_single": 1.5
+            },
+            "agile": {
+                "q_pos": 5e-4,
+                "q_vel": 5e-2,
+                "q_gyro": 5e-3,
+                "q_bias": 5e-5,
+                "r_pos_dual": 0.0005,
+                "r_rot_dual": 0.2,
+                "r_pos_single": 0.002,
+                "r_rot_single": 0.5
+            }
+        }
+        return {
+            "params": self.ekf_params.copy(),
+            "presets": presets
+        }
+
+    def set_ekf_params(self, new_params):
+        """
+        Updates EKF tuning parameters.
+        """
+        for k in self.ekf_params.keys():
+            if k in new_params:
+                self.ekf_params[k] = float(new_params[k])
+        return self.ekf_params.copy()
 
     def generate_raw_marker(self, marker_id=0, side_pixels=600, dict_name="DICT_6X6_250"):
         """
@@ -441,7 +529,7 @@ class VisualInertialTracker:
         """
         Full EKF propagation and measurement update loop across video and IMU timelines.
         """
-        ekf = VisualInertialEKF()
+        ekf = VisualInertialEKF(**self.ekf_params)
 
         # Build map of video frame index to detection
         vis_map = {f_idx: (p, euler, dual) for (f_idx, p, euler, dual) in video_detections}
@@ -496,6 +584,12 @@ class VisualInertialTracker:
             final_poses[f] = np.hstack([pos, rot])
 
         return final_poses
+
+    def reprocess_episode_trajectory(self, video_path, imu_samples, fps=30.0):
+        """
+        Re-filters an existing video and IMU recording using the latest EKF parameters.
+        """
+        return self.process_video_and_imu(video_path, imu_samples, fps=fps)
 
     def generate_synthetic_anchored_trajectory(self, num_frames=90, shape="circle"):
         """

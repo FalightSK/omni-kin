@@ -83,6 +83,23 @@ def test_ekf_fusion():
     assert np.allclose(ekf.x[0:3], meas_p, atol=0.005), "EKF state should converge tightly to high-confidence 8-point measurement"
     print("[PASS] test_ekf_fusion passed!")
 
+def test_ekf_params_customization():
+    tracker = VisualInertialTracker()
+    default_params = tracker.get_ekf_params()
+    assert "params" in default_params and "presets" in default_params
+    assert "balanced" in default_params["presets"]
+    assert "smooth" in default_params["presets"]
+    assert "agile" in default_params["presets"]
+
+    # Test setting custom params
+    updated = tracker.set_ekf_params({
+        "q_vel": 0.05,
+        "r_pos_dual": 0.002
+    })
+    assert updated["q_vel"] == 0.05
+    assert updated["r_pos_dual"] == 0.002
+    print("[PASS] test_ekf_params_customization passed!")
+
 def test_trajectory_generation():
     tracker = VisualInertialTracker()
     traj = tracker.generate_synthetic_anchored_trajectory(num_frames=60, shape="circle")
@@ -95,5 +112,6 @@ if __name__ == "__main__":
     test_marker_generation()
     test_dual_board_pnp_scenarios()
     test_ekf_fusion()
+    test_ekf_params_customization()
     test_trajectory_generation()
     print("\nALL DUAL-ARUCO & EKF TESTS PASSED SUCCESSFULLY!")

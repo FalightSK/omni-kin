@@ -564,6 +564,7 @@ async def save_recording(
         'gripper_states': gripper_states,
         'actions': actions.tolist(),
         'timestamps': timestamps.tolist(),
+        'imu_data': parsed_imu,
         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -643,6 +644,7 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
         'gripper_states': gripper_states,
         'actions': actions.tolist(),
         'timestamps': timestamps.tolist(),
+        'imu_data': [],
         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
@@ -652,6 +654,60 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
         "status": "success",
         "episode_index": ep_idx,
         "task": task
+    })
+
+@app.get("/api/ekf/params")
+async def get_ekf_parameters():
+    """
+    Returns current Extended Kalman Filter parameters and tuning presets.
+    """
+    return JSONResponse(visual_tracker.get_ekf_params())
+
+@app.post("/api/ekf/params")
+async def update_ekf_parameters(request: Request):
+    """
+    Updates Extended Kalman Filter process and measurement noise covariances.
+    """
+    payload = await request.json()
+    updated = visual_tracker.set_ekf_params(payload)
+    return JSONResponse({"status": "success", "params": updated})
+
+@app.post("/api/episodes/{episode_index}/reprocess")
+async def reprocess_episode(episode_index: int):
+    """
+    Re-filters an existing recorded episode with the current EKF parameters.
+    """
+    global EPISODES_DB
+    target_ep = None
+    for ep in EPISODES_DB:
+        if ep['episode_index'] == episode_index:
+            target_ep = ep
+            break
+
+    if not target_ep:
+        return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+
+    video_path = target_ep.get('video_path', '')
+    imu_data = target_ep.get('imu_data', [])
+
+    if not os.path.exists(video_path):
+        return JSONResponse({"status": "error", "message": "Episode video file missing"}, status_code=400)
+
+    fps = target_ep.get('fps', 30.0)
+    new_poses = visual_tracker.reprocess_episode_trajectory(video_path, imu_data, fps=fps)
+    new_poses = np.array(new_poses)
+
+    target_ep['poses'] = new_poses.tolist()
+    target_ep['ee_poses'] = new_poses.tolist()
+    actions = np.roll(new_poses, -1, axis=0)
+    actions[-1] = new_poses[-1]
+    target_ep['actions'] = actions.tolist()
+
+    return JSONResponse({
+        "status": "success",
+        "episode_index": episode_index,
+        "num_frames": len(new_poses),
+        "poses": new_poses.tolist()
     })
 
 @app.post("/api/export_lerobot")
