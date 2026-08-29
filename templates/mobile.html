@@ -651,34 +651,37 @@
 
             recDot.classList.remove('active');
             recordBtn.classList.remove('recording');
-            recordBtnText.innerText = "CALCULATING 3D SHAPE...";
-            statusText.innerText = "Running ArUco PnP & Visual-Inertial Fusion...";
+            recordBtnText.innerText = "UPLOADING TO SERVER...";
+            statusText.innerText = "Uploading raw video & IMU telemetry to server...";
 
             mediaRecorder.stop();
 
             mediaRecorder.onstop = async () => {
-                const blob = new Blob(recordedChunks, { type: recordedChunks[0]?.type || 'video/webm' });
+                const mimeType = recordedChunks[0]?.type || 'video/webm';
+                const ext = mimeType.includes('mp4') ? '.mp4' : '.webm';
+                const blob = new Blob(recordedChunks, { type: mimeType });
                 const task = taskPreset.value === 'custom' ? taskCustom.value : taskPreset.value;
 
                 const formData = new FormData();
-                formData.append('video', blob, 'recording.mp4');
+                formData.append('video', blob, `recording${ext}`);
                 formData.append('imu_data', JSON.stringify(imuData));
                 formData.append('task', task);
 
                 try {
+                    statusText.innerText = "⚙️ Server is calculating 3D Trajectory (ArUco PnP + EKF Fusion)...";
                     const response = await fetch('/api/recordings/save', {
                         method: 'POST',
                         body: formData
                     });
                     const res = await response.json();
                     if (res.status === 'success') {
-                        statusText.innerText = `🎉 3D Trajectory Saved! Episode #${res.episode_index} (${res.num_frames} frames).`;
+                        statusText.innerText = `🎉 Server Calculated & Saved! Episode #${res.episode_index} (${res.num_frames} frames).`;
                     } else {
-                        statusText.innerText = "Error processing recording.";
+                        statusText.innerText = "❌ Server error: " + (res.message || "Processing failed.");
                     }
                 } catch (err) {
                     console.error("Upload error:", err);
-                    statusText.innerText = "Upload failed: " + err.message;
+                    statusText.innerText = "❌ Upload failed: " + err.message;
                 }
 
                 recordBtnText.innerText = "START RECORDING";

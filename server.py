@@ -498,85 +498,112 @@ async def save_recording(
     imu_data: str = Form("[]"),
     task: str = Form("reach to apple")
 ):
-    ep_idx = len(EPISODES_DB)
-    ep_dir = os.path.join(RECORDINGS_DIR, f"episode_{ep_idx:04d}")
-    os.makedirs(ep_dir, exist_ok=True)
-
-    # 1. Save video file
-    video_path = os.path.join(ep_dir, "recording.mp4")
-    with open(video_path, "wb") as f:
-        f.write(await video.read())
-
-    # 2. Parse IMU JSON
+    """
+    Receives raw sensor recording (video stream + high-frequency IMU telemetry) from mobile phone,
+    saves the raw files to disk, and executes the entire 3D Visual-Inertial EKF Reconstruction
+    and ArUco solvePnP trajectory calculation SERVER-SIDE.
+    """
     try:
-        parsed_imu = json.loads(imu_data)
-    except Exception:
-        parsed_imu = []
+        ep_idx = len(EPISODES_DB)
+        ep_dir = os.path.join(RECORDINGS_DIR, f"episode_{ep_idx:04d}")
+        os.makedirs(ep_dir, exist_ok=True)
 
-    # 3. Determine frame count of video accurately
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if not fps or fps <= 0 or fps > 120 or np.isnan(fps):
-        fps = 30.0
+        # 1. Preserve original video container extension (.webm or .mp4)
+        filename = video.filename or "recording.mp4"
+        ext = os.path.splitext(filename)[1].lower()
+        if not ext or ext == ".":
+            ext = ".webm" if "webm" in (video.content_type or "") else ".mp4"
 
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if frame_count <= 0:
-        count = 0
-        while True:
-            ret, _ = cap.read()
-            if not ret:
-                break
-            count += 1
-        frame_count = max(count, 1)
-    cap.release()
+        video_filename = f"recording{ext}"
+        video_path = os.path.join(ep_dir, video_filename)
 
-    if frame_count <= 0:
-        frame_count = 60
+        print(f"\n[{time.strftime('%H:%M:%S')}] 📥 Server received upload request for Episode #{ep_idx} ({video.filename}, {video.content_type})")
 
-    # 4. ArUco PnP & Visual-Inertial 3D Trajectory Reconstruction (Anchored at (0,0,0) Table Marker)
-    anchored_poses = visual_tracker.process_video_and_imu(video_path, parsed_imu, fps=fps)
+        with open(video_path, "wb") as f:
+            content = await video.read()
+            f.write(content)
 
-    # 5. Append gripper state (100% open early, 10% closed near grasp)
-    gripper_states = []
-    for i in range(len(anchored_poses)):
-        g = 100.0 if i < (len(anchored_poses) * 0.7) else 10.0
-        gripper_states.append(g)
+        print(f"[{time.strftime('%H:%M:%S')}] 💾 Raw video payload saved to disk: {video_path} ({len(content)} bytes)")
 
-    # Target actions (next-step Cartesian poses + gripper)
-    anchored_poses = np.array(anchored_poses)
-    actions = np.roll(anchored_poses, -1, axis=0)
-    actions[-1] = anchored_poses[-1]
+        # 2. Parse IMU JSON
+        try:
+            parsed_imu = json.loads(imu_data)
+            print(f"[{time.strftime('%H:%M:%S')}] 📊 Parsed IMU telemetry stream: {len(parsed_imu)} samples")
+        except Exception as imu_err:
+            print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Warning parsing IMU telemetry: {imu_err}")
+            parsed_imu = []
 
-    timestamps = np.linspace(0, len(anchored_poses) / fps, len(anchored_poses))
+        # 3. Inspect video frame count and FPS
+        cap = cv2.VideoCapture(video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 0 or fps > 120 or np.isnan(fps):
+            fps = 30.0
 
-    episode_data = {
-        'episode_index': ep_idx,
-        'task': task,
-        'video_path': video_path,
-        'video_url': f"/recordings/episode_{ep_idx:04d}/recording.mp4",
-        'num_frames': len(anchored_poses),
-        'fps': fps,
-        'duration': len(anchored_poses) / fps,
-        'anchor': 'aruco_dict_6x6_250_id0',
-        'marker_size_cm': 10.0,
-        'poses': anchored_poses.tolist(),
-        'ee_poses': anchored_poses.tolist(),
-        'gripper_states': gripper_states,
-        'actions': actions.tolist(),
-        'timestamps': timestamps.tolist(),
-        'imu_data': parsed_imu,
-        'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
-    }
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if frame_count <= 0:
+            count = 0
+            while True:
+                ret, _ = cap.read()
+                if not ret:
+                    break
+                count += 1
+            frame_count = max(count, 1)
+        cap.release()
 
-    EPISODES_DB.append(episode_data)
+        print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Executing Server-Side 3D Reconstruction (Dual-ArUco PnP + 12-State EKF Fusion)...")
 
-    return JSONResponse({
-        "status": "success",
-        "episode_index": ep_idx,
-        "task": task,
-        "num_frames": len(anchored_poses),
-        "anchor": "ArUco (0, 0, 0) Table Center"
-    })
+        # 4. SERVER-SIDE COMPUTATION: ArUco PnP & 12-State EKF Trajectory Reconstruction
+        anchored_poses = visual_tracker.process_video_and_imu(video_path, parsed_imu, fps=fps)
+
+        # 5. Gripper state heuristic
+        gripper_states = []
+        for i in range(len(anchored_poses)):
+            g = 100.0 if i < (len(anchored_poses) * 0.7) else 10.0
+            gripper_states.append(g)
+
+        anchored_poses = np.array(anchored_poses)
+        actions = np.roll(anchored_poses, -1, axis=0)
+        actions[-1] = anchored_poses[-1]
+        timestamps = np.linspace(0, len(anchored_poses) / fps, len(anchored_poses))
+
+        episode_data = {
+            'episode_index': ep_idx,
+            'task': task,
+            'video_path': video_path,
+            'video_url': f"/recordings/episode_{ep_idx:04d}/{video_filename}",
+            'num_frames': len(anchored_poses),
+            'fps': fps,
+            'duration': len(anchored_poses) / fps,
+            'anchor': 'aruco_dict_6x6_250_id0',
+            'marker_size_cm': 10.0,
+            'poses': anchored_poses.tolist(),
+            'ee_poses': anchored_poses.tolist(),
+            'gripper_states': gripper_states,
+            'actions': actions.tolist(),
+            'timestamps': timestamps.tolist(),
+            'imu_data': parsed_imu,
+            'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+        EPISODES_DB.append(episode_data)
+        print(f"[{time.strftime('%H:%M:%S')}] 🎉 Episode #{ep_idx} successfully calculated and added to Server DB ({len(anchored_poses)} frames)!\n")
+
+        return JSONResponse({
+            "status": "success",
+            "episode_index": ep_idx,
+            "task": task,
+            "num_frames": len(anchored_poses),
+            "anchor": "Dual-ArUco Board (0, 0, 0) Origin"
+        })
+
+    except Exception as err:
+        import traceback
+        traceback.print_exc()
+        print(f"[{time.strftime('%H:%M:%S')}] ❌ ERROR during server calculation: {err}")
+        return JSONResponse({
+            "status": "error",
+            "message": f"Server processing error: {str(err)}"
+        }, status_code=500)
 
 @app.post("/api/recordings/sample")
 async def generate_sample_recording(task: str = "reach to apple", shape: str = "circle"):
