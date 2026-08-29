@@ -37,6 +37,10 @@ EXPORT_DIR = os.path.join(BASE_DIR, "lerobot_exports")
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
+FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
+if os.path.exists(os.path.join(FRONTEND_DIST_DIR, "assets")):
+    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST_DIR, "assets")), name="assets")
+
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 app.mount("/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
 
@@ -63,10 +67,16 @@ def get_local_ip():
 
 @app.get("/", response_class=HTMLResponse)
 async def index_page(request: Request):
+    index_dist = os.path.join(FRONTEND_DIST_DIR, "index.html")
+    if os.path.exists(index_dist):
+        return FileResponse(index_dist)
     return templates.TemplateResponse(request=request, name="index.html")
 
 @app.get("/mobile", response_class=HTMLResponse)
 async def mobile_page(request: Request):
+    index_dist = os.path.join(FRONTEND_DIST_DIR, "index.html")
+    if os.path.exists(index_dist):
+        return FileResponse(index_dist)
     return templates.TemplateResponse(request=request, name="mobile.html")
 
 @app.get("/api/marker/raw")

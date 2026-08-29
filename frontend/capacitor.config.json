@@ -1,0 +1,14 @@
+{
+  "appId": "com.omnikin.trajectorycollector",
+  "appName": "OmniKin 3D Collector",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "plugins": {
+    "CapacitorCookies": {
+      "enabled": true
+    }
+  }
+}
