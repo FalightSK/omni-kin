@@ -1,0 +1,16 @@
+{
+  "short_name": "OmniKin 3D",
+  "name": "OmniKin 3D Trajectory Collector",
+  "icons": [
+    {
+      "src": "favicon.ico",
+      "sizes": "64x64 32x32 24x24 16x16",
+      "type": "image/x-icon"
+    }
+  ],
+  "start_url": "/mobile",
+  "background_color": "#060911",
+  "theme_color": "#060911",
+  "display": "standalone",
+  "orientation": "any"
+}
