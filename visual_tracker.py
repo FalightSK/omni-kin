@@ -135,10 +135,11 @@ class VisualInertialEKF:
         # Covariance propagation P_k = F P_{k-1} F^T + Q * dt
         self.P = F @ self.P @ F.T + self.Q * dt
 
-    def update_visual(self, p_meas, euler_meas, is_dual=True):
+    def update_visual(self, p_meas, euler_meas, is_dual=True, source="dual_aruco"):
         """
-        EKF Measurement update with 6-DoF visual pose from ArUco PnP.
-        Adaptive measurement covariance R_meas provides tighter confidence for 8-point dual tags.
+        EKF Measurement update with 6-DoF visual pose.
+        Adaptive measurement covariance R_meas provides tighter confidence for ground-truth ArUco
+        and robust confidence for ArUco-anchored feature map PnP.
         """
         if not self.is_initialized:
             self.reset(p_meas, euler_meas)
@@ -152,12 +153,18 @@ class VisualInertialEKF:
         H[3:6, 6:9] = np.eye(3)
 
         # Adaptive Measurement Noise Covariance
-        if is_dual:
+        if source == "dual_aruco" or is_dual:
             r_pos = (self.r_pos_dual) ** 2
             r_rot = (np.radians(self.r_rot_dual)) ** 2
-        else:
+        elif source == "single_aruco":
             r_pos = (self.r_pos_single) ** 2
             r_rot = (np.radians(self.r_rot_single)) ** 2
+        elif source == "feature_pnp":
+            r_pos = (self.r_pos_single * 1.5) ** 2
+            r_rot = (np.radians(self.r_rot_single * 1.5)) ** 2
+        else:  # feature_vo
+            r_pos = (self.r_pos_single * 3.0) ** 2
+            r_rot = (np.radians(self.r_rot_single * 2.5)) ** 2
 
         R_meas = np.diag([
             r_pos, r_pos, r_pos,
@@ -184,6 +191,270 @@ class VisualInertialEKF:
         # Joseph Form Covariance Update for numerical stability
         I_KH = np.eye(self.state_dim, dtype=np.float64) - K @ H
         self.P = I_KH @ self.P @ I_KH.T + K @ R_meas @ K.T
+
+
+class ArucoFeatureMapTracker:
+    """
+    Maintains a persistent 3D Landmark Map in the physical ArUco world coordinate frame.
+    
+    When ArUco markers are visible:
+      - Projects natural workspace features into ArUco World coordinates via multi-view triangulation.
+      - Populates the 3D landmark database.
+      
+    When ArUco markers are lost / occluded:
+      - Tracks features using pyramidal Lucas-Kanade optical flow.
+      - Executes cv2.solvePnPRansac against the ArUco-anchored 3D landmarks.
+      - Continuously outputs accurate 6-DoF camera poses locked to the table origin (0, 0, 0).
+    """
+
+    def __init__(self, camera_matrix, dist_coeffs):
+        self.camera_matrix = camera_matrix.astype(np.float32)
+        self.dist_coeffs = dist_coeffs.astype(np.float32)
+
+        # 3D Landmark Map: dict { pt_id: np.array([X_w, Y_w, Z_w], dtype=np.float32) }
+        self.landmarks_3d = {}
+
+        # Tracking state
+        self.prev_gray = None
+        self.tracked_pts = np.empty((0, 2), dtype=np.float32)
+        self.tracked_ids = []
+        self.next_pt_id = 0
+
+        # Recent keyframe history for triangulation: list of (frame_idx, p_world, R_world_to_cam, pts_dict)
+        self.view_history = []
+        self.min_features = 120
+        self.max_features = 250
+
+        # Last known pose
+        self.last_p_world = np.array([0.075, 0.05, 0.30], dtype=np.float64)
+        self.last_R_world_to_cam = np.eye(3, dtype=np.float64)
+        self.prev_gray_pts = None
+
+    def _extract_new_features(self, gray, mask=None):
+        corners = cv2.goodFeaturesToTrack(
+            gray,
+            maxCorners=self.max_features,
+            qualityLevel=0.015,
+            minDistance=10,
+            mask=mask
+        )
+        if corners is None or len(corners) == 0:
+            return np.empty((0, 2), dtype=np.float32)
+
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01)
+        refined = cv2.cornerSubPix(gray, np.copy(corners), (5, 5), (-1, -1), criteria)
+        return refined.reshape(-1, 2).astype(np.float32)
+
+    def add_aruco_ground_truth(self, gray, p_cam_world, R_world_to_cam, aruco_corners_list=None):
+        self.last_p_world = p_cam_world.copy()
+        self.last_R_world_to_cam = R_world_to_cam.copy()
+
+        mask = np.full(gray.shape, 255, dtype=np.uint8)
+        if aruco_corners_list:
+            for corners in aruco_corners_list:
+                pts = corners.reshape(-1, 2).astype(np.int32)
+                cv2.fillPoly(mask, [pts], 0)
+
+        current_pts_dict = {}
+        if self.prev_gray is not None and len(self.tracked_pts) > 0:
+            pts_curr, status, _ = cv2.calcOpticalFlowPyrLK(
+                self.prev_gray,
+                gray,
+                self.tracked_pts.astype(np.float32),
+                None,
+                winSize=(21, 21),
+                maxLevel=3
+            )
+            valid_mask = (status.flatten() == 1)
+
+            survived_pts = pts_curr[valid_mask]
+            survived_ids = [self.tracked_ids[i] for i in range(len(self.tracked_ids)) if valid_mask[i]]
+
+            self.tracked_pts = survived_pts
+            self.tracked_ids = survived_ids
+
+            for i, pid in enumerate(survived_ids):
+                current_pts_dict[pid] = survived_pts[i]
+        else:
+            self.tracked_pts = np.empty((0, 2), dtype=np.float32)
+            self.tracked_ids = []
+
+        t_w_to_c = -R_world_to_cam @ p_cam_world.reshape(3, 1)
+        Rt_curr = np.hstack([R_world_to_cam, t_w_to_c])
+        P_curr = self.camera_matrix @ Rt_curr
+
+        for prev_view in self.view_history[-4:]:
+            _, prev_p, prev_R, prev_pts_dict = prev_view
+            baseline = np.linalg.norm(p_cam_world - prev_p)
+            if baseline < 0.015:
+                continue
+
+            prev_t = -prev_R @ prev_p.reshape(3, 1)
+            P_prev = self.camera_matrix @ np.hstack([prev_R, prev_t])
+
+            common_ids = [pid for pid in current_pts_dict if pid in prev_pts_dict and pid not in self.landmarks_3d]
+            if len(common_ids) == 0:
+                continue
+
+            pts1 = np.array([prev_pts_dict[pid] for pid in common_ids], dtype=np.float32).T
+            pts2 = np.array([current_pts_dict[pid] for pid in common_ids], dtype=np.float32).T
+
+            pts4d = cv2.triangulatePoints(P_prev, P_curr, pts1, pts2)
+            w = pts4d[3, :]
+            valid_depth = np.abs(w) > 1e-4
+            pts3d = (pts4d[:3, :] / np.where(valid_depth, w, 1e-4)).T
+
+            for i, pid in enumerate(common_ids):
+                if valid_depth[i]:
+                    x_w, y_w, z_w = pts3d[i]
+                    if -0.05 <= z_w <= 1.2 and np.linalg.norm([x_w, y_w]) < 2.0:
+                        self.landmarks_3d[pid] = np.array([x_w, y_w, z_w], dtype=np.float32)
+
+        if len(self.tracked_pts) < self.min_features:
+            new_corners = self._extract_new_features(gray, mask=mask)
+            if len(new_corners) > 0:
+                new_ids = [self.next_pt_id + i for i in range(len(new_corners))]
+                self.next_pt_id += len(new_corners)
+
+                if len(self.tracked_pts) == 0:
+                    self.tracked_pts = new_corners
+                    self.tracked_ids = new_ids
+                else:
+                    self.tracked_pts = np.vstack([self.tracked_pts, new_corners])
+                    self.tracked_ids.extend(new_ids)
+
+                for i, nid in enumerate(new_ids):
+                    current_pts_dict[nid] = new_corners[i]
+
+        self.view_history.append((len(self.view_history), p_cam_world.copy(), R_world_to_cam.copy(), current_pts_dict))
+        if len(self.view_history) > 8:
+            self.view_history.pop(0)
+
+        self.prev_gray_pts = self.tracked_pts.copy()
+        self.prev_gray = gray.copy()
+
+    def track_without_aruco(self, gray, predicted_delta_p=None):
+        if self.prev_gray is None or len(self.tracked_pts) < 8:
+            return False, None, None, None
+
+        pts_curr, status, _ = cv2.calcOpticalFlowPyrLK(
+            self.prev_gray,
+            gray,
+            self.tracked_pts.astype(np.float32),
+            None,
+            winSize=(21, 21),
+            maxLevel=3
+        )
+        valid_mask = (status.flatten() == 1)
+
+        if np.sum(valid_mask) > 10:
+            pts_back, status_back, _ = cv2.calcOpticalFlowPyrLK(
+                gray,
+                self.prev_gray,
+                pts_curr[valid_mask].astype(np.float32),
+                None,
+                winSize=(21, 21),
+                maxLevel=3
+            )
+            dists = np.linalg.norm(self.tracked_pts[valid_mask] - pts_back, axis=1)
+            fb_mask = dists < 1.5
+            temp_indices = np.where(valid_mask)[0]
+            valid_mask[temp_indices[~fb_mask]] = False
+
+        survived_pts = pts_curr[valid_mask]
+        survived_ids = [self.tracked_ids[i] for i in range(len(self.tracked_ids)) if valid_mask[i]]
+
+        self.tracked_pts = survived_pts
+        self.tracked_ids = survived_ids
+
+        matched_3d = []
+        matched_2d = []
+        for i, pid in enumerate(survived_ids):
+            if pid in self.landmarks_3d:
+                matched_3d.append(self.landmarks_3d[pid])
+                matched_2d.append(survived_pts[i])
+
+        pnp_success = False
+        p_world = None
+        R_world_to_cam = None
+        source = None
+
+        if len(matched_3d) >= 6:
+            pts_3d_arr = np.array(matched_3d, dtype=np.float32)
+            pts_2d_arr = np.array(matched_2d, dtype=np.float32)
+
+            success, rvec, tvec, inliers = cv2.solvePnPRansac(
+                pts_3d_arr,
+                pts_2d_arr,
+                self.camera_matrix,
+                self.dist_coeffs,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+                reprojectionError=4.0,
+                iterationsCount=150
+            )
+
+            if success and inliers is not None and len(inliers) >= 5:
+                R_cam_to_world, _ = cv2.Rodrigues(rvec)
+                R_world_to_cam = R_cam_to_world.T
+                p_cam_in_world = -R_world_to_cam @ tvec.reshape(3, 1)
+
+                X_w = float(p_cam_in_world[0, 0])
+                Y_w = float(p_cam_in_world[1, 0])
+                Z_w = abs(float(p_cam_in_world[2, 0]))
+
+                p_world = np.array([X_w, Y_w, Z_w], dtype=np.float64)
+                self.last_p_world = p_world.copy()
+                self.last_R_world_to_cam = R_world_to_cam.copy()
+                pnp_success = True
+                source = "feature_pnp"
+
+        if not pnp_success and len(survived_pts) >= 8 and self.prev_gray_pts is not None:
+            prev_matched = self.prev_gray_pts[valid_mask] if len(self.prev_gray_pts) == len(status) else None
+            if prev_matched is not None and len(prev_matched) == len(survived_pts):
+                E, mask_e = cv2.findEssentialMat(
+                    prev_matched,
+                    survived_pts,
+                    self.camera_matrix,
+                    method=cv2.RANSAC,
+                    prob=0.999,
+                    threshold=1.0
+                )
+                if E is not None and E.shape == (3, 3):
+                    _, R_rel, t_rel, _ = cv2.recoverPose(
+                        E,
+                        prev_matched,
+                        survived_pts,
+                        self.camera_matrix,
+                        mask=mask_e
+                    )
+                    scale = 0.005
+                    if predicted_delta_p is not None:
+                        norm = np.linalg.norm(predicted_delta_p)
+                        if norm > 0.0005:
+                            scale = float(norm)
+
+                    t_rel_metric = t_rel.flatten() * scale
+                    R_world_to_cam = R_rel @ self.last_R_world_to_cam
+                    p_world = self.last_p_world + self.last_R_world_to_cam.T @ t_rel_metric
+                    p_world[2] = max(0.01, p_world[2])
+
+                    self.last_p_world = p_world.copy()
+                    self.last_R_world_to_cam = R_world_to_cam.copy()
+                    pnp_success = True
+                    source = "feature_vo"
+
+        if len(self.tracked_pts) < self.min_features:
+            new_corners = self._extract_new_features(gray)
+            if len(new_corners) > 0:
+                new_ids = [self.next_pt_id + i for i in range(len(new_corners))]
+                self.next_pt_id += len(new_corners)
+                self.tracked_pts = np.vstack([self.tracked_pts, new_corners])
+                self.tracked_ids.extend(new_ids)
+
+        self.prev_gray_pts = self.tracked_pts.copy()
+        self.prev_gray = gray.copy()
+
+        return pnp_success, p_world, R_world_to_cam, source
 
 
 class VisualInertialTracker:
@@ -323,14 +594,14 @@ class VisualInertialTracker:
         bordered = cv2.copyMakeBorder(
             marker_img,
             border_pixels, border_pixels, border_pixels, border_pixels,
-            cv2.BORDER_CONSTANT,
+                cv2.BORDER_CONSTANT,
             value=255
         )
         return bordered
 
-    def estimate_camera_matrix(self, width, height, hfov_degrees=68.0):
+    def estimate_camera_matrix(self, width, height, hfov_degrees=78.0):
         """
-        Estimates camera intrinsic matrix K from image resolution and standard phone FOV.
+        Estimates camera intrinsic matrix K from image resolution and wide-angle phone FOV (78° default).
         """
         fx = (width / 2.0) / np.tan(np.radians(hfov_degrees / 2.0))
         fy = fx
@@ -344,15 +615,10 @@ class VisualInertialTracker:
         dist_coeffs = np.zeros((4, 1), dtype=np.float32)
         return camera_matrix, dist_coeffs
 
-    def detect_marker_pnp(self, frame, camera_matrix, dist_coeffs):
+    def detect_marker_pnp(self, frame, camera_matrix, dist_coeffs, return_corners=False):
         """
-        Phase 3 & 4: Dual-ArUco Rigid Board Detection & Dynamic PnP Solver.
-        Returns:
-            detected: bool
-            p_world: np.array([X, Y, Z]) camera position in world coordinates (meters)
-            R_world: 3x3 rotation matrix of camera in world frame
-            rvec, tvec: raw PnP outputs
-            is_dual: bool (True if both tags detected in 8-point mode)
+        Phase 1: Dual-ArUco Rigid Board Detection & Dynamic PnP Solver.
+        Returns 6 elements by default for backward-compatibility, or 7 elements if return_corners=True.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
 
@@ -362,6 +628,8 @@ class VisualInertialTracker:
             corners, ids, rejected = cv2.aruco.detectMarkers(gray, self.dictionary)
 
         if ids is None or len(ids) == 0:
+            if return_corners:
+                return False, None, None, None, None, False, []
             return False, None, None, None, None, False
 
         # Sub-pixel corner refinement
@@ -380,7 +648,6 @@ class VisualInertialTracker:
         is_dual = False
 
         if has_tag_a and has_tag_b:
-            # Scenario A: Both tags visible (8 points) -> Highest confidence, no planar flipping!
             idx_a = ids_flat.index(self.tag_a_id)
             idx_b = ids_flat.index(self.tag_b_id)
             matched_3d = self.board_8p_3d
@@ -391,19 +658,16 @@ class VisualInertialTracker:
             is_dual = True
             flags = cv2.SOLVEPNP_ITERATIVE
         elif has_tag_a:
-            # Scenario B: Only Tag A visible (4 points, far/medium distance)
             idx_a = ids_flat.index(self.tag_a_id)
             matched_3d = self.tag_a_3d
             matched_2d = refined_corners[idx_a][0].astype(np.float32)
             flags = cv2.SOLVEPNP_IPPE_SQUARE
         elif has_tag_b:
-            # Scenario C: Only Tag B visible (4 points, zoomed-in / close distance)
             idx_b = ids_flat.index(self.tag_b_id)
             matched_3d = self.tag_b_3d
             matched_2d = refined_corners[idx_b][0].astype(np.float32)
             flags = cv2.SOLVEPNP_IPPE_SQUARE
         else:
-            # Fallback: Use first detected marker as Tag A anchor
             matched_3d = self.tag_a_3d
             matched_2d = refined_corners[0][0].astype(np.float32)
             flags = cv2.SOLVEPNP_IPPE_SQUARE
@@ -418,7 +682,6 @@ class VisualInertialTracker:
         )
 
         if not success and flags != cv2.SOLVEPNP_ITERATIVE:
-            # Fallback to standard iterative solver
             success, rvec, tvec = cv2.solvePnP(
                 matched_3d,
                 matched_2d,
@@ -428,10 +691,11 @@ class VisualInertialTracker:
             )
 
         if not success:
+            if return_corners:
+                return False, None, None, None, None, False, []
             return False, None, None, None, None, False
 
         # Invert pose: camera position in World (Tag A Bottom-Left Origin) Frame
-        # p_cam_in_world = -R^T * tvec
         R_cam_to_world, _ = cv2.Rodrigues(rvec)
         R_world_to_cam = R_cam_to_world.T
         p_cam_in_world = -R_world_to_cam @ tvec.reshape(3, 1)
@@ -441,21 +705,25 @@ class VisualInertialTracker:
         Z_world = abs(float(p_cam_in_world[2, 0]))  # Height above tabletop
 
         p_world = np.array([X_world, Y_world, Z_world], dtype=np.float64)
+        if return_corners:
+            return True, p_world, R_world_to_cam, rvec, tvec, is_dual, refined_corners
         return True, p_world, R_world_to_cam, rvec, tvec, is_dual
 
     def process_video_and_imu(self, video_path, imu_samples, fps=30.0):
         """
-        Processes recorded video file and IMU log with Extended Kalman Filter (EKF)
-        to produce a continuous, jitter-free 6-DoF trajectory.
+        Sensory fusion: ArUco Ground Truth + Feature Map PnP + 100Hz IMU EKF.
         """
         cap = cv2.VideoCapture(video_path)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        camera_matrix, dist_coeffs = self.estimate_camera_matrix(width, height)
+        camera_matrix, dist_coeffs = self.estimate_camera_matrix(width, height, hfov_degrees=78.0)
 
-        video_detections = []  # (frame_idx, p_world, euler, is_dual)
+        # Initialize ArUco-Coordinated Feature Map Tracker
+        feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
+
+        video_detections = []  # (frame_idx, p_world, euler, is_dual, source)
         frame_idx = 0
 
         while True:
@@ -463,14 +731,29 @@ class VisualInertialTracker:
             if not ret:
                 break
 
-            det, p_world, R_world, rvec, tvec, is_dual = self.detect_marker_pnp(
-                frame, camera_matrix, dist_coeffs
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+
+            # Step 1: Try ArUco PnP first (Millimeter Ground Truth)
+            det_res = self.detect_marker_pnp(
+                frame, camera_matrix, dist_coeffs, return_corners=True
             )
+            det, p_world, R_world, rvec, tvec, is_dual, corners = det_res
 
             if det:
                 r = R.from_matrix(R_world)
                 euler = r.as_euler('xyz', degrees=False)
-                video_detections.append((frame_idx, p_world, euler, is_dual))
+                src = "dual_aruco" if is_dual else "single_aruco"
+                video_detections.append((frame_idx, p_world, euler, is_dual, src))
+
+                # Continually learn natural background features into the exact ArUco 3D frame
+                feature_tracker.add_aruco_ground_truth(gray, p_world, R_world, corners)
+            else:
+                # Step 2: ArUco is LOST / Occluded -> Track via Scene Features in ArUco space!
+                f_success, p_feat, R_feat, f_source = feature_tracker.track_without_aruco(gray)
+                if f_success:
+                    r = R.from_matrix(R_feat)
+                    euler = r.as_euler('xyz', degrees=False)
+                    video_detections.append((frame_idx, p_feat, euler, False, f_source))
 
             frame_idx += 1
 
@@ -491,7 +774,6 @@ class VisualInertialTracker:
         Converts raw browser IMU samples into formatted timestamps, accelerations, and gyro rates.
         """
         if not imu_samples or len(imu_samples) < 5:
-            # Fallback synthetic IMU stream
             timestamps = np.linspace(0, num_frames / fps, num_frames)
             accels = np.zeros((num_frames, 3))
             accels[:, 2] = 9.81
@@ -531,15 +813,14 @@ class VisualInertialTracker:
         """
         ekf = VisualInertialEKF(**self.ekf_params)
 
-        # Build map of video frame index to detection
-        vis_map = {f_idx: (p, euler, dual) for (f_idx, p, euler, dual) in video_detections}
+        vis_map = {f_idx: (p, euler, dual, src) for (f_idx, p, euler, dual, src) in video_detections}
 
         # Initialize EKF state at first detection or default table anchor
         if len(video_detections) > 0:
-            first_f, first_p, first_e, _ = video_detections[0]
+            first_f, first_p, first_e, _, _ = video_detections[0]
             ekf.reset(first_p, first_e)
         else:
-            default_p = np.array([0.075, 0.05, 0.30])  # Centered above Dual-ArUco board
+            default_p = np.array([0.075, 0.05, 0.30])
             ekf.reset(default_p, np.zeros(3))
 
         final_poses = np.zeros((num_frames, 6), dtype=np.float64)
@@ -548,7 +829,6 @@ class VisualInertialTracker:
         imu_gyros = imu_data['gyros']
         num_imu = len(imu_times)
 
-        # Video frame timestamps
         video_times = np.linspace(imu_times[0], imu_times[-1], num_frames)
 
         imu_idx = 0
@@ -572,10 +852,10 @@ class VisualInertialTracker:
                 ekf.predict(dt_rem, acc_sample, gyro_sample)
                 current_time = target_time
 
-            # Visual measurement update if ArUco detected in this frame
+            # Visual measurement update if ArUco or Feature Map detected in this frame
             if f in vis_map:
-                p_meas, euler_meas, is_dual = vis_map[f]
-                ekf.update_visual(p_meas, euler_meas, is_dual=is_dual)
+                p_meas, euler_meas, is_dual, src = vis_map[f]
+                ekf.update_visual(p_meas, euler_meas, is_dual=is_dual, source=src)
 
             # Store filtered 6-DoF pose [X, Y, Z, Roll, Pitch, Yaw]
             pos = ekf.x[0:3].copy()
