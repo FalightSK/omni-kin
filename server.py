@@ -26,7 +26,13 @@ from fastapi.templating import Jinja2Templates
 
 from visual_tracker import VisualInertialTracker
 from lerobot_exporter import LeRobotExporter
-from robot_kinematics import WorkspaceCalibrator, get_robot_specs, ROBOT_PRESETS
+from robot_kinematics import (
+    WorkspaceCalibrator,
+    get_robot_specs,
+    get_robot_urdf,
+    URDFParser,
+    ROBOT_PRESETS
+)
 
 app = FastAPI(title="ArUco-Anchored 3D Trajectory Collector")
 
@@ -851,6 +857,69 @@ async def update_robot_config(request: Request):
         return JSONResponse({
             "status": "error",
             "message": f"Failed to update robot configuration: {str(err)}"
+        }, status_code=400)
+
+@app.get("/api/robot/urdf")
+async def get_robot_urdf_endpoint(robot_type: str = None):
+    """
+    Returns the URDF XML description for the requested or currently active robot preset.
+    """
+    r_type = (robot_type or ROBOT_CONFIG.get("robot_type", "so101")).lower()
+    urdf_content = get_robot_urdf(r_type)
+    return Response(content=urdf_content, media_type="application/xml")
+
+@app.post("/api/robot/urdf/parse")
+async def parse_urdf_endpoint(request: Request):
+    """
+    Parses an arbitrary input URDF XML string, extracts the serial kinematic joint chain,
+    and returns the corresponding Denavit-Hartenberg (DH) parameter table and kinematic specs.
+    """
+    try:
+        payload = await request.json()
+        urdf_text = payload.get("urdf_text", "")
+        if not urdf_text or not urdf_text.strip():
+            return JSONResponse({"status": "error", "message": "No URDF XML provided"}, status_code=400)
+
+        dh_table, specs = URDFParser.parse_urdf(urdf_text)
+        return JSONResponse({
+            "status": "success",
+            "dh_table": dh_table,
+            "specs": specs
+        })
+    except Exception as err:
+        return JSONResponse({
+            "status": "error",
+            "message": f"URDF Parsing Error: {str(err)}"
+        }, status_code=400)
+
+@app.post("/api/robot/urdf/apply")
+async def apply_urdf_endpoint(request: Request):
+    """
+    Parses an input URDF and applies the resulting DH table directly to the active robot configuration.
+    """
+    global ROBOT_CONFIG
+    try:
+        payload = await request.json()
+        urdf_text = payload.get("urdf_text", "")
+        dh_table, specs = URDFParser.parse_urdf(urdf_text)
+        robot_name = specs.get("robot_name", "custom_robot").lower()
+
+        ROBOT_CONFIG["custom_dh_table"] = dh_table
+        ROBOT_CONFIG["custom_specs"] = specs
+        save_robot_config(ROBOT_CONFIG)
+
+        print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Applied custom URDF kinematics: {robot_name} ({specs['reach_meters']}m reach)")
+
+        return JSONResponse({
+            "status": "success",
+            "message": f"Custom URDF '{robot_name}' applied successfully",
+            "dh_table": dh_table,
+            "specs": specs
+        })
+    except Exception as err:
+        return JSONResponse({
+            "status": "error",
+            "message": f"Failed to apply URDF: {str(err)}"
         }, status_code=400)
 
 @app.post("/api/export_lerobot")

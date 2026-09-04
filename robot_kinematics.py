@@ -5,6 +5,7 @@ Includes WorkspaceCalibrator for ArUco Table-Plane-to-Robot-Base Coordinate Tran
 """
 
 import numpy as np
+import xml.etree.ElementTree as ET
 
 # ==============================================================================
 # 1. Denavit-Hartenberg (DH) Parameter Specifications
@@ -355,9 +356,437 @@ def get_robot_specs(robot_type="so101"):
             "description": preset["description"],
             "reach_meters": preset["reach_meters"],
             "payload_kg": preset["payload_kg"],
-            "dh_table": preset["dh_table"]
+            "dh_table": preset["dh_table"],
+            "urdf": get_robot_urdf(r_type)
         }
     return get_robot_specs("so101")
+
+
+# ==============================================================================
+# 4. URDF Parser & Converter (URDF XML <-> DH Table)
+# ==============================================================================
+
+SO101_URDF_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<robot name="so101">
+  <!-- Base Link fixed to table surface (Z=0) -->
+  <link name="base_link"/>
+
+  <!-- Joint 0: Base Yaw (-180 to +180 deg) -->
+  <joint name="q0_base_yaw" type="revolute">
+    <parent link="base_link"/>
+    <child link="shoulder_link"/>
+    <origin xyz="0 0 0.118" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14159265" upper="3.14159265" effort="5.0" velocity="2.0"/>
+  </joint>
+
+  <link name="shoulder_link"/>
+
+  <!-- Joint 1: Shoulder Pitch (-100 to +100 deg) -->
+  <joint name="q1_shoulder_pitch" type="revolute">
+    <parent link="shoulder_link"/>
+    <child link="upper_arm_link"/>
+    <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.745329" upper="1.745329" effort="5.0" velocity="2.0"/>
+  </joint>
+
+  <link name="upper_arm_link"/>
+
+  <!-- Joint 2: Elbow Pitch (-150 to +150 deg) -->
+  <joint name="q2_elbow_pitch" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <origin xyz="0.140 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.61799" upper="2.61799" effort="5.0" velocity="2.0"/>
+  </joint>
+
+  <link name="forearm_link"/>
+
+  <!-- Joint 3: Wrist Pitch (-100 to +100 deg) -->
+  <joint name="q3_wrist_pitch" type="revolute">
+    <parent link="forearm_link"/>
+    <child link="wrist_link"/>
+    <origin xyz="0.145 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.745329" upper="1.745329" effort="3.0" velocity="2.5"/>
+  </joint>
+
+  <link name="wrist_link"/>
+
+  <!-- Joint 4: Wrist Roll (-180 to +180 deg) -->
+  <joint name="q4_wrist_roll" type="revolute">
+    <parent link="wrist_link"/>
+    <child link="gripper_base"/>
+    <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14159265" upper="3.14159265" effort="2.0" velocity="3.0"/>
+  </joint>
+
+  <link name="gripper_base"/>
+
+  <!-- Joint 5: Gripper Jaw (0% closed to 100% open) -->
+  <joint name="q5_gripper" type="prismatic">
+    <parent link="gripper_base"/>
+    <child link="gripper_tip"/>
+    <origin xyz="0.110 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="100.0" effort="2.0" velocity="1.0"/>
+  </joint>
+
+  <link name="gripper_tip"/>
+</robot>"""
+
+SO100_URDF_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<robot name="so100">
+  <link name="base_link"/>
+
+  <joint name="q0_base_yaw" type="revolute">
+    <parent link="base_link"/>
+    <child link="shoulder_link"/>
+    <origin xyz="0 0 0.115" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14159265" upper="3.14159265" effort="5.0" velocity="2.0"/>
+  </joint>
+
+  <link name="shoulder_link"/>
+
+  <joint name="q1_shoulder_pitch" type="revolute">
+    <parent link="shoulder_link"/>
+    <child link="upper_arm_link"/>
+    <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.745329" upper="1.745329" effort="5.0" velocity="2.0"/>
+  </joint>
+
+  <link name="upper_arm_link"/>
+
+  <joint name="q2_elbow_pitch" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <origin xyz="0.135 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.61799" upper="2.61799" effort="5.0" velocity="2.0"/>
+  </joint>
+
+  <link name="forearm_link"/>
+
+  <joint name="q3_wrist_pitch" type="revolute">
+    <parent link="forearm_link"/>
+    <child link="wrist_link"/>
+    <origin xyz="0.140 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.745329" upper="1.745329" effort="3.0" velocity="2.5"/>
+  </joint>
+
+  <link name="wrist_link"/>
+
+  <joint name="q4_wrist_roll" type="revolute">
+    <parent link="wrist_link"/>
+    <child link="gripper_base"/>
+    <origin xyz="0 0 0" rpy="1.5707963 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14159265" upper="3.14159265" effort="2.0" velocity="3.0"/>
+  </joint>
+
+  <link name="gripper_base"/>
+
+  <joint name="q5_gripper" type="prismatic">
+    <parent link="gripper_base"/>
+    <child link="gripper_tip"/>
+    <origin xyz="0.105 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="100.0" effort="2.0" velocity="1.0"/>
+  </joint>
+
+  <link name="gripper_tip"/>
+</robot>"""
+
+
+class URDFParser:
+    """
+    Bidirectional parser converting between ROS/Isaac URDF XML descriptions
+    and standard Denavit-Hartenberg (DH) parameter tables.
+    """
+
+    @staticmethod
+    def parse_urdf(urdf_text):
+        """
+        Parses a URDF XML string, extracts the serial kinematic joint chain,
+        and constructs the corresponding Denavit-Hartenberg (DH) table and robot metadata.
+        Returns: (dh_table, specs_dict)
+        """
+        if not urdf_text or not urdf_text.strip():
+            raise ValueError("Empty URDF XML provided.")
+
+        try:
+            root = ET.fromstring(urdf_text.strip())
+        except Exception as e:
+            raise ValueError(f"Invalid XML syntax in URDF: {e}")
+
+        robot_name = root.get("name", "custom_robot")
+
+        joints_by_parent = {}
+        joints_by_child = {}
+        joints_dict = {}
+
+        for joint_elem in root.findall("joint"):
+            j_name = joint_elem.get("name", "joint")
+            j_type = joint_elem.get("type", "revolute")
+            parent_elem = joint_elem.find("parent")
+            child_elem = joint_elem.find("child")
+            origin_elem = joint_elem.find("origin")
+            limit_elem = joint_elem.find("limit")
+            axis_elem = joint_elem.find("axis")
+
+            parent_link = parent_elem.get("link") if parent_elem is not None else ""
+            child_link = child_elem.get("link") if child_elem is not None else ""
+
+            xyz = [0.0, 0.0, 0.0]
+            rpy = [0.0, 0.0, 0.0]
+            if origin_elem is not None:
+                if "xyz" in origin_elem.attrib:
+                    xyz = [float(v) for v in origin_elem.attrib["xyz"].split()]
+                if "rpy" in origin_elem.attrib:
+                    rpy = [float(v) for v in origin_elem.attrib["rpy"].split()]
+
+            axis = [0.0, 0.0, 1.0]
+            if axis_elem is not None and "xyz" in axis_elem.attrib:
+                axis = [float(v) for v in axis_elem.attrib["xyz"].split()]
+
+            limits_deg = [-180.0, 180.0]
+            if limit_elem is not None:
+                low_val = float(limit_elem.get("lower", -np.pi))
+                high_val = float(limit_elem.get("upper", np.pi))
+                if j_type == "revolute":
+                    limits_deg = [round(float(np.degrees(low_val)), 1), round(float(np.degrees(high_val)), 1)]
+                else:
+                    limits_deg = [round(float(low_val), 1), round(float(high_val), 1)]
+
+            joint_info = {
+                "name": j_name,
+                "type": j_type,
+                "parent": parent_link,
+                "child": child_link,
+                "xyz": xyz,
+                "rpy": rpy,
+                "axis": axis,
+                "limits_deg": limits_deg
+            }
+            joints_dict[j_name] = joint_info
+            joints_by_parent[parent_link] = joint_info
+            joints_by_child[child_link] = joint_info
+
+        if not joints_dict:
+            raise ValueError("No <joint> definitions found in URDF.")
+
+        # Find base link (parent link that is never a child)
+        all_parents = set(joints_by_parent.keys())
+        all_children = set(joints_by_child.keys())
+        base_candidates = list(all_parents - all_children)
+        current_link = base_candidates[0] if base_candidates else list(all_parents)[0]
+
+        # Trace ordered joint chain
+        ordered_joints = []
+        while current_link in joints_by_parent:
+            j_info = joints_by_parent[current_link]
+            ordered_joints.append(j_info)
+            current_link = j_info["child"]
+
+        # Filter arm joints + gripper
+        arm_joints = [j for j in ordered_joints if j["type"] in ["revolute", "continuous"]]
+        gripper_joint = next((j for j in ordered_joints if j["type"] in ["prismatic", "revolute"] and ("grip" in j["name"].lower() or j["type"] == "prismatic")), None)
+
+        if len(arm_joints) < 3:
+            arm_joints = ordered_joints[:5]
+
+        # Extract link lengths
+        # L1: Base to shoulder height
+        j0 = arm_joints[0] if len(arm_joints) > 0 else None
+        L1 = abs(j0["xyz"][2]) if j0 and abs(j0["xyz"][2]) > 0.01 else 0.118
+        if L1 < 0.01 and j0:
+            L1 = float(np.linalg.norm(j0["xyz"]))
+
+        # L2: Upper arm length
+        j2 = arm_joints[2] if len(arm_joints) > 2 else None
+        L2 = abs(j2["xyz"][0]) if j2 and abs(j2["xyz"][0]) > 0.01 else 0.140
+        if L2 < 0.01 and j2:
+            L2 = float(np.linalg.norm(j2["xyz"]))
+
+        # L3: Forearm length
+        j3 = arm_joints[3] if len(arm_joints) > 3 else None
+        L3 = abs(j3["xyz"][0]) if j3 and abs(j3["xyz"][0]) > 0.01 else 0.145
+        if L3 < 0.01 and j3:
+            L3 = float(np.linalg.norm(j3["xyz"]))
+
+        # L4: Wrist to gripper tip
+        L4 = 0.110
+        if gripper_joint:
+            L4_cand = abs(gripper_joint["xyz"][0]) or abs(gripper_joint["xyz"][2])
+            if L4_cand > 0.01:
+                L4 = L4_cand
+            else:
+                norm_val = float(np.linalg.norm(gripper_joint["xyz"]))
+                if norm_val > 0.01:
+                    L4 = norm_val
+
+        # Construct DH Table
+        dh_table = [
+            {
+                "joint_idx": 0,
+                "name": arm_joints[0]["name"] if len(arm_joints) > 0 else "q0_base_yaw",
+                "type": "revolute",
+                "theta_offset_deg": 0.0,
+                "d": round(float(L1), 4),
+                "a": 0.0,
+                "alpha_deg": 90.0,
+                "limits_deg": arm_joints[0]["limits_deg"] if len(arm_joints) > 0 else [-180.0, 180.0]
+            },
+            {
+                "joint_idx": 1,
+                "name": arm_joints[1]["name"] if len(arm_joints) > 1 else "q1_shoulder_pitch",
+                "type": "revolute",
+                "theta_offset_deg": 0.0,
+                "d": 0.0,
+                "a": round(float(L2), 4),
+                "alpha_deg": 0.0,
+                "limits_deg": arm_joints[1]["limits_deg"] if len(arm_joints) > 1 else [-100.0, 100.0]
+            },
+            {
+                "joint_idx": 2,
+                "name": arm_joints[2]["name"] if len(arm_joints) > 2 else "q2_elbow_pitch",
+                "type": "revolute",
+                "theta_offset_deg": 0.0,
+                "d": 0.0,
+                "a": round(float(L3), 4),
+                "alpha_deg": 0.0,
+                "limits_deg": arm_joints[2]["limits_deg"] if len(arm_joints) > 2 else [-150.0, 150.0]
+            },
+            {
+                "joint_idx": 3,
+                "name": arm_joints[3]["name"] if len(arm_joints) > 3 else "q3_wrist_pitch",
+                "type": "revolute",
+                "theta_offset_deg": 0.0,
+                "d": 0.0,
+                "a": 0.0,
+                "alpha_deg": 90.0,
+                "limits_deg": arm_joints[3]["limits_deg"] if len(arm_joints) > 3 else [-100.0, 100.0]
+            },
+            {
+                "joint_idx": 4,
+                "name": arm_joints[4]["name"] if len(arm_joints) > 4 else "q4_wrist_roll",
+                "type": "revolute",
+                "theta_offset_deg": 0.0,
+                "d": round(float(L4), 4),
+                "a": 0.0,
+                "alpha_deg": 0.0,
+                "limits_deg": arm_joints[4]["limits_deg"] if len(arm_joints) > 4 else [-180.0, 180.0]
+            }
+        ]
+
+        reach_m = round(float(L2 + L3 + L4), 3)
+        specs = {
+            "robot_name": robot_name,
+            "total_joints_parsed": len(ordered_joints),
+            "revolute_joints": len(arm_joints),
+            "reach_meters": reach_m,
+            "payload_kg": 0.50,
+            "dh_table": dh_table
+        }
+
+        return dh_table, specs
+
+    @staticmethod
+    def dh_to_urdf(dh_table, robot_name="so_robot"):
+        """
+        Converts a Denavit-Hartenberg (DH) parameter table into a standardized URDF XML string.
+        """
+        L1 = dh_table[0]["d"]
+        L2 = dh_table[1]["a"]
+        L3 = dh_table[2]["a"]
+        L4 = dh_table[4]["d"]
+
+        q0_lim = [np.radians(v) for v in dh_table[0]["limits_deg"]]
+        q1_lim = [np.radians(v) for v in dh_table[1]["limits_deg"]]
+        q2_lim = [np.radians(v) for v in dh_table[2]["limits_deg"]]
+        q3_lim = [np.radians(v) for v in dh_table[3]["limits_deg"]]
+        q4_lim = [np.radians(v) for v in dh_table[4]["limits_deg"]]
+
+        urdf = f"""<?xml version="1.0" encoding="utf-8"?>
+<robot name="{robot_name}">
+  <link name="base_link"/>
+
+  <joint name="{dh_table[0]['name']}" type="revolute">
+    <parent link="base_link"/>
+    <child link="shoulder_link"/>
+    <origin xyz="0 0 {L1:.4f}" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="{q0_lim[0]:.4f}" upper="{q0_lim[1]:.4f}" effort="5.0" velocity="2.0"/>
+  </joint>
+
+  <link name="shoulder_link"/>
+
+  <joint name="{dh_table[1]['name']}" type="revolute">
+    <parent link="shoulder_link"/>
+    <child link="upper_arm_link"/>
+    <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="{q1_lim[0]:.4f}" upper="{q1_lim[1]:.4f}" effort="5.0" velocity="2.0"/>
+  </joint>
+
+  <link name="upper_arm_link"/>
+
+  <joint name="{dh_table[2]['name']}" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <origin xyz="{L2:.4f} 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="{q2_lim[0]:.4f}" upper="{q2_lim[1]:.4f}" effort="5.0" velocity="2.0"/>
+  </joint>
+
+  <link name="forearm_link"/>
+
+  <joint name="{dh_table[3]['name']}" type="revolute">
+    <parent link="forearm_link"/>
+    <child link="wrist_link"/>
+    <origin xyz="{L3:.4f} 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="{q3_lim[0]:.4f}" upper="{q3_lim[1]:.4f}" effort="3.0" velocity="2.5"/>
+  </joint>
+
+  <link name="wrist_link"/>
+
+  <joint name="{dh_table[4]['name']}" type="revolute">
+    <parent link="wrist_link"/>
+    <child link="gripper_base"/>
+    <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="{q4_lim[0]:.4f}" upper="{q4_lim[1]:.4f}" effort="2.0" velocity="3.0"/>
+  </joint>
+
+  <link name="gripper_base"/>
+
+  <joint name="q5_gripper" type="prismatic">
+    <parent link="gripper_base"/>
+    <child link="gripper_tip"/>
+    <origin xyz="{L4:.4f} 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="100.0" effort="2.0" velocity="1.0"/>
+  </joint>
+
+  <link name="gripper_tip"/>
+</robot>"""
+        return urdf
+
+
+def get_robot_urdf(robot_type="so101"):
+    """Returns the URDF XML template for the requested robot preset."""
+    r_type = robot_type.lower()
+    if r_type == "so100":
+        return SO100_URDF_TEMPLATE
+    return SO101_URDF_TEMPLATE
+
 
 
 # ==============================================================================
