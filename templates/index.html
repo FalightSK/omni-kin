@@ -516,7 +516,6 @@
             <button class="btn btn-marker" id="openDualMarkerBtn" onclick="window.open('/api/marker/print_dual', '_blank')">🖨️ Print Dual-ArUco Board</button>
             <button class="btn" id="openMarkerBtn">Custom Marker</button>
             <button class="btn" id="addSampleBtn">⚡ Sample 3D Circle</button>
-            <button class="btn" id="isaacBtn" style="border-color: #818cf8; color: #a5b4fc;">🎮 Isaac Lab</button>
             <button class="btn btn-primary" id="exportBtn">📦 Export LeRobot</button>
         </div>
     </nav>
@@ -1275,18 +1274,6 @@
             const res = await fetch('/api/export_lerobot', { method: 'POST' });
             const data = await res.json();
             alert(`LeRobot Dataset Exported Successfully!\n\nPath: ${data.export_path}\nTotal Episodes: ${data.total_episodes}`);
-        };
-
-        // Replay in Isaac Lab
-        document.getElementById('isaacBtn').onclick = async () => {
-            const epIdx = selectedEpIdx >= 0 ? selectedEpIdx : 0;
-            const res = await fetch(`/api/isaac_lab/replay?episode_index=${epIdx}`, { method: 'POST' });
-            const data = await res.json();
-            if (data.status === 'success') {
-                alert(`🚀 Launching Isaac Lab Simulation Replay!\n\n${data.message}`);
-            } else {
-                alert(`Error: ${data.message}`);
-            }
         };
 
         // Marker Modal Controls & Generator

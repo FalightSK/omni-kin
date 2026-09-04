@@ -560,9 +560,9 @@ async def save_recording(
             frame_count = max(count, 1)
         cap.release()
 
-        print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Executing Server-Side 3D Reconstruction (Dual-ArUco PnP + 12-State EKF Fusion)...")
+        print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Executing Server-Side Sensory Fusion (ArUco + Scene Feature Map + 100Hz IMU EKF)...")
 
-        # 4. SERVER-SIDE COMPUTATION: ArUco PnP & 12-State EKF Trajectory Reconstruction
+        # 4. SERVER-SIDE COMPUTATION: ArUco + Feature Extraction + 12-State EKF Trajectory Reconstruction
         anchored_poses = visual_tracker.process_video_and_imu(video_path, parsed_imu, fps=fps)
 
         # 5. Gripper state heuristic
@@ -584,7 +584,7 @@ async def save_recording(
             'num_frames': len(anchored_poses),
             'fps': fps,
             'duration': len(anchored_poses) / fps,
-            'anchor': 'aruco_dict_6x6_250_id0',
+            'anchor': 'aruco_feature_imu_fusion',
             'marker_size_cm': 10.0,
             'poses': anchored_poses.tolist(),
             'ee_poses': anchored_poses.tolist(),
@@ -596,14 +596,14 @@ async def save_recording(
         }
 
         EPISODES_DB.append(episode_data)
-        print(f"[{time.strftime('%H:%M:%S')}] 🎉 Episode #{ep_idx} successfully calculated and added to Server DB ({len(anchored_poses)} frames)!\n")
+        print(f"[{time.strftime('%H:%M:%S')}] 🎉 Episode #{ep_idx} successfully calculated via ArUco+Feature+IMU fusion ({len(anchored_poses)} frames)!\n")
 
         return JSONResponse({
             "status": "success",
             "episode_index": ep_idx,
             "task": task,
             "num_frames": len(anchored_poses),
-            "anchor": "Dual-ArUco Board (0, 0, 0) Origin"
+            "anchor": "ArUco + Feature Map + IMU Fusion (0,0,0) Origin"
         })
 
     except Exception as err:
@@ -758,33 +758,6 @@ async def export_lerobot():
         "status": "success",
         "export_path": export_path,
         "total_episodes": len(EPISODES_DB)
-    })
-
-@app.post("/api/isaac_lab/replay")
-async def replay_in_isaac_lab(episode_index: int = 0):
-    if not EPISODES_DB:
-        return JSONResponse({"status": "error", "message": "No episodes to replay."}, status_code=400)
-
-    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_aruco_3d_trajectories")
-    parquet_path = os.path.join(export_path, "data", "chunk-000", "file-000.parquet")
-
-    isaac_python = r"C:\Users\SK\miniconda3\envs\isaac_lab\python.exe"
-    script_path = os.path.join(BASE_DIR, "isaac_lab_replay.py")
-
-    cmd = [
-        isaac_python,
-        script_path,
-        "--parquet_path", parquet_path,
-        "--episode_index", str(episode_index)
-    ]
-
-    import subprocess
-    subprocess.Popen(cmd, cwd=BASE_DIR)
-
-    return JSONResponse({
-        "status": "success",
-        "message": f"Isaac Lab replay launched for Episode #{episode_index}!",
-        "cmd": " ".join(cmd)
     })
 
 if __name__ == "__main__":

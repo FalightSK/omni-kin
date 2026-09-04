@@ -1,13 +1,12 @@
 import React from 'react';
-import { Sliders, Printer, Zap, Gamepad2, Package, Smartphone, LayoutDashboard } from 'lucide-react';
+import { Sliders, Printer, Zap, Package, Smartphone, LayoutDashboard } from 'lucide-react';
 
 export default function Navbar({
   currentView,
   setCurrentView,
   onOpenEkfModal,
   onAddSample,
-  onExportLeRobot,
-  onIsaacReplay
+  onExportLeRobot
 }) {
   return (
     <header className="bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-4 py-2.5 flex items-center justify-between sticky top-0 z-40">
@@ -19,7 +18,7 @@ export default function Navbar({
           <h1 className="text-sm font-bold bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
             OmniKin 3D Trajectory Manager
           </h1>
-          <p className="text-[10px] text-slate-400">Dual-ArUco 8-Point PnP & 12-State EKF Engine</p>
+          <p className="text-[10px] text-slate-400">ArUco + Feature Extraction + IMU EKF Fusion Engine</p>
         </div>
       </div>
 
@@ -73,14 +72,6 @@ export default function Navbar({
         >
           <Zap className="w-3.5 h-3.5" />
           <span>Sample 3D Circle</span>
-        </button>
-
-        <button
-          onClick={onIsaacReplay}
-          className="px-3 py-1.5 rounded-xl border border-purple-500/40 bg-purple-500/10 text-purple-400 hover:bg-purple-500/20 text-xs font-medium flex items-center gap-1.5 transition-all"
-        >
-          <Gamepad2 className="w-3.5 h-3.5" />
-          <span>Isaac Lab</span>
         </button>
 
         <button

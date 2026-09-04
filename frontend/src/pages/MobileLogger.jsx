@@ -30,17 +30,54 @@ export default function MobileLogger({ onUploadSuccess }) {
     }
 
     try {
-      const constraints = {
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      // Find widest available back camera if multiple cameras exist
+      let selectedDeviceId = null;
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+        // Look for wide/ultrawide rear camera
+        const wideCam = videoDevices.find(d => 
+          (d.label.toLowerCase().includes('wide') || d.label.toLowerCase().includes('ultra') || d.label.toLowerCase().includes('0.5')) &&
+          !d.label.toLowerCase().includes('front')
+        );
+        if (wideCam) {
+          selectedDeviceId = wideCam.deviceId;
+        }
+      } catch (e) {
+        console.log('Device enumeration error:', e);
+      }
+
+      const videoConstraints = selectedDeviceId
+        ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+        : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: videoConstraints,
         audio: false
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      });
+
+      // Try setting minimum zoom for widest possible field of view
+      try {
+        const [track] = stream.getVideoTracks();
+        if (track && track.getCapabilities) {
+          const capabilities = track.getCapabilities();
+          if (capabilities.zoom && capabilities.zoom.min !== undefined) {
+            await track.applyConstraints({
+              advanced: [{ zoom: capabilities.zoom.min }]
+            });
+            console.log("Wide camera lens enabled at zoom:", capabilities.zoom.min);
+          }
+        }
+      } catch (zoomErr) {
+        console.log("Could not apply wide zoom constraint:", zoomErr);
+      }
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
       setIsCameraActive(true);
-      setStatusMsg('Point at ArUco marker & press record');
+      setStatusMsg('Ready: ArUco + Feature Extraction + IMU Fusion Active');
       setupImuListeners();
     } catch (err) {
       console.error(err);
@@ -153,17 +190,14 @@ export default function MobileLogger({ onUploadSuccess }) {
       <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
         <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
 
-        {/* Aiming Reticle Box */}
-        <div className="absolute w-40 h-40 border-2 border-dashed border-emerald-400/60 rounded-2xl pointer-events-none flex items-end justify-center pb-2">
-          <span className="bg-slate-900/80 px-2 py-0.5 rounded text-[10px] text-emerald-400 font-bold">ArUco Anchor</span>
-        </div>
+        {/* Clean, unobstructed wide video feed - no black marks or reticle */}
 
         {!isCameraActive && (
           <div className="absolute inset-4 glass-card rounded-2xl p-6 flex flex-col items-center justify-center text-center gap-4 z-20">
             <Camera className="w-12 h-12 text-indigo-400" />
             <div>
-              <h2 className="text-base font-bold text-slate-100">🎯 ArUco 3D Trajectory Anchor</h2>
-              <p className="text-xs text-slate-400 mt-1">Aim camera at printed Dual-ArUco board and record 3D motion in the air.</p>
+              <h2 className="text-base font-bold text-slate-100">🎯 ArUco + Feature Extraction + IMU</h2>
+              <p className="text-xs text-slate-400 mt-1">Wide-angle VIO tracking with seamless tag-loss recovery.</p>
             </div>
             <button
               onClick={startCamera}

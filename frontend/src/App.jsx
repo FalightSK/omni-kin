@@ -56,17 +56,6 @@ export default function App() {
     }
   };
 
-  const handleIsaacReplay = async () => {
-    const targetIdx = selectedEpIdx >= 0 ? selectedEpIdx : 0;
-    try {
-      const res = await fetch(`/api/isaac_lab/replay?episode_index=${targetIdx}`, { method: 'POST' });
-      const data = await res.json();
-      alert(data.message || 'Isaac Lab launched!');
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
   const handleReprocessComplete = (newPoses) => {
     setEpisodes((prev) =>
       prev.map((ep) => (ep.episode_index === selectedEpIdx ? { ...ep, poses: newPoses } : ep))
@@ -81,7 +70,6 @@ export default function App() {
         onOpenEkfModal={() => setIsEkfModalOpen(true)}
         onAddSample={handleAddSample}
         onExportLeRobot={handleExportLeRobot}
-        onIsaacReplay={handleIsaacReplay}
       />
 
       <main className="flex-1 flex flex-col overflow-hidden">

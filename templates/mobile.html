@@ -361,28 +361,23 @@
     <header>
         <div class="brand">
             <div class="brand-dot"></div>
-            <h1>ArUco 3D Logger</h1>
+            <h1>ArUco + Feature + IMU 3D Logger</h1>
         </div>
         <div class="header-badges">
-            <div class="badge badge-anchor">🎯 ArUco Anchor (0, 0, 0)</div>
+            <div class="badge badge-anchor">🎯 ArUco + Feature Map + IMU</div>
             <div class="badge" id="orientBadge">📱 Horizontal</div>
         </div>
     </header>
 
     <div class="main-workspace">
-        <!-- Viewport -->
+        <!-- Viewport (Clean, unobstructed wide view) -->
         <div class="viewport">
             <video id="cameraPreview" autoplay playsinline muted></video>
 
-            <!-- ArUco Aiming Reticle -->
-            <div class="reticle-box">
-                <span class="reticle-label">ArUco Marker</span>
-            </div>
-
             <!-- Permission / Startup Card -->
             <div class="guide-card" id="guideCard">
-                <h2>🎯 ArUco 3D Trajectory Anchor</h2>
-                <p>Aim your camera at the printed 6x6 ArUco marker on your table and draw your 3D motion shape in the air.</p>
+                <h2>🎯 ArUco + Feature Extraction + IMU</h2>
+                <p>Wide-angle VIO tracking with seamless tag-loss recovery. Aim at table and draw 3D motion in the air.</p>
                 
                 <button class="btn-action" id="enableBtn">⚡ START CAMERA & IMU</button>
 
@@ -559,27 +554,57 @@
             }
 
             try {
-                const constraints = {
-                    video: {
-                        facingMode: { ideal: 'environment' },
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
-                        frameRate: { ideal: 30 }
-                    },
-                    audio: false
-                };
+                // Discover wide/ultrawide camera if available
+                let selectedDeviceId = null;
+                try {
+                    const devices = await navigator.mediaDevices.enumerateDevices();
+                    const videoDevices = devices.filter(d => d.kind === 'videoinput');
+                    const wideCam = videoDevices.find(d => 
+                        (d.label.toLowerCase().includes('wide') || d.label.toLowerCase().includes('ultra') || d.label.toLowerCase().includes('0.5')) &&
+                        !d.label.toLowerCase().includes('front')
+                    );
+                    if (wideCam) {
+                        selectedDeviceId = wideCam.deviceId;
+                    }
+                } catch (e) {
+                    console.log("Device enumeration error:", e);
+                }
+
+                const videoConstraints = selectedDeviceId
+                    ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+                    : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
 
                 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                     throw new Error("getUserMedia not supported in this context");
                 }
 
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: videoConstraints,
+                    audio: false
+                });
+
+                // Apply minimum zoom constraint for widest possible field of view
+                try {
+                    const [track] = stream.getVideoTracks();
+                    if (track && track.getCapabilities) {
+                        const capabilities = track.getCapabilities();
+                        if (capabilities.zoom && capabilities.zoom.min !== undefined) {
+                            await track.applyConstraints({
+                                advanced: [{ zoom: capabilities.zoom.min }]
+                            });
+                            console.log("Wide camera lens enabled at zoom:", capabilities.zoom.min);
+                        }
+                    }
+                } catch (zoomErr) {
+                    console.log("Could not apply wide zoom constraint:", zoomErr);
+                }
+
                 cameraPreview.srcObject = stream;
                 await cameraPreview.play();
 
                 guideCard.style.display = 'none';
                 setupIMU();
-                statusText.innerText = "Point at ArUco marker & press record.";
+                statusText.innerText = "Ready: ArUco + Feature Extraction + IMU Active. Press record.";
             } catch (err) {
                 console.error("Camera access failed:", err);
                 statusText.innerText = "Camera blocked: " + err.message;
