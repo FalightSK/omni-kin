@@ -88,9 +88,11 @@ def test_lerobot_export():
     print(f"[OK] Exported Parquet Rows: {len(df)}")
     print(f"[OK] Tasks in Dataset: {df['task'].unique().tolist()}")
 
-    with open(info_path, "r") as f:
+    with open(info_path, "r", encoding="utf-8") as f:
         info_json = json.load(f)
-    assert info_json['robot_type'] == 'so100'
+    assert info_json['robot_type'] in ['so100', 'so101']
+    assert 'workspace_calibration' in info_json
+    assert 'dh_table' in info_json
     assert info_json['total_episodes'] == 2
     print(f"[OK] meta/info.json validated. Robot: {info_json['robot_type']}, Total Episodes: {info_json['total_episodes']}")
 

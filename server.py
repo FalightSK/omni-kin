@@ -26,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 
 from visual_tracker import VisualInertialTracker
 from lerobot_exporter import LeRobotExporter
+from robot_kinematics import WorkspaceCalibrator, get_robot_specs, ROBOT_PRESETS
 
 app = FastAPI(title="ArUco-Anchored 3D Trajectory Collector")
 
@@ -33,9 +34,42 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 RECORDINGS_DIR = os.path.join(BASE_DIR, "recordings")
 EXPORT_DIR = os.path.join(BASE_DIR, "lerobot_exports")
+ROBOT_CONFIG_FILE = os.path.join(BASE_DIR, "robot_config.json")
 
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 os.makedirs(EXPORT_DIR, exist_ok=True)
+
+def load_robot_config():
+    default_cfg = {
+        "robot_type": "so101",
+        "offset_x": 0.20,
+        "offset_y": 0.00,
+        "offset_z": 0.00,
+        "yaw_deg": 0.0
+    }
+    if os.path.exists(ROBOT_CONFIG_FILE):
+        try:
+            with open(ROBOT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+                default_cfg.update(saved)
+        except Exception as e:
+            print(f"Warning loading {ROBOT_CONFIG_FILE}: {e}")
+    return default_cfg
+
+def save_robot_config(cfg):
+    try:
+        with open(ROBOT_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        print(f"Error saving {ROBOT_CONFIG_FILE}: {e}")
+
+ROBOT_CONFIG = load_robot_config()
+workspace_calibrator = WorkspaceCalibrator(
+    offset_x=ROBOT_CONFIG["offset_x"],
+    offset_y=ROBOT_CONFIG["offset_y"],
+    offset_z=ROBOT_CONFIG["offset_z"],
+    yaw_deg=ROBOT_CONFIG["yaw_deg"]
+)
 
 FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
 if os.path.exists(os.path.join(FRONTEND_DIST_DIR, "assets")):
@@ -53,7 +87,11 @@ visual_tracker = VisualInertialTracker(
     tag_b_id=1,
     tag_b_offset=(0.15, 0.0, 0.0)
 )
-lerobot_exporter = LeRobotExporter(output_dir=EXPORT_DIR)
+lerobot_exporter = LeRobotExporter(
+    output_dir=EXPORT_DIR,
+    robot_type=ROBOT_CONFIG["robot_type"],
+    workspace_calibrator=workspace_calibrator
+)
 
 def get_local_ip():
     try:
@@ -747,20 +785,98 @@ async def reprocess_episode(episode_index: int):
         "poses": new_poses.tolist()
     })
 
+@app.get("/api/robot/config")
+async def get_robot_config():
+    """
+    Returns the current active robot preset, workspace offset calibration (table plane Z=0),
+    and Denavit-Hartenberg (DH) parameter specifications for all available presets.
+    """
+    presets = [
+        get_robot_specs("so101"),
+        get_robot_specs("so100")
+    ]
+    return JSONResponse({
+        "status": "success",
+        "config": ROBOT_CONFIG,
+        "presets": presets
+    })
+
+@app.post("/api/robot/config")
+async def update_robot_config(request: Request):
+    """
+    Updates the active robot model (SO-101 / SO-100) and ArUco table-plane starting coordinate offset (X, Y, Yaw).
+    Persists configuration to robot_config.json on disk.
+    """
+    global ROBOT_CONFIG
+    try:
+        payload = await request.json()
+        if "robot_type" in payload:
+            r_type = str(payload["robot_type"]).lower()
+            if r_type in ROBOT_PRESETS:
+                ROBOT_CONFIG["robot_type"] = r_type
+        if "offset_x" in payload:
+            ROBOT_CONFIG["offset_x"] = float(payload["offset_x"])
+        if "offset_y" in payload:
+            ROBOT_CONFIG["offset_y"] = float(payload["offset_y"])
+        if "offset_z" in payload:
+            ROBOT_CONFIG["offset_z"] = float(payload["offset_z"])
+        if "yaw_deg" in payload:
+            ROBOT_CONFIG["yaw_deg"] = float(payload["yaw_deg"])
+
+        save_robot_config(ROBOT_CONFIG)
+
+        workspace_calibrator.update_config(
+            offset_x=ROBOT_CONFIG["offset_x"],
+            offset_y=ROBOT_CONFIG["offset_y"],
+            offset_z=ROBOT_CONFIG["offset_z"],
+            yaw_deg=ROBOT_CONFIG["yaw_deg"]
+        )
+
+        lerobot_exporter.set_robot_config(
+            robot_type=ROBOT_CONFIG["robot_type"],
+            offset_x=ROBOT_CONFIG["offset_x"],
+            offset_y=ROBOT_CONFIG["offset_y"],
+            offset_z=ROBOT_CONFIG["offset_z"],
+            yaw_deg=ROBOT_CONFIG["yaw_deg"]
+        )
+
+        print(f"[{time.strftime('%H:%M:%S')}] 🤖 Robot Config Updated: Model={ROBOT_CONFIG['robot_type']}, Offset=({ROBOT_CONFIG['offset_x']:.2f}m, {ROBOT_CONFIG['offset_y']:.2f}m, Yaw={ROBOT_CONFIG['yaw_deg']:.1f}°)")
+
+        return JSONResponse({
+            "status": "success",
+            "message": "Robot configuration updated successfully",
+            "config": ROBOT_CONFIG
+        })
+    except Exception as err:
+        return JSONResponse({
+            "status": "error",
+            "message": f"Failed to update robot configuration: {str(err)}"
+        }, status_code=400)
+
 @app.post("/api/export_lerobot")
 async def export_lerobot():
     if not EPISODES_DB:
         return JSONResponse({"status": "error", "message": "No episodes recorded yet. Please record or sample an episode first."}, status_code=400)
 
     try:
+        # Sync latest configuration
+        lerobot_exporter.set_robot_config(
+            robot_type=ROBOT_CONFIG["robot_type"],
+            offset_x=ROBOT_CONFIG["offset_x"],
+            offset_y=ROBOT_CONFIG["offset_y"],
+            offset_z=ROBOT_CONFIG["offset_z"],
+            yaw_deg=ROBOT_CONFIG["yaw_deg"]
+        )
         export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_aruco_3d_trajectories")
         total_frames = sum(ep.get('num_frames', len(ep.get('poses', []))) for ep in EPISODES_DB)
         return JSONResponse({
             "status": "success",
             "export_path": export_path,
+            "robot_type": ROBOT_CONFIG["robot_type"],
+            "workspace_calibration": ROBOT_CONFIG,
             "total_episodes": len(EPISODES_DB),
             "total_frames": total_frames,
-            "message": f"LeRobot dataset exported successfully with {len(EPISODES_DB)} episodes ({total_frames} frames)!"
+            "message": f"LeRobot dataset ({ROBOT_CONFIG['robot_type'].upper()}) exported successfully with {len(EPISODES_DB)} episodes ({total_frames} frames)!"
         })
     except Exception as err:
         import traceback
