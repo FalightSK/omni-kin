@@ -3,12 +3,21 @@ import Navbar from './components/Navbar';
 import Dashboard from './pages/Dashboard';
 import MobileLogger from './pages/MobileLogger';
 import EKFTuningModal from './components/EKFTuningModal';
+import RobotSetupModal from './components/RobotSetupModal';
 
 export default function App() {
   const [currentView, setCurrentView] = useState('dashboard');
   const [episodes, setEpisodes] = useState([]);
   const [selectedEpIdx, setSelectedEpIdx] = useState(-1);
   const [isEkfModalOpen, setIsEkfModalOpen] = useState(false);
+  const [isRobotModalOpen, setIsRobotModalOpen] = useState(false);
+  const [robotConfig, setRobotConfig] = useState({
+    robot_type: 'so101',
+    offset_x: 0.20,
+    offset_y: 0.00,
+    offset_z: 0.00,
+    yaw_deg: 0.0
+  });
 
   const fetchEpisodes = async () => {
     try {
@@ -23,8 +32,21 @@ export default function App() {
     }
   };
 
+  const fetchRobotConfig = async () => {
+    try {
+      const res = await fetch('/api/robot/config');
+      const data = await res.json();
+      if (data.config) {
+        setRobotConfig(data.config);
+      }
+    } catch (err) {
+      console.error("Failed to fetch robot config", err);
+    }
+  };
+
   useEffect(() => {
     fetchEpisodes();
+    fetchRobotConfig();
   }, []);
 
   const handleDeleteEpisode = async (index) => {
@@ -50,7 +72,7 @@ export default function App() {
     try {
       const res = await fetch('/api/export_lerobot', { method: 'POST' });
       const data = await res.json();
-      alert(`LeRobot Dataset Exported Successfully!\n\nPath: ${data.export_path}\nTotal Episodes: ${data.total_episodes}`);
+      alert(`LeRobot Dataset Exported Successfully!\n\nEmbodiment: ${data.robot_type.toUpperCase()}\nPath: ${data.export_path}\nTotal Episodes: ${data.total_episodes}`);
     } catch (err) {
       console.error(err);
     }
@@ -68,8 +90,10 @@ export default function App() {
         currentView={currentView}
         setCurrentView={setCurrentView}
         onOpenEkfModal={() => setIsEkfModalOpen(true)}
+        onOpenRobotModal={() => setIsRobotModalOpen(true)}
         onAddSample={handleAddSample}
         onExportLeRobot={handleExportLeRobot}
+        robotConfig={robotConfig}
       />
 
       <main className="flex-1 flex flex-col overflow-hidden">
@@ -80,6 +104,8 @@ export default function App() {
             setSelectedEpIdx={setSelectedEpIdx}
             onRefreshEpisodes={fetchEpisodes}
             onDeleteEpisode={handleDeleteEpisode}
+            robotConfig={robotConfig}
+            onOpenRobotModal={() => setIsRobotModalOpen(true)}
           />
         ) : (
           <MobileLogger onUploadSuccess={fetchEpisodes} />
@@ -91,6 +117,13 @@ export default function App() {
         onClose={() => setIsEkfModalOpen(false)}
         activeEpisodeIndex={selectedEpIdx}
         onReprocessComplete={handleReprocessComplete}
+      />
+
+      <RobotSetupModal
+        isOpen={isRobotModalOpen}
+        onClose={() => setIsRobotModalOpen(false)}
+        robotConfig={robotConfig}
+        onConfigSaved={(newConfig) => setRobotConfig(newConfig)}
       />
     </div>
   );

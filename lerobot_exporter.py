@@ -20,7 +20,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-from robot_kinematics import SO100Kinematics
+from robot_kinematics import get_robot_solver, get_robot_specs, WorkspaceCalibrator
 
 
 class LeRobotExporter:
@@ -28,10 +28,20 @@ class LeRobotExporter:
     Exports episode datasets into the standard Hugging Face LeRobot directory schema.
     """
 
-    def __init__(self, output_dir="lerobot_dataset", fps=30):
+    def __init__(self, output_dir="lerobot_dataset", fps=30, robot_type="so101", workspace_calibrator=None):
         self.output_dir = output_dir
         self.fps = fps
-        self.ik_solver = SO100Kinematics()
+        self.robot_type = robot_type
+        self.ik_solver = get_robot_solver(robot_type)
+        self.workspace_calibrator = workspace_calibrator or WorkspaceCalibrator()
+
+    def set_robot_config(self, robot_type="so101", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0):
+        """
+        Updates the active robot model preset and ArUco table-plane workspace offset.
+        """
+        self.robot_type = robot_type
+        self.ik_solver = get_robot_solver(robot_type)
+        self.workspace_calibrator.update_config(offset_x, offset_y, offset_z, yaw_deg)
 
     def _ensure_joint_states_and_poses(self, ep):
         """
@@ -52,9 +62,10 @@ class LeRobotExporter:
         else:
             num_frames = 30
 
-        # 1. Resolve Cartesian EE Poses
+        # 1. Resolve Cartesian EE Poses (in Robot Base Frame)
         if raw_poses is not None and len(raw_poses) == num_frames:
-            ee_poses = np.asarray(raw_poses, dtype=np.float32)
+            raw_arr = np.asarray(raw_poses, dtype=np.float64)
+            ee_poses = self.workspace_calibrator.transform_trajectory(raw_arr, to_robot=True).astype(np.float32)
         else:
             ee_poses = np.zeros((num_frames, 6), dtype=np.float32)
             ee_poses[:, 0] = 0.15
@@ -260,9 +271,13 @@ class LeRobotExporter:
             json.dump(stats, f, indent=2)
 
         # 5. Save Info Configuration (meta/info.json)
+        robot_specs = get_robot_specs(self.robot_type)
         info = {
             "codebase_version": "v2.0",
-            "robot_type": "so100",
+            "robot_type": self.robot_type,
+            "robot_name": robot_specs["name"],
+            "workspace_calibration": self.workspace_calibrator.get_config(),
+            "dh_table": robot_specs["dh_table"],
             "fps": self.fps,
             "total_episodes": len(episodes_data),
             "total_frames": global_frame_idx,

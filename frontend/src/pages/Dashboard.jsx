@@ -1,9 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import Viewport3D from '../components/Viewport3D';
 import VideoPlayer from '../components/VideoPlayer';
-import { Play, Pause, Trash2, RefreshCw, Layers, Compass, MoveUpRight } from 'lucide-react';
+import { Play, Pause, Trash2, RefreshCw, Layers, Compass, MoveUpRight, Bot } from 'lucide-react';
 
-export default function Dashboard({ episodes, selectedEpIdx, setSelectedEpIdx, onRefreshEpisodes, onDeleteEpisode, onReprocessActive }) {
+export default function Dashboard({
+  episodes,
+  selectedEpIdx,
+  setSelectedEpIdx,
+  onRefreshEpisodes,
+  onDeleteEpisode,
+  onReprocessActive,
+  robotConfig,
+  onOpenRobotModal
+}) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
 
@@ -38,12 +47,39 @@ export default function Dashboard({ episodes, selectedEpIdx, setSelectedEpIdx, o
   const currentZ = currentPose[2] || 0;
   const distToOrigin = Math.sqrt(currentX * currentX + currentY * currentY + currentZ * currentZ);
 
+  // Compute Robot-Relative Coordinates from Active Coplanar Calibration
+  const ox = robotConfig?.offset_x ?? 0.20;
+  const oy = robotConfig?.offset_y ?? 0.00;
+  const oz = robotConfig?.offset_z ?? 0.00;
+  const yawRad = THREE_to_rad(robotConfig?.yaw_deg ?? 0.0);
+
+  const dx = currentX - ox;
+  const dy = currentY - oy;
+  const dz = currentZ - oz;
+
+  const cosY = Math.cos(yawRad);
+  const sinY = Math.sin(yawRad);
+  const robotX = cosY * dx + sinY * dy;
+  const robotY = -sinY * dx + cosY * dy;
+  const robotZ = dz;
+  const distToRobot = Math.sqrt(robotX * robotX + robotY * robotY + robotZ * robotZ);
+
+  function THREE_to_rad(deg) {
+    return (deg * Math.PI) / 180;
+  }
+
+  const robotName = (robotConfig?.robot_type || 'so101').toUpperCase();
+
   return (
     <div className="flex-1 p-4 grid grid-cols-1 lg:grid-cols-4 gap-4 overflow-hidden h-[calc(100vh-60px)]">
       {/* Main Center Area: Side-by-Side Dual Viewports */}
       <div className="lg:col-span-3 flex flex-col gap-3 h-full">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 flex-1 min-h-0">
-          <Viewport3D trajectoryPoses={poses} currentFrameIndex={currentFrameIndex} />
+          <Viewport3D
+            trajectoryPoses={poses}
+            currentFrameIndex={currentFrameIndex}
+            robotConfig={robotConfig}
+          />
           <VideoPlayer
             videoUrl={activeEp?.video_url}
             isPlaying={isPlaying}
@@ -83,26 +119,47 @@ export default function Dashboard({ episodes, selectedEpIdx, setSelectedEpIdx, o
             </div>
           </div>
 
-          {/* Telemetry Gauge Strip */}
-          <div className="grid grid-cols-5 gap-2 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800/80 text-left font-mono">
-            <div>
-              <span className="text-[10px] text-slate-500 uppercase block">X (Right)</span>
-              <span className="text-xs font-semibold text-slate-200">{(currentX * 100).toFixed(1)} cm</span>
+          {/* Dual-Coordinate Telemetry Strip: ArUco Table Origin & Robot Base Relative */}
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 bg-slate-950/70 p-2.5 rounded-xl border border-slate-800/80 text-left font-mono">
+            {/* ArUco Table Origin */}
+            <div className="border-r border-slate-800/80 pr-2">
+              <span className="text-[10px] text-emerald-400 uppercase block font-sans font-semibold">ArUco Tag A (0,0,0)</span>
+              <span className="text-xs font-semibold text-slate-200">
+                [{(currentX * 100).toFixed(1)}, {(currentY * 100).toFixed(1)}, {(currentZ * 100).toFixed(1)}] cm
+              </span>
             </div>
-            <div>
-              <span className="text-[10px] text-slate-500 uppercase block">Y (Forward)</span>
-              <span className="text-xs font-semibold text-slate-200">{(currentY * 100).toFixed(1)} cm</span>
+
+            {/* Robot Base Relative */}
+            <div className="border-r border-slate-800/80 pr-2 col-span-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-indigo-400 uppercase font-sans font-semibold flex items-center gap-1">
+                  <Bot className="w-3 h-3" />
+                  <span>{robotName} Base Frame</span>
+                </span>
+                <span className="text-[9px] text-slate-500">
+                  @ [{(ox * 100).toFixed(0)}, {(oy * 100).toFixed(0)}] cm
+                </span>
+              </div>
+              <span className="text-xs font-semibold text-indigo-200">
+                X:{(robotX * 100).toFixed(1)} Y:{(robotY * 100).toFixed(1)} Z:{(robotZ * 100).toFixed(1)} cm
+              </span>
             </div>
+
+            {/* Dist to ArUco Origin */}
             <div>
-              <span className="text-[10px] text-slate-500 uppercase block">Z (Height)</span>
-              <span className="text-xs font-semibold text-emerald-400">{(currentZ * 100).toFixed(1)} cm</span>
-            </div>
-            <div>
-              <span className="text-[10px] text-slate-500 uppercase block">Dist to Origin</span>
+              <span className="text-[10px] text-slate-500 uppercase block font-sans">Dist Origin</span>
               <span className="text-xs font-semibold text-sky-400">{(distToOrigin * 100).toFixed(1)} cm</span>
             </div>
+
+            {/* Dist to Robot Base */}
             <div>
-              <span className="text-[10px] text-slate-500 uppercase block">Gripper</span>
+              <span className="text-[10px] text-slate-500 uppercase block font-sans">Dist Robot</span>
+              <span className="text-xs font-semibold text-indigo-400">{(distToRobot * 100).toFixed(1)} cm</span>
+            </div>
+
+            {/* Gripper */}
+            <div>
+              <span className="text-[10px] text-slate-500 uppercase block font-sans">Gripper</span>
               <span className="text-xs font-semibold text-amber-400">
                 {activeEp?.gripper_states?.[currentFrameIndex] ? `${activeEp.gripper_states[currentFrameIndex].toFixed(0)}%` : '100%'}
               </span>

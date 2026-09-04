@@ -1,13 +1,17 @@
 import React from 'react';
-import { Sliders, Printer, Zap, Package, Smartphone, LayoutDashboard } from 'lucide-react';
+import { Sliders, Printer, Zap, Package, Smartphone, LayoutDashboard, Bot } from 'lucide-react';
 
 export default function Navbar({
   currentView,
   setCurrentView,
   onOpenEkfModal,
+  onOpenRobotModal,
   onAddSample,
-  onExportLeRobot
+  onExportLeRobot,
+  robotConfig
 }) {
+  const robotName = (robotConfig?.robot_type || 'so101').toUpperCase();
+
   return (
     <header className="bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-4 py-2.5 flex items-center justify-between sticky top-0 z-40">
       <div className="flex items-center gap-3">
@@ -48,6 +52,18 @@ export default function Navbar({
             <span>Mobile Logger</span>
           </button>
         </div>
+
+        {/* Robot Setup Button with Active Model Badge */}
+        <button
+          onClick={onOpenRobotModal}
+          className="px-3 py-1.5 rounded-xl border border-indigo-500/40 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm"
+        >
+          <Bot className="w-3.5 h-3.5 text-indigo-400" />
+          <span>Robot Setup</span>
+          <span className="ml-0.5 px-1.5 py-0.2 rounded bg-indigo-500/30 text-[10px] font-mono font-bold text-indigo-200">
+            {robotName}
+          </span>
+        </button>
 
         {/* Action Buttons */}
         <button
