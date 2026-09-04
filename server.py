@@ -750,15 +750,25 @@ async def reprocess_episode(episode_index: int):
 @app.post("/api/export_lerobot")
 async def export_lerobot():
     if not EPISODES_DB:
-        return JSONResponse({"status": "error", "message": "No episodes recorded yet."}, status_code=400)
+        return JSONResponse({"status": "error", "message": "No episodes recorded yet. Please record or sample an episode first."}, status_code=400)
 
-    export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_aruco_3d_trajectories")
-
-    return JSONResponse({
-        "status": "success",
-        "export_path": export_path,
-        "total_episodes": len(EPISODES_DB)
-    })
+    try:
+        export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_aruco_3d_trajectories")
+        total_frames = sum(ep.get('num_frames', len(ep.get('poses', []))) for ep in EPISODES_DB)
+        return JSONResponse({
+            "status": "success",
+            "export_path": export_path,
+            "total_episodes": len(EPISODES_DB),
+            "total_frames": total_frames,
+            "message": f"LeRobot dataset exported successfully with {len(EPISODES_DB)} episodes ({total_frames} frames)!"
+        })
+    except Exception as err:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({
+            "status": "error",
+            "message": f"LeRobot export failed: {str(err)}"
+        }, status_code=500)
 
 if __name__ == "__main__":
     import uvicorn
