@@ -1,11 +1,12 @@
 import React from 'react';
-import { Sliders, Printer, Zap, Package, Smartphone, LayoutDashboard, Bot } from 'lucide-react';
+import { Sliders, Printer, Zap, Package, Smartphone, LayoutDashboard, Bot, QrCode } from 'lucide-react';
 
 export default function Navbar({
   currentView,
   setCurrentView,
   onOpenEkfModal,
   onOpenRobotModal,
+  onOpenConnectModal,
   onAddSample,
   onExportLeRobot,
   robotConfig
@@ -52,6 +53,16 @@ export default function Navbar({
             <span>Mobile Logger</span>
           </button>
         </div>
+
+        {/* Connect Phone QR Button */}
+        <button
+          onClick={onOpenConnectModal}
+          className="px-3 py-1.5 rounded-xl border border-purple-500/40 bg-purple-500/10 text-purple-300 hover:bg-purple-500/20 text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm"
+          title="Connect Smartphone Camera via QR Code"
+        >
+          <QrCode className="w-3.5 h-3.5 text-purple-400" />
+          <span>Connect Phone</span>
+        </button>
 
         {/* Robot Setup Button with Active Model Badge */}
         <button

@@ -89,19 +89,23 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   }, []);
 
   const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      const el = document.documentElement;
-      if (el.requestFullscreen) {
-        el.requestFullscreen().catch(() => {});
-      } else if (el.webkitRequestFullscreen) {
-        el.webkitRequestFullscreen();
+    try {
+      if (!document.fullscreenElement) {
+        const el = document.documentElement;
+        if (el.requestFullscreen) {
+          el.requestFullscreen().catch(() => {});
+        } else if (el.webkitRequestFullscreen) {
+          el.webkitRequestFullscreen();
+        }
+      } else {
+        if (document.exitFullscreen) {
+          document.exitFullscreen().catch(() => {});
+        } else if (document.webkitExitFullscreen) {
+          document.webkitExitFullscreen();
+        }
       }
-    } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen().catch(() => {});
-      } else if (document.webkitExitFullscreen) {
-        document.webkitExitFullscreen();
-      }
+    } catch (e) {
+      console.log('Fullscreen toggle caught error:', e);
     }
   };
 
@@ -124,6 +128,21 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     // Attempt automatic fullscreen to hide mobile URL bar
     toggleFullscreen();
 
+    // Check secure context / mediaDevices right away
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      const isRemote =
+        typeof window !== 'undefined' &&
+        window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1';
+      if (isRemote && window.location.protocol === 'http:') {
+        window.location.href = `https://${window.location.hostname}:8443/mobile`;
+        return;
+      }
+      setStatusMsg('Camera access requires HTTPS or localhost context.');
+      alert('Camera access requires HTTPS. Please connect to https://' + window.location.hostname + ':8443/mobile');
+      return;
+    }
+
     // Request motion permission if iOS 13+
     if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
       try {
@@ -137,7 +156,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
       await refreshDevices();
 
       let selectedId = targetDeviceId;
-      if (!selectedId) {
+      if (!selectedId && navigator.mediaDevices?.enumerateDevices) {
         try {
           const devList = await navigator.mediaDevices.enumerateDevices();
           const videoDevs = devList.filter((d) => d.kind === 'videoinput');
@@ -166,14 +185,6 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
           : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
       };
-
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error(
-          'Camera access requires HTTPS. Please connect to https://' +
-            window.location.hostname +
-            ':8000/mobile'
-        );
-      }
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
@@ -418,29 +429,40 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
             </p>
           </div>
 
-          <button
-            onClick={() => startCamera()}
-            className="w-full max-w-xs py-4 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-sm shadow-xl shadow-indigo-600/40 active:scale-95 transition-all flex items-center justify-center gap-2"
-          >
-            <span>LAUNCH CAMERA & FULLSCREEN</span>
-          </button>
-
-          {typeof window !== 'undefined' && !window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' && (
-            <div className="bg-amber-500/15 border border-amber-500/40 rounded-xl p-3 text-[11px] text-amber-200 text-left flex flex-col gap-1 max-w-xs mt-1">
-              <span className="font-bold flex items-center gap-1.5 text-amber-300">
-                <AlertCircle className="w-3.5 h-3.5" />
-                <span>HTTPS Required for Mobile Camera</span>
-              </span>
-              <span>Mobile browsers disable camera on HTTP. Please switch to:</span>
+          {typeof window !== 'undefined' && !window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' ? (
+            <div className="w-full max-w-xs bg-amber-500/15 border border-amber-500/40 rounded-2xl p-4 text-xs text-amber-200 text-left flex flex-col gap-3 shadow-xl">
+              <div className="flex items-center gap-2 text-amber-300 font-bold text-sm">
+                <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
+                <span>HTTPS Required for Camera</span>
+              </div>
+              <p className="text-slate-300 text-[11px] leading-relaxed">
+                Mobile browsers (iOS Safari / Android Chrome) block camera and sensors on HTTP. Tap below to switch to encrypted HTTPS (Port 8443):
+              </p>
               <a
-                href={`https://${window.location.hostname}:8000/mobile`}
-                className="text-sky-300 underline font-mono text-[10px] break-all hover:text-white"
+                href={`https://${window.location.hostname}:8443/mobile`}
+                className="w-full py-3 px-4 bg-gradient-to-r from-amber-500 to-orange-500 text-black font-bold rounded-xl text-center text-xs tracking-wide shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2"
               >
-                https://{window.location.hostname}:8000/mobile
+                <Sparkles className="w-4 h-4" />
+                <span>SWITCH TO SECURE CAMERA</span>
               </a>
-              <span className="text-[10px] text-slate-400 mt-0.5">
-                (Tap "Advanced" &gt; "Proceed" to accept local cert)
-              </span>
+              <div className="bg-black/50 rounded-xl p-3 border border-amber-500/20 text-[11px] text-slate-300 space-y-1">
+                <p className="font-semibold text-amber-300">Self-Signed Cert Steps:</p>
+                <p>• <strong>Chrome:</strong> Tap "Advanced" &gt; "Proceed to {window.location.hostname} (unsafe)"</p>
+                <p>• <strong>Safari:</strong> Tap "Show Details" &gt; "visit this website" &gt; "Visit Website"</p>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => startCamera()}
+              className="w-full max-w-xs py-4 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-sm shadow-xl shadow-indigo-600/40 active:scale-95 transition-all flex items-center justify-center gap-2"
+            >
+              <span>LAUNCH CAMERA & FULLSCREEN</span>
+            </button>
+          )}
+
+          {statusMsg && (
+            <div className="max-w-xs bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs p-2.5 rounded-xl">
+              {statusMsg}
             </div>
           )}
         </div>
