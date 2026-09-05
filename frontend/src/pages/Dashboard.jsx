@@ -20,7 +20,9 @@ import {
   PanelRightClose,
   PanelRightOpen,
   GripHorizontal,
-  GripVertical
+  GripVertical,
+  Terminal,
+  Activity
 } from 'lucide-react';
 
 export default function Dashboard({
@@ -36,6 +38,9 @@ export default function Dashboard({
 }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
+
+  // Dev View Diagnostic Overlay (ArUco + Virtual SLAM)
+  const [isDevView, setIsDevView] = useState(true);
 
   // Layout Configuration: Default to 'pip' (Big 3D Trajectory with anchored bottom-right Camera)
   const [layoutMode, setLayoutMode] = useState('pip'); // 'pip' (Default), 'vertical', or 'horizontal'
@@ -53,6 +58,7 @@ export default function Dashboard({
   const totalFrames = activeEp?.num_frames || 0;
   const safeFrameIndex = totalFrames > 0 ? Math.min(Math.max(0, currentFrameIndex), totalFrames - 1) : 0;
   const currentPose = poses[safeFrameIndex] || [0, 0, 0, 0, 0, 0];
+  const currTelemetry = activeEp?.dev_telemetry?.[safeFrameIndex] || activeEp?.dev_telemetry?.[0] || null;
 
   // Sync selectedEpIdx if activeEp resolved to a different episode
   useEffect(() => {
@@ -60,6 +66,20 @@ export default function Dashboard({
       setSelectedEpIdx(activeEp.episode_index);
     }
   }, [activeEp, selectedEpIdx, setSelectedEpIdx]);
+
+  // Ensure dev_video_url is generated for the active episode if requested
+  useEffect(() => {
+    if (activeEp && !activeEp.dev_video_url && activeEp.video_path && onRefreshEpisodes) {
+      fetch(`/api/episodes/${activeEp.episode_index}/dev_video`, { method: 'POST' })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.status === 'success' && data.dev_video_url) {
+            onRefreshEpisodes();
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeEp?.episode_index, activeEp?.dev_video_url, activeEp?.video_path, onRefreshEpisodes]);
 
   // Reset playback and frame position whenever active episode or video URL changes
   useEffect(() => {
@@ -237,6 +257,19 @@ export default function Dashboard({
                 </button>
               </div>
             )}
+            {/* Dev View Diagnostic Overlay Toggle */}
+            <button
+              onClick={() => setIsDevView(!isDevView)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-medium flex items-center gap-1.5 transition-all border ${
+                isDevView
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/40 shadow-sm font-semibold'
+                  : 'bg-slate-900/80 hover:bg-slate-800 border-slate-800 text-slate-400 hover:text-slate-200'
+              }`}
+              title="Toggle ArUco Marker Detection & Virtual SLAM Diagnostic Overlay"
+            >
+              <Terminal className={`w-3.5 h-3.5 ${isDevView ? 'text-amber-400' : 'text-slate-400'}`} />
+              <span>Dev View: {isDevView ? 'ON' : 'OFF'}</span>
+            </button>
           </div>
 
           {/* Right: Sidebar Collapse/Expand Toggle */}
@@ -291,7 +324,7 @@ export default function Dashboard({
                 <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900/90 border-b border-slate-800 text-[11px] select-none">
                   <div className="flex items-center gap-1.5 font-medium text-slate-200">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span className="tracking-wide">Camera View</span>
+                    <span className="tracking-wide">{isDevView ? 'Dev View' : 'Camera View'}</span>
                   </div>
 
                   <div className="flex items-center gap-1 text-slate-400">
@@ -320,6 +353,10 @@ export default function Dashboard({
                 <div className="flex-1 min-h-0 relative bg-black flex items-center justify-center overflow-hidden">
                   <VideoPlayer
                     videoUrl={activeEp?.video_url}
+                    devVideoUrl={activeEp?.dev_video_url}
+                    isDevView={isDevView}
+                    setIsDevView={setIsDevView}
+                    devTelemetry={activeEp?.dev_telemetry}
                     isPlaying={isPlaying}
                     currentFrameIndex={safeFrameIndex}
                     totalFrames={totalFrames}
@@ -401,6 +438,10 @@ export default function Dashboard({
             >
               <VideoPlayer
                 videoUrl={activeEp?.video_url}
+                devVideoUrl={activeEp?.dev_video_url}
+                isDevView={isDevView}
+                setIsDevView={setIsDevView}
+                devTelemetry={activeEp?.dev_telemetry}
                 isPlaying={isPlaying}
                 currentFrameIndex={safeFrameIndex}
                 totalFrames={totalFrames}
@@ -492,6 +533,83 @@ export default function Dashboard({
               </span>
             </div>
           </div>
+
+          {/* SLAM & ArUco Dev Diagnostic Strip when Dev View is Active */}
+          {isDevView && (
+            <div className="bg-slate-950/90 p-2.5 rounded-xl border border-amber-500/30 text-left text-xs flex flex-col gap-2 shadow-lg">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <Terminal className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-amber-300">
+                    CV & Virtual SLAM Diagnostics
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wide border ${
+                      currTelemetry?.source === 'dual_aruco'
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : currTelemetry?.source === 'single_aruco'
+                        ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+                        : currTelemetry?.source === 'feature_pnp'
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                        : 'bg-orange-500/20 text-orange-300 border-orange-500/40'
+                    }`}
+                  >
+                    {currTelemetry?.source?.replace('_', ' ') || 'INITIALIZING'}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-3 text-[11px] font-mono text-slate-300 flex-wrap">
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-amber-400" />
+                    <span>3D Landmarks:</span>
+                    <strong className="text-amber-300">{currTelemetry?.num_landmarks ?? 0}</strong>
+                  </span>
+                  <span className="text-slate-600">|</span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                    <span>Tracked Features:</span>
+                    <strong className="text-emerald-300">{currTelemetry?.num_features ?? 0}</strong>
+                  </span>
+                  <span className="text-slate-600">|</span>
+                  <span className="flex items-center gap-1">
+                    <span>ArUco Markers:</span>
+                    <strong className="text-slate-200">
+                      {currTelemetry?.tags_detected?.length
+                        ? currTelemetry.tags_detected.map((t) => `ID ${t}`).join(', ')
+                        : 'None (SLAM Engaged)'}
+                    </strong>
+                  </span>
+                </div>
+              </div>
+
+              {/* Color-Coded CV Legend */}
+              <div className="flex items-center gap-4 text-[10px] text-slate-400 border-t border-slate-800/80 pt-1.5 flex-wrap">
+                <span className="text-slate-500 font-semibold uppercase tracking-wider font-mono">Legend:</span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-sm bg-emerald-400" />
+                  <span>ArUco Tag A (Origin 0,0,0)</span>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-sm bg-sky-400" />
+                  <span>Tag B (+15cm Offset)</span>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-3 h-0.5 bg-rose-500" />
+                  <span className="w-3 h-0.5 bg-emerald-500" />
+                  <span className="w-3 h-0.5 bg-sky-500" />
+                  <span>3D Axes (+X Red, +Y Green, +Z Blue)</span>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  <span>Tracked 2D Features</span>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rotate-45 border border-amber-400 bg-amber-400/30" />
+                  <span>Triangulated 3D Landmarks</span>
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

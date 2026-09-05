@@ -623,6 +623,10 @@ class VisualInertialTracker:
         # Master Combined 8-point Object Array
         self.board_8p_3d = np.vstack([self.tag_a_3d, self.tag_b_3d])
 
+        # Developer Diagnostic / Detection History
+        self.last_detected_ids = []
+        self.last_detected_corners = []
+
         # Extended Kalman Filter Tuning Parameters
         self.ekf_params = {
             "q_pos": 1e-4,
@@ -737,6 +741,8 @@ class VisualInertialTracker:
             corners, ids, rejected = cv2.aruco.detectMarkers(gray, self.dictionary)
 
         if ids is None or len(ids) == 0:
+            self.last_detected_ids = []
+            self.last_detected_corners = []
             if return_corners:
                 return False, None, None, None, None, False, []
             return False, None, None, None, None, False
@@ -749,6 +755,8 @@ class VisualInertialTracker:
             refined_corners.append(c_sub)
 
         ids_flat = ids.flatten().tolist()
+        self.last_detected_ids = ids_flat
+        self.last_detected_corners = refined_corners
         has_tag_a = self.tag_a_id in ids_flat
         has_tag_b = self.tag_b_id in ids_flat
 
@@ -818,9 +826,179 @@ class VisualInertialTracker:
             return True, p_world, R_c_to_w, rvec, tvec, is_dual, refined_corners
         return True, p_world, R_c_to_w, rvec, tvec, is_dual
 
-    def process_video_and_imu(self, video_path, imu_samples, fps=30.0):
+    def render_dev_frame(
+        self,
+        frame,
+        camera_matrix,
+        dist_coeffs,
+        frame_idx,
+        total_frames,
+        fps,
+        p_world=None,
+        euler=None,
+        rvec=None,
+        tvec=None,
+        source="initializing",
+        corners=None,
+        ids_list=None,
+        tracked_pts=None,
+        prev_pts=None,
+        landmarks_3d=None
+    ):
+        """
+        Renders an augmented developer diagnostic visualization on the camera frame:
+          - ArUco tag bounding contours, refined corner orientation, and Tag A/Tag B labels
+          - 3D physical coordinate frame axes anchored at table origin (+X Red, +Y Green, +Z Blue)
+          - Actively tracked 2D FAST/Shi-Tomasi visual keypoints (neon green dots)
+          - Optical flow motion vectors (cyan displacement vectors)
+          - Triangulated 3D scene landmarks in the SLAM map (golden diamonds)
+          - Developer telemetry HUD banner with tracking state, landmark count, pose, and frame rate
+        """
+        annotated = frame.copy()
+        height, width = annotated.shape[:2]
+
+        # 1. Draw Optical Flow Trails (motion tracks across frames)
+        if prev_pts is not None and tracked_pts is not None:
+            n_flow = min(len(prev_pts), len(tracked_pts))
+            for i in range(n_flow):
+                p1 = prev_pts[i]
+                p2 = tracked_pts[i]
+                u1, v1 = int(round(float(p1[0]))), int(round(float(p1[1])))
+                u2, v2 = int(round(float(p2[0]))), int(round(float(p2[1])))
+                if 0 <= u2 < width and 0 <= v2 < height and (abs(u2 - u1) + abs(v2 - v1)) >= 1:
+                    cv2.line(annotated, (u1, v1), (u2, v2), (255, 230, 0), 1, cv2.LINE_AA)
+
+        # 2. Draw Actively Tracked 2D Feature Keypoints
+        if tracked_pts is not None and len(tracked_pts) > 0:
+            for pt in tracked_pts:
+                u, v = int(round(float(pt[0]))), int(round(float(pt[1])))
+                if 0 <= u < width and 0 <= v < height:
+                    cv2.circle(annotated, (u, v), 3, (50, 255, 120), -1, cv2.LINE_AA)
+                    cv2.circle(annotated, (u, v), 4, (0, 160, 60), 1, cv2.LINE_AA)
+
+        # 3. Draw Triangulated 3D SLAM Map Landmarks (Golden Diamonds)
+        if (
+            landmarks_3d is not None and len(landmarks_3d) > 0 and
+            rvec is not None and tvec is not None
+        ):
+            try:
+                lm_pts = np.array(list(landmarks_3d.values()), dtype=np.float32)
+                if len(lm_pts) > 0:
+                    proj_lm, _ = cv2.projectPoints(lm_pts, rvec, tvec, camera_matrix, dist_coeffs)
+                    proj_lm = proj_lm.reshape(-1, 2)
+                    for pt in proj_lm:
+                        u, v = int(round(float(pt[0]))), int(round(float(pt[1])))
+                        if 10 <= u < width - 10 and 10 <= v < height - 10:
+                            d = 4
+                            diamond = np.array([
+                                [u, v - d], [u + d, v], [u, v + d], [u - d, v]
+                            ], dtype=np.int32)
+                            cv2.polylines(annotated, [diamond], isClosed=True, color=(0, 215, 255), thickness=1, lineType=cv2.LINE_AA)
+                            cv2.circle(annotated, (u, v), 1, (0, 255, 255), -1)
+            except Exception:
+                pass
+
+        # 4. Draw ArUco Markers (Bounding box, corner 0 dot, tag labels)
+        if corners is not None and len(corners) > 0:
+            for i, c in enumerate(corners):
+                pts = c[0].astype(np.int32)
+                cv2.polylines(annotated, [pts], isClosed=True, color=(0, 255, 0), thickness=2, lineType=cv2.LINE_AA)
+                cv2.circle(annotated, tuple(pts[0]), 5, (0, 0, 255), -1, cv2.LINE_AA)
+
+                tid = ids_list[i] if (ids_list and i < len(ids_list)) else i
+                if tid == self.tag_a_id:
+                    tag_name = f"Tag A (ID {tid} Origin [0,0,0])"
+                    pill_color = (0, 255, 128)
+                elif tid == self.tag_b_id:
+                    tag_name = f"Tag B (ID {tid} Offset +15cm)"
+                    pill_color = (255, 220, 0)
+                else:
+                    tag_name = f"ArUco ID {tid}"
+                    pill_color = (200, 200, 200)
+
+                label_pos = (pts[0][0], max(20, pts[0][1] - 8))
+                cv2.putText(annotated, tag_name, label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, pill_color, 1, cv2.LINE_AA)
+
+        # 5. Draw 3D Physical Coordinate Frame Axes Anchored to Table Origin [0, 0, 0]
+        if rvec is not None and tvec is not None:
+            try:
+                axis_len = 0.08  # 8 cm axes
+                axes_3d = np.array([
+                    [0.0, 0.0, 0.0],       # Origin
+                    [axis_len, 0.0, 0.0],  # +X (Red)
+                    [0.0, axis_len, 0.0],  # +Y (Green)
+                    [0.0, 0.0, axis_len],  # +Z (Blue, normal to table)
+                ], dtype=np.float32)
+
+                img_pts, _ = cv2.projectPoints(axes_3d, rvec, tvec, camera_matrix, dist_coeffs)
+                img_pts = img_pts.reshape(-1, 2)
+                o = (int(round(img_pts[0][0])), int(round(img_pts[0][1])))
+                px = (int(round(img_pts[1][0])), int(round(img_pts[1][1])))
+                py = (int(round(img_pts[2][0])), int(round(img_pts[2][1])))
+                pz = (int(round(img_pts[3][0])), int(round(img_pts[3][1])))
+
+                if -150 <= o[0] < width + 150 and -150 <= o[1] < height + 150:
+                    cv2.arrowedLine(annotated, o, px, (0, 0, 255), 3, tipLength=0.15, line_type=cv2.LINE_AA)    # +X Red
+                    cv2.arrowedLine(annotated, o, py, (0, 255, 0), 3, tipLength=0.15, line_type=cv2.LINE_AA)    # +Y Green
+                    cv2.arrowedLine(annotated, o, pz, (255, 120, 0), 3, tipLength=0.15, line_type=cv2.LINE_AA)  # +Z Blue (Height)
+
+                    cv2.putText(annotated, "+X", (px[0] + 4, px[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
+                    cv2.putText(annotated, "+Y", (py[0] + 4, py[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
+                    cv2.putText(annotated, "+Z (Normal)", (pz[0] + 4, pz[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 160, 0), 1, cv2.LINE_AA)
+            except Exception:
+                pass
+
+        # 6. Draw HUD Telemetry Banner across top
+        hud_h = 72
+        overlay = annotated.copy()
+        cv2.rectangle(overlay, (0, 0), (width, hud_h), (12, 16, 24), -1)
+        cv2.addWeighted(overlay, 0.78, annotated, 0.22, 0, annotated)
+        cv2.line(annotated, (0, hud_h), (width, hud_h), (40, 50, 70), 1)
+
+        source_cfg = {
+            'dual_aruco': ('DUAL ARUCO (8-PT PNP)', (0, 255, 128)),
+            'single_aruco': ('SINGLE ARUCO PNP', (255, 215, 0)),
+            'feature_pnp': ('VIRTUAL SLAM (3D PNP)', (0, 215, 255)),
+            'feature_vo': ('OPTICAL FLOW VO', (0, 140, 255)),
+            'imu': ('IMU EKF DEAD RECKON', (80, 80, 255))
+        }
+        src_label, src_color = source_cfg.get(source, ('INITIALIZING', (180, 180, 180)))
+
+        cv2.circle(annotated, (18, 22), 5, src_color, -1, cv2.LINE_AA)
+        cv2.putText(annotated, f"[{src_label}]", (30, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, src_color, 2, cv2.LINE_AA)
+
+        time_sec = frame_idx / (fps if fps > 0 else 30.0)
+        f_text = f"Frame {frame_idx + 1}/{max(1, total_frames)}  ({time_sec:.2f}s)  |  {fps:.1f} FPS"
+        cv2.putText(annotated, f_text, (max(width - 320, 240), 26), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 230), 1, cv2.LINE_AA)
+
+        lm_count = len(landmarks_3d) if landmarks_3d else 0
+        feat_count = len(tracked_pts) if tracked_pts is not None else 0
+        stats_text = f"SLAM Map: {lm_count} 3D Landmarks  |  Tracked Features: {feat_count}"
+        cv2.putText(annotated, stats_text, (18, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (170, 200, 250), 1, cv2.LINE_AA)
+
+        if p_world is not None:
+            x_cm = p_world[0] * 100
+            y_cm = p_world[1] * 100
+            z_cm = p_world[2] * 100
+            pitch_deg = np.degrees(euler[1]) if (euler is not None and abs(euler[1]) < 3.14) else (euler[1] if euler is not None else 0.0)
+            pose_text = f"Cam: [{x_cm:+.1f}, {y_cm:+.1f}, {z_cm:+.1f}] cm  |  Pitch: {pitch_deg:+.1f}°"
+            cv2.putText(annotated, pose_text, (max(width - 360, 200), 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 240, 180), 1, cv2.LINE_AA)
+
+        cv2.putText(annotated, "OMNIKIN DEV VIEW: ARUCO + VIRTUAL SLAM", (12, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (130, 150, 180), 1, cv2.LINE_AA)
+
+        return annotated
+
+    def process_video_and_imu(
+        self,
+        video_path,
+        imu_samples,
+        fps=30.0,
+        output_dev_video_path=None,
+        return_dev_info=False
+    ):
         """
         Sensory fusion: ArUco Ground Truth + OpenCV Virtual SLAM PnP + 100Hz IMU EKF.
+        Optionally generates an annotated developer diagnostic video and frame-by-frame telemetry.
         """
         cap = cv2.VideoCapture(video_path)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
@@ -832,7 +1010,13 @@ class VisualInertialTracker:
         # Initialize OpenCV Virtual SLAM Feature Map Tracker
         feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
 
+        dev_writer = None
+        if output_dev_video_path:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            dev_writer = cv2.VideoWriter(output_dev_video_path, fourcc, fps, (width, height))
+
         video_detections = []  # (frame_idx, p_world, euler, is_dual, source)
+        dev_telemetry = []
         frame_idx = 0
 
         while True:
@@ -848,6 +1032,11 @@ class VisualInertialTracker:
             )
             det, p_world, R_world, rvec, tvec, is_dual, corners = det_res
 
+            rvec_curr = None
+            tvec_curr = None
+            euler_curr = None
+            p_curr = None
+
             if det:
                 euler = rotation_matrix_to_trajectory_euler(R_world)
                 src = "dual_aruco" if is_dual else "single_aruco"
@@ -855,25 +1044,80 @@ class VisualInertialTracker:
 
                 # Continually learn natural background features into the exact ArUco 3D frame
                 feature_tracker.add_aruco_ground_truth(gray, p_world, R_world, corners)
+                rvec_curr = rvec
+                tvec_curr = tvec
+                p_curr = p_world
+                euler_curr = euler
             else:
                 # Step 2: ArUco is LOST / Occluded -> Track via Scene Features in ArUco space!
                 f_success, p_feat, R_feat, f_source = feature_tracker.track_without_aruco(gray)
                 if f_success:
                     euler = rotation_matrix_to_trajectory_euler(R_feat)
+                    src = f_source
                     video_detections.append((frame_idx, p_feat, euler, False, f_source))
+                    p_curr = p_feat
+                    euler_curr = euler
+                    R_w2c_feat = R_feat.T
+                    t_w2c_feat = -R_w2c_feat @ p_feat.reshape(3, 1)
+                    rvec_curr, _ = cv2.Rodrigues(R_w2c_feat)
+                    tvec_curr = t_w2c_feat
+                else:
+                    src = "imu"
+
+            # Record per-frame dev telemetry
+            dev_telemetry.append({
+                'frame_idx': frame_idx,
+                'source': src,
+                'num_landmarks': len(feature_tracker.landmarks_3d),
+                'num_features': len(feature_tracker.tracked_pts),
+                'is_dual': is_dual if det else False,
+                'tags_detected': list(self.last_detected_ids) if det else [],
+                'pose': p_curr.tolist() if p_curr is not None else [0.0, 0.0, 0.0],
+                'euler': euler_curr.tolist() if euler_curr is not None else [0.0, 0.0, 0.0]
+            })
+
+            # Render dev visualization frame
+            if dev_writer is not None:
+                dev_frame = self.render_dev_frame(
+                    frame=frame,
+                    camera_matrix=camera_matrix,
+                    dist_coeffs=dist_coeffs,
+                    frame_idx=frame_idx,
+                    total_frames=total_frames,
+                    fps=fps,
+                    p_world=p_curr,
+                    euler=euler_curr,
+                    rvec=rvec_curr,
+                    tvec=tvec_curr,
+                    source=src,
+                    corners=corners if det else None,
+                    ids_list=self.last_detected_ids if det else None,
+                    tracked_pts=feature_tracker.tracked_pts,
+                    prev_pts=feature_tracker.prev_gray_pts,
+                    landmarks_3d=feature_tracker.landmarks_3d
+                )
+                dev_writer.write(dev_frame)
 
             frame_idx += 1
 
         cap.release()
+        if dev_writer is not None:
+            dev_writer.release()
+
         num_frames = frame_idx
         if num_frames == 0:
-            return self.generate_synthetic_anchored_trajectory()
+            synth = self.generate_synthetic_anchored_trajectory()
+            if return_dev_info:
+                return synth, []
+            return synth
 
         # Parse IMU samples
         parsed_imu = self._parse_imu_samples(imu_samples, num_frames, fps)
 
         # Run EKF Fusion
         final_trajectory = self._run_ekf_fusion(num_frames, fps, video_detections, parsed_imu)
+        if return_dev_info:
+            return final_trajectory, dev_telemetry
         return final_trajectory
 
     def _parse_imu_samples(self, imu_samples, num_frames, fps):
@@ -982,11 +1226,17 @@ class VisualInertialTracker:
 
         return final_poses
 
-    def reprocess_episode_trajectory(self, video_path, imu_samples, fps=30.0):
+    def reprocess_episode_trajectory(self, video_path, imu_samples, fps=30.0, output_dev_video_path=None, return_dev_info=False):
         """
         Re-filters an existing video and IMU recording using the latest EKF parameters.
         """
-        return self.process_video_and_imu(video_path, imu_samples, fps=fps)
+        return self.process_video_and_imu(
+            video_path,
+            imu_samples,
+            fps=fps,
+            output_dev_video_path=output_dev_video_path,
+            return_dev_info=return_dev_info
+        )
 
     def generate_synthetic_anchored_trajectory(self, num_frames=90, shape="circle"):
         """
