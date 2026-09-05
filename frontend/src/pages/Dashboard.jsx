@@ -41,6 +41,7 @@ export default function Dashboard({
 
   // Dev View Diagnostic Overlay (ArUco + Virtual SLAM)
   const [isDevView, setIsDevView] = useState(true);
+  const [isExpandedDetails, setIsExpandedDetails] = useState(true);
 
   // Layout Configuration: Default to 'pip' (Big 3D Trajectory with anchored bottom-right Camera)
   const [layoutMode, setLayoutMode] = useState('pip'); // 'pip' (Default), 'vertical', or 'horizontal'
@@ -177,7 +178,7 @@ export default function Dashboard({
       } ${isDragging ? 'select-none' : ''}`}
     >
       {/* Main Center Area: Big 3D Preview with Inset Camera & Timeline */}
-      <div className={`${isSidebarOpen ? 'lg:col-span-3' : 'w-full'} flex flex-col gap-3 h-full min-h-0`}>
+      <div className={`${isSidebarOpen ? 'lg:col-span-3' : 'w-full'} flex flex-col gap-3 h-full min-h-0 overflow-y-auto overflow-x-hidden pr-2 pb-8 custom-scrollbar`}>
         {/* Top Control Bar for Layout Modes */}
         <div className="flex items-center justify-between px-1 text-xs">
           <div className="flex items-center gap-2 flex-wrap">
@@ -299,7 +300,7 @@ export default function Dashboard({
           /* ========================================================================= */
           /* BIG 3D TRAJECTORY PREVIEW WITH ANCHORED BOTTOM-RIGHT CAMERA INSET         */
           /* ========================================================================= */
-          <div className="flex-1 min-h-0 relative overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/40 shadow-xl">
+          <div className="flex-1 min-h-[380px] md:min-h-[440px] relative overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/40 shadow-xl shrink-0">
             {/* Primary Big 3D Workspace */}
             <div className="w-full h-full relative">
               <Viewport3D
@@ -385,7 +386,7 @@ export default function Dashboard({
             ref={splitContainerRef}
             className={`flex ${
               layoutMode === 'vertical' ? 'flex-col' : 'flex-col md:flex-row'
-            } gap-0 flex-1 min-h-0 relative overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/40`}
+            } gap-0 flex-1 min-h-[380px] md:min-h-[440px] shrink-0 relative overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/40`}
           >
             {/* 3D Trajectory Viewport */}
             <div
@@ -452,7 +453,7 @@ export default function Dashboard({
         )}
 
         {/* Timeline & Playback Controller */}
-        <div className="glass-card p-4 rounded-2xl flex flex-col gap-3">
+        <div className="glass-card p-4 rounded-2xl flex flex-col gap-3 shrink-0">
           <div className="flex items-center gap-3">
             <button
               onClick={() => setIsPlaying(!isPlaying)}
@@ -556,6 +557,14 @@ export default function Dashboard({
                   >
                     {currTelemetry?.source?.replace('_', ' ') || 'INITIALIZING'}
                   </span>
+                  <button
+                    onClick={() => setIsExpandedDetails(!isExpandedDetails)}
+                    className="px-2 py-0.5 rounded text-[10px] font-mono text-amber-300 hover:text-amber-100 bg-amber-500/10 hover:bg-amber-500/25 border border-amber-500/30 transition-all flex items-center gap-1 ml-1"
+                    title="Toggle Detailed Telemetry Breakdown"
+                  >
+                    <Activity className="w-3 h-3" />
+                    <span>{isExpandedDetails ? 'Hide Deep Telemetry' : 'Deep Telemetry'}</span>
+                  </button>
                 </div>
 
                 <div className="flex items-center gap-3 text-[11px] font-mono text-slate-300 flex-wrap">
@@ -581,6 +590,97 @@ export default function Dashboard({
                   </span>
                 </div>
               </div>
+
+              {/* Expandable Deep Telemetry Cards */}
+              {isExpandedDetails && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-2 border-t border-slate-800/90 font-mono text-[11px]">
+                  {/* Card 1: Visual SLAM Multi-View Feature Tracking */}
+                  <div className="bg-slate-900/80 rounded-lg p-2.5 border border-slate-800/80 flex flex-col gap-1.5 shadow-sm">
+                    <div className="text-[10px] font-semibold text-amber-400 uppercase tracking-wide flex items-center justify-between font-sans">
+                      <span>🌐 Visual SLAM Tracking</span>
+                      <span className="text-[9px] text-slate-500">PyrLK + Triangulation</span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">3D Landmarks:</span>
+                      <span className="font-bold text-amber-300">{currTelemetry?.num_landmarks ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">2D Optical Flow Pts:</span>
+                      <span className="font-bold text-emerald-300">{currTelemetry?.num_features ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">Triangulation Baseline:</span>
+                      <span className="text-slate-200">≥ 12 mm</span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">PnP VO Solver:</span>
+                      <span className="text-sky-300">EPnP + RANSAC</span>
+                    </div>
+                  </div>
+
+                  {/* Card 2: ArUco Coplanar Rigid Board */}
+                  <div className="bg-slate-900/80 rounded-lg p-2.5 border border-slate-800/80 flex flex-col gap-1.5 shadow-sm">
+                    <div className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wide flex items-center justify-between font-sans">
+                      <span>🏷️ ArUco Ground Truth</span>
+                      <span className="text-[9px] text-slate-500">6×6_250 Markers</span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">Tag A (Origin 0,0,0):</span>
+                      <span className={currTelemetry?.tags_detected?.includes(0) ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
+                        {currTelemetry?.tags_detected?.includes(0) ? '🟢 Detected' : '⚪ Occluded'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">Tag B (+15cm Offset):</span>
+                      <span className={currTelemetry?.tags_detected?.includes(1) ? 'text-sky-400 font-bold' : 'text-slate-500'}>
+                        {currTelemetry?.tags_detected?.includes(1) ? '🟢 Detected' : '⚪ Occluded'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">Rigid Multi-Board:</span>
+                      <span className="text-indigo-300">
+                        {currTelemetry?.is_dual ? 'Dual-Marker 8-Pt' : currTelemetry?.tags_detected?.length ? 'Single-Marker 4-Pt' : 'SLAM Fallback'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">Board Baseline:</span>
+                      <span className="text-slate-200">15.0 cm (+X)</span>
+                    </div>
+                  </div>
+
+                  {/* Card 3: Robot Frame & 6-DoF Hand Pose */}
+                  <div className="bg-slate-900/80 rounded-lg p-2.5 border border-slate-800/80 flex flex-col gap-1.5 shadow-sm">
+                    <div className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wide flex items-center justify-between font-sans">
+                      <span>🤖 {robotName} Frame Pose</span>
+                      <span className="text-[9px] text-slate-500">6-DoF Calibration</span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">Table (ArUco Frame):</span>
+                      <span className="text-slate-200">
+                        [{(currentX * 100).toFixed(1)}, {(currentY * 100).toFixed(1)}, {(currentZ * 100).toFixed(1)}] cm
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">Robot Base Frame:</span>
+                      <span className="text-indigo-300 font-semibold">
+                        [{(robotX * 100).toFixed(1)}, {(robotY * 100).toFixed(1)}, {(robotZ * 100).toFixed(1)}] cm
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">Pitch Angle:</span>
+                      <span className="text-amber-300">
+                        {((currentPose[4] || 0) * (180 / Math.PI)).toFixed(1)}°
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-slate-300">
+                      <span className="text-slate-400">Roll / Yaw:</span>
+                      <span className="text-slate-300">
+                        {((currentPose[3] || 0) * (180 / Math.PI)).toFixed(1)}° / {((currentPose[5] || 0) * (180 / Math.PI)).toFixed(1)}°
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Color-Coded CV Legend */}
               <div className="flex items-center gap-4 text-[10px] text-slate-400 border-t border-slate-800/80 pt-1.5 flex-wrap">
