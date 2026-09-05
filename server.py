@@ -638,7 +638,17 @@ async def save_recording(
         print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Executing Server-Side Sensory Fusion (ArUco + Scene Feature Map + 100Hz IMU EKF)...")
 
         # 4. SERVER-SIDE COMPUTATION: ArUco + Feature Extraction + 12-State EKF Trajectory Reconstruction
-        anchored_poses = visual_tracker.process_video_and_imu(video_path, parsed_imu, fps=fps)
+        dev_video_filename = "dev_visualization.mp4"
+        dev_video_path = os.path.join(ep_dir, dev_video_filename)
+        dev_video_url = f"/recordings/{ep_uid}/{dev_video_filename}"
+
+        anchored_poses, dev_telemetry = visual_tracker.process_video_and_imu(
+            video_path,
+            parsed_imu,
+            fps=fps,
+            output_dev_video_path=dev_video_path,
+            return_dev_info=True
+        )
 
         # 5. Gripper state heuristic
         gripper_states = []
@@ -657,6 +667,8 @@ async def save_recording(
             'task': task,
             'video_path': video_path,
             'video_url': video_url,
+            'dev_video_url': dev_video_url,
+            'dev_telemetry': dev_telemetry,
             'num_frames': len(anchored_poses),
             'fps': fps,
             'duration': len(anchored_poses) / fps,
@@ -710,18 +722,29 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(video_path, fourcc, fps, (640, 480))
 
+    dev_video_filename = "dev_visualization.mp4"
+    dev_video_path = os.path.join(ep_dir, dev_video_filename)
+    dev_video_url = f"/recordings/{sample_uid}/{dev_video_filename}"
+    dev_out = cv2.VideoWriter(dev_video_path, fourcc, fps, (640, 480))
+
     marker_img = visual_tracker.generate_marker_image(marker_id=0, side_pixels=140, border_pixels=10)
     mh, mw = marker_img.shape
+    my, mx = 240, 250
+    marker_corners = [np.array([[[mx, my], [mx + mw, my], [mx + mw, my + mh], [mx, my + mh]]], dtype=np.float32)]
+
+    cam_k, dist = visual_tracker.estimate_camera_matrix(640, 480, hfov_degrees=80.0)
+    rvec_sim = np.array([2.1, 0.0, 0.0], dtype=np.float32)
+    tvec_sim = np.array([-0.05, 0.06, 0.36], dtype=np.float32)
 
     anchored_poses = visual_tracker.generate_synthetic_anchored_trajectory(num_frames=frame_count, shape=shape)
     gripper_states = []
+    dev_telemetry = []
 
     for i in range(frame_count):
         # Draw wooden table background
         frame = np.full((480, 640, 3), (35, 45, 60), dtype=np.uint8)
         
         # Draw ArUco marker flat on table center
-        my, mx = 240, 250
         frame[my:my+mh, mx:mx+mw] = cv2.cvtColor(marker_img, cv2.COLOR_GRAY2BGR)
 
         # Draw hand trajectory target
@@ -734,10 +757,55 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
         cv2.putText(frame, f"Z (Height above marker): {p[2]*100:.1f} cm", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (129, 140, 248), 2)
         
         out.write(frame)
+
+        # Render simulated Dev View frame
+        synth_pts = np.array([
+            [80 + (j * 52 + i * 2) % 480, 120 + (j * 34 + i) % 280]
+            for j in range(24)
+        ], dtype=np.float32)
+        synth_prev = synth_pts - np.array([1.2 * np.cos(i * 0.08), 0.8 * np.sin(i * 0.08)], dtype=np.float32)
+        synth_lms = {
+            j: np.array([0.05 * np.cos(j * 0.5), 0.05 * np.sin(j * 0.5), 0.0], dtype=np.float32)
+            for j in range(12)
+        }
+        mode_src = "dual_aruco" if i < 60 else "feature_pnp"
+
+        dev_frame = visual_tracker.render_dev_frame(
+            frame=frame,
+            camera_matrix=cam_k,
+            dist_coeffs=dist,
+            frame_idx=i,
+            total_frames=frame_count,
+            fps=fps,
+            p_world=np.array([p[0], p[1], p[2]]),
+            euler=np.array([p[3], p[4], p[5]]),
+            rvec=rvec_sim,
+            tvec=tvec_sim,
+            source=mode_src,
+            corners=marker_corners if mode_src == "dual_aruco" else None,
+            ids_list=[0],
+            tracked_pts=synth_pts,
+            prev_pts=synth_prev,
+            landmarks_3d=synth_lms
+        )
+        dev_out.write(dev_frame)
+
+        dev_telemetry.append({
+            'frame_idx': i,
+            'source': mode_src,
+            'num_landmarks': len(synth_lms),
+            'num_features': len(synth_pts),
+            'is_dual': True if mode_src == "dual_aruco" else False,
+            'tags_detected': [0] if mode_src == "dual_aruco" else [],
+            'pose': [float(p[0]), float(p[1]), float(p[2])],
+            'euler': [float(p[3]), float(p[4]), float(p[5])]
+        })
+
         g = 100.0 if i < 60 else 10.0
         gripper_states.append(g)
 
     out.release()
+    dev_out.release()
 
     anchored_poses = np.array(anchored_poses)
     actions = np.roll(anchored_poses, -1, axis=0)
@@ -750,6 +818,8 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
         'task': task,
         'video_path': video_path,
         'video_url': video_url,
+        'dev_video_url': dev_video_url,
+        'dev_telemetry': dev_telemetry,
         'num_frames': frame_count,
         'fps': fps,
         'duration': frame_count / fps,
@@ -810,7 +880,18 @@ async def reprocess_episode(episode_index: int):
         return JSONResponse({"status": "error", "message": "Episode video file missing"}, status_code=400)
 
     fps = target_ep.get('fps', 30.0)
-    new_poses = visual_tracker.reprocess_episode_trajectory(video_path, imu_data, fps=fps)
+    ep_dir = os.path.dirname(video_path)
+    dev_video_path = os.path.join(ep_dir, "dev_visualization.mp4")
+    ep_uid = target_ep.get('episode_id', f"episode_{episode_index}")
+    dev_video_url = f"/recordings/{ep_uid}/dev_visualization.mp4"
+
+    new_poses, dev_telemetry = visual_tracker.reprocess_episode_trajectory(
+        video_path,
+        imu_data,
+        fps=fps,
+        output_dev_video_path=dev_video_path,
+        return_dev_info=True
+    )
     new_poses = np.array(new_poses)
 
     target_ep['poses'] = new_poses.tolist()
@@ -818,12 +899,53 @@ async def reprocess_episode(episode_index: int):
     actions = np.roll(new_poses, -1, axis=0)
     actions[-1] = new_poses[-1]
     target_ep['actions'] = actions.tolist()
+    target_ep['dev_video_url'] = dev_video_url
+    target_ep['dev_telemetry'] = dev_telemetry
 
     return JSONResponse({
         "status": "success",
         "episode_index": episode_index,
         "num_frames": len(new_poses),
-        "poses": new_poses.tolist()
+        "poses": new_poses.tolist(),
+        "dev_video_url": dev_video_url
+    })
+
+@app.post("/api/episodes/{episode_index}/dev_video")
+async def generate_episode_dev_video(episode_index: int):
+    """
+    Ensures that a developer diagnostic video (dev_visualization.mp4) exists for an episode,
+    generating it on-demand if it does not already exist.
+    """
+    global EPISODES_DB
+    target_ep = next((e for e in EPISODES_DB if e['episode_index'] == episode_index), None)
+    if not target_ep:
+        return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+
+    video_path = target_ep.get('video_path', '')
+    if not os.path.exists(video_path):
+        return JSONResponse({"status": "error", "message": "Video recording missing"}, status_code=400)
+
+    ep_dir = os.path.dirname(video_path)
+    dev_video_path = os.path.join(ep_dir, "dev_visualization.mp4")
+    ep_uid = target_ep.get('episode_id', f"episode_{episode_index}")
+    dev_video_url = f"/recordings/{ep_uid}/dev_visualization.mp4"
+
+    if not os.path.exists(dev_video_path) or target_ep.get('dev_telemetry') is None:
+        fps = target_ep.get('fps', 30.0)
+        _, dev_telemetry = visual_tracker.process_video_and_imu(
+            video_path,
+            target_ep.get('imu_data', []),
+            fps=fps,
+            output_dev_video_path=dev_video_path,
+            return_dev_info=True
+        )
+        target_ep['dev_telemetry'] = dev_telemetry
+
+    target_ep['dev_video_url'] = dev_video_url
+    return JSONResponse({
+        "status": "success",
+        "dev_video_url": dev_video_url,
+        "dev_telemetry": target_ep.get('dev_telemetry', [])
     })
 
 @app.get("/api/robot/config")
