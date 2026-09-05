@@ -7,7 +7,8 @@ export default function VideoPlayer({
   currentFrameIndex,
   totalFrames,
   fps = 30,
-  onTimeUpdate
+  onTimeUpdate,
+  showBadge = true
 }) {
   const videoRef = useRef(null);
   const [videoDims, setVideoDims] = useState(null);
@@ -49,7 +50,7 @@ export default function VideoPlayer({
   };
 
   return (
-    <div className="w-full h-full relative rounded-2xl overflow-hidden glass-card flex items-center justify-center bg-black/95">
+    <div className="w-full h-full relative rounded-2xl overflow-hidden glass-card flex items-center justify-center bg-black/95 select-none">
       {videoUrl ? (
         <video
           ref={videoRef}
@@ -71,17 +72,19 @@ export default function VideoPlayer({
         </div>
       )}
 
-      {/* Top Left: Viewfinder Stream & Aspect Ratio Pill */}
-      <div className="absolute top-3 left-3 bg-slate-900/85 backdrop-blur-md border border-slate-700/60 px-3 py-1.5 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2 pointer-events-none z-10">
-        <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
-        <span>Camera Stream</span>
-        {videoDims && (
-          <>
-            <span className="text-slate-600">|</span>
-            <span className="text-slate-400 font-mono text-[10px]">{videoDims}</span>
-          </>
-        )}
-      </div>
+      {/* Top Left: Viewfinder Stream & Aspect Ratio Pill (if showBadge is true) */}
+      {showBadge && (
+        <div className="absolute top-3 left-3 bg-slate-900/85 backdrop-blur-md border border-slate-700/60 px-3 py-1.5 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2 pointer-events-none z-10">
+          <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
+          <span>Camera Stream</span>
+          {videoDims && (
+            <>
+              <span className="text-slate-600">|</span>
+              <span className="text-slate-400 font-mono text-[10px]">{videoDims}</span>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

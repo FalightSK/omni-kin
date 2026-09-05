@@ -12,6 +12,11 @@ import {
   Bot,
   Columns,
   Rows,
+  AppWindow,
+  Maximize2,
+  Minimize2,
+  Minus,
+  Video,
   PanelRightClose,
   PanelRightOpen,
   GripHorizontal,
@@ -31,9 +36,13 @@ export default function Dashboard({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
 
-  // Layout Configuration: Default to 'vertical' stack as requested
-  const [layoutOrientation, setLayoutOrientation] = useState('vertical'); // 'vertical' (top/bottom) or 'horizontal' (side-by-side)
-  const [splitRatio, setSplitRatio] = useState(50); // percentage (15 to 85, or 100 / 0)
+  // Layout Configuration: Default to 'pip' (Big 3D Trajectory with anchored bottom-right Camera)
+  const [layoutMode, setLayoutMode] = useState('pip'); // 'pip' (Default), 'vertical', or 'horizontal'
+  const [pipSize, setPipSize] = useState('medium'); // 'small', 'medium', 'large'
+  const [isPipOpen, setIsPipOpen] = useState(true);
+
+  // Split ratio for alternative split modes
+  const [splitRatio, setSplitRatio] = useState(55);
   const [isDragging, setIsDragging] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const splitContainerRef = useRef(null);
@@ -64,19 +73,19 @@ export default function Dashboard({
     return () => clearInterval(interval);
   }, [isPlaying, totalFrames, activeEp?.fps]);
 
-  // Handle Dragging Splitter (supports both vertical stack row-resize and horizontal col-resize)
+  // Handle Dragging Splitter in split modes
   useEffect(() => {
     const handleMouseMove = (e) => {
       if (!isDragging || !splitContainerRef.current) return;
       const rect = splitContainerRef.current.getBoundingClientRect();
 
-      if (layoutOrientation === 'vertical') {
+      if (layoutMode === 'vertical') {
         const clientY = e.clientY ?? (e.touches && e.touches[0]?.clientY);
         if (clientY === undefined) return;
         const offset = clientY - rect.top;
         const newRatio = (offset / rect.height) * 100;
         setSplitRatio(Math.min(85, Math.max(15, newRatio)));
-      } else {
+      } else if (layoutMode === 'horizontal') {
         const clientX = e.clientX ?? (e.touches && e.touches[0]?.clientX);
         if (clientX === undefined) return;
         const offset = clientX - rect.left;
@@ -101,7 +110,7 @@ export default function Dashboard({
       window.removeEventListener('touchmove', handleMouseMove);
       window.removeEventListener('touchend', handleMouseUp);
     };
-  }, [isDragging, layoutOrientation]);
+  }, [isDragging, layoutMode]);
 
   const currentX = currentPose[0] || 0;
   const currentY = currentPose[1] || 0;
@@ -135,105 +144,93 @@ export default function Dashboard({
     <div
       className={`flex-1 p-4 grid gap-4 overflow-hidden h-[calc(100vh-60px)] transition-all ${
         isSidebarOpen ? 'grid-cols-1 lg:grid-cols-4' : 'grid-cols-1'
-      } ${isDragging ? (layoutOrientation === 'vertical' ? 'select-none cursor-row-resize' : 'select-none cursor-col-resize') : ''}`}
+      } ${isDragging ? 'select-none' : ''}`}
     >
-      {/* Main Center Area: Stacked Viewports & Timeline */}
+      {/* Main Center Area: Big 3D Preview with Inset Camera & Timeline */}
       <div className={`${isSidebarOpen ? 'lg:col-span-3' : 'w-full'} flex flex-col gap-3 h-full min-h-0`}>
-        {/* Top Control Bar for Viewport Layout Adjustments */}
+        {/* Top Control Bar for Layout Modes */}
         <div className="flex items-center justify-between px-1 text-xs">
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Orientation Toggle: Vertical Stack (Default) vs Side-by-Side */}
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+              <span>View Mode:</span>
+            </span>
+
+            {/* Layout Mode Selector Pills */}
             <div className="flex items-center gap-1 bg-slate-900/90 p-0.5 rounded-lg border border-slate-800">
               <button
-                onClick={() => setLayoutOrientation('vertical')}
+                onClick={() => setLayoutMode('pip')}
                 className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition-all ${
-                  layoutOrientation === 'vertical'
-                    ? 'bg-indigo-600 text-white shadow-sm'
+                  layoutMode === 'pip'
+                    ? 'bg-indigo-600 text-white shadow-sm font-semibold'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
                 }`}
-                title="Stack 3D Trajectory & Video in Vertical Axis (Top / Bottom)"
+                title="Big 3D Workspace with Anchored Camera Inset (PiP)"
+              >
+                <AppWindow className="w-3.5 h-3.5" />
+                <span>3D + Camera Inset</span>
+              </button>
+
+              <button
+                onClick={() => setLayoutMode('vertical')}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition-all ${
+                  layoutMode === 'vertical'
+                    ? 'bg-indigo-600 text-white shadow-sm font-semibold'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+                title="Stack 3D & Video Vertically (Top / Bottom)"
               >
                 <Rows className="w-3.5 h-3.5" />
                 <span>Vertical Stack</span>
               </button>
+
               <button
-                onClick={() => setLayoutOrientation('horizontal')}
+                onClick={() => setLayoutMode('horizontal')}
                 className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition-all ${
-                  layoutOrientation === 'horizontal'
-                    ? 'bg-indigo-600 text-white shadow-sm'
+                  layoutMode === 'horizontal'
+                    ? 'bg-indigo-600 text-white shadow-sm font-semibold'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
                 }`}
-                title="Place 3D Trajectory & Video Side-by-Side (Left / Right)"
+                title="Side-by-Side Split View"
               >
                 <Columns className="w-3.5 h-3.5" />
                 <span>Side-by-Side</span>
               </button>
             </div>
 
-            {/* Split Ratio Presets */}
-            <div className="flex items-center gap-1 bg-slate-900/80 p-0.5 rounded-lg border border-slate-800">
-              <button
-                onClick={() => setSplitRatio(50)}
-                className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                  splitRatio === 50
-                    ? 'bg-indigo-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                }`}
-                title="50% Top / 50% Bottom"
-              >
-                50:50
-              </button>
-              <button
-                onClick={() => setSplitRatio(60)}
-                className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                  splitRatio === 60
-                    ? 'bg-indigo-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                }`}
-                title="60% 3D / 40% Video"
-              >
-                3D Focus
-              </button>
-              <button
-                onClick={() => setSplitRatio(40)}
-                className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                  splitRatio === 40
-                    ? 'bg-indigo-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                }`}
-                title="40% 3D / 60% Video"
-              >
-                Video Focus
-              </button>
-              <button
-                onClick={() => setSplitRatio(100)}
-                className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                  splitRatio === 100
-                    ? 'bg-indigo-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                }`}
-                title="Full 3D Viewport"
-              >
-                Max 3D
-              </button>
-              <button
-                onClick={() => setSplitRatio(0)}
-                className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                  splitRatio === 0
-                    ? 'bg-indigo-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                }`}
-                title="Full Video Viewport"
-              >
-                Max Video
-              </button>
-            </div>
+            {/* PiP Specific Size Controls when in PiP mode */}
+            {layoutMode === 'pip' && isPipOpen && (
+              <div className="flex items-center gap-1 bg-slate-900/80 p-0.5 rounded-lg border border-slate-800 text-[11px]">
+                <span className="text-slate-500 px-1.5 text-[10px] uppercase font-mono">Camera:</span>
+                <button
+                  onClick={() => setPipSize('small')}
+                  className={`px-2 py-0.5 rounded transition-all ${
+                    pipSize === 'small' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Small
+                </button>
+                <button
+                  onClick={() => setPipSize('medium')}
+                  className={`px-2 py-0.5 rounded transition-all ${
+                    pipSize === 'medium' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Medium
+                </button>
+                <button
+                  onClick={() => setPipSize('large')}
+                  className={`px-2 py-0.5 rounded transition-all ${
+                    pipSize === 'large' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Large
+                </button>
+              </div>
+            )}
           </div>
 
+          {/* Right: Sidebar Collapse/Expand Toggle */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] text-slate-500 font-mono hidden sm:inline">
-              {splitRatio}% 3D • {100 - splitRatio}% Video
-            </span>
             <button
               onClick={() => setIsSidebarOpen(!isSidebarOpen)}
               className="px-2.5 py-1 rounded-lg bg-slate-900/80 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-slate-200 flex items-center gap-1.5 transition-all"
@@ -254,20 +251,101 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* Viewports Container: Stacked Vertically by default */}
-        <div
-          ref={splitContainerRef}
-          className={`flex ${
-            layoutOrientation === 'vertical' ? 'flex-col' : 'flex-col md:flex-row'
-          } gap-0 flex-1 min-h-0 relative overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/40`}
-        >
-          {/* Top Panel (Vertical Stack) or Left Panel (Side-by-Side): 3D Trajectory Viewport */}
-          {splitRatio > 0 && (
+        {/* Viewport Area */}
+        {layoutMode === 'pip' ? (
+          /* ========================================================================= */
+          /* BIG 3D TRAJECTORY PREVIEW WITH ANCHORED BOTTOM-RIGHT CAMERA INSET         */
+          /* ========================================================================= */
+          <div className="flex-1 min-h-0 relative overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/40 shadow-xl">
+            {/* Primary Big 3D Workspace */}
+            <div className="w-full h-full relative">
+              <Viewport3D
+                trajectoryPoses={poses}
+                currentFrameIndex={currentFrameIndex}
+                robotConfig={robotConfig}
+              />
+            </div>
+
+            {/* Anchored Bottom-Right Camera View Panel */}
+            {isPipOpen ? (
+              <div
+                className={`absolute bottom-3 right-3 z-30 transition-all duration-200 rounded-2xl overflow-hidden border border-slate-700/80 bg-slate-950/95 backdrop-blur-xl shadow-2xl flex flex-col ${
+                  pipSize === 'large'
+                    ? 'w-96 md:w-[420px] h-60 md:h-64'
+                    : pipSize === 'medium'
+                    ? 'w-72 md:w-80 h-44 md:h-52'
+                    : 'w-56 h-36'
+                }`}
+              >
+                {/* Inset Header Bar */}
+                <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900/90 border-b border-slate-800 text-[11px] select-none">
+                  <div className="flex items-center gap-1.5 font-medium text-slate-200">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span className="tracking-wide">Camera View</span>
+                  </div>
+
+                  <div className="flex items-center gap-1 text-slate-400">
+                    {/* Size cycle button */}
+                    <button
+                      onClick={() =>
+                        setPipSize((prev) => (prev === 'small' ? 'medium' : prev === 'medium' ? 'large' : 'small'))
+                      }
+                      className="p-1 hover:text-white rounded hover:bg-slate-800 transition-colors"
+                      title={`Resize Camera Inset (Current: ${pipSize.toUpperCase()})`}
+                    >
+                      <Maximize2 className="w-3 h-3" />
+                    </button>
+                    {/* Minimize button */}
+                    <button
+                      onClick={() => setIsPipOpen(false)}
+                      className="p-1 hover:text-rose-400 rounded hover:bg-slate-800 transition-colors"
+                      title="Minimize Camera Inset"
+                    >
+                      <Minus className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Video Frame with preserved native aspect ratio */}
+                <div className="flex-1 min-h-0 relative bg-black flex items-center justify-center overflow-hidden">
+                  <VideoPlayer
+                    videoUrl={activeEp?.video_url}
+                    isPlaying={isPlaying}
+                    currentFrameIndex={currentFrameIndex}
+                    totalFrames={totalFrames}
+                    fps={activeEp?.fps || 30}
+                    showBadge={false}
+                  />
+                </div>
+              </div>
+            ) : (
+              /* Minimized Floating Inset Button in Bottom-Right */
+              <button
+                onClick={() => setIsPipOpen(true)}
+                className="absolute bottom-3 right-3 z-30 px-3 py-1.5 bg-slate-900/90 hover:bg-slate-800 backdrop-blur-md border border-slate-700/80 rounded-xl text-xs font-medium text-slate-300 hover:text-white shadow-xl flex items-center gap-2 transition-all active:scale-95"
+                title="Restore Camera View Inset"
+              >
+                <Video className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Show Camera View</span>
+              </button>
+            )}
+          </div>
+        ) : (
+          /* ========================================================================= */
+          /* ALTERNATIVE SPLIT MODES (VERTICAL STACK OR SIDE-BY-SIDE)                  */
+          /* ========================================================================= */
+          <div
+            ref={splitContainerRef}
+            className={`flex ${
+              layoutMode === 'vertical' ? 'flex-col' : 'flex-col md:flex-row'
+            } gap-0 flex-1 min-h-0 relative overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/40`}
+          >
+            {/* 3D Trajectory Viewport */}
             <div
               style={
-                layoutOrientation === 'vertical'
-                  ? { height: splitRatio === 100 ? '100%' : `${splitRatio}%`, width: '100%' }
-                  : { width: splitRatio === 100 ? '100%' : `${splitRatio}%`, height: '100%' }
+                layoutMode === 'vertical'
+                  ? { height: `${splitRatio}%`, width: '100%' }
+                  : { width: `${splitRatio}%`, height: '100%' }
               }
               className="relative overflow-hidden transition-[height,width] duration-75 ease-out"
             >
@@ -277,10 +355,8 @@ export default function Dashboard({
                 robotConfig={robotConfig}
               />
             </div>
-          )}
 
-          {/* Interactive Draggable Splitter Divider */}
-          {splitRatio > 0 && splitRatio < 100 && (
+            {/* Draggable Divider */}
             <div
               onMouseDown={(e) => {
                 e.preventDefault();
@@ -288,17 +364,12 @@ export default function Dashboard({
               }}
               onTouchStart={() => setIsDragging(true)}
               className={`z-30 items-center justify-center bg-slate-900/90 hover:bg-indigo-600/30 transition-all select-none group ${
-                layoutOrientation === 'vertical'
+                layoutMode === 'vertical'
                   ? 'flex h-2.5 hover:h-3.5 w-full cursor-row-resize border-y border-slate-800/90'
                   : 'hidden md:flex w-2.5 hover:w-3.5 h-full cursor-col-resize border-x border-slate-800/90'
               }`}
-              title={
-                layoutOrientation === 'vertical'
-                  ? 'Drag vertically to resize Top (3D) and Bottom (Video)'
-                  : 'Drag horizontally to resize Left (3D) and Right (Video)'
-              }
             >
-              {layoutOrientation === 'vertical' ? (
+              {layoutMode === 'vertical' ? (
                 <div className="w-12 h-1 rounded-full bg-slate-600 group-hover:bg-indigo-400 transition-colors flex items-center justify-center">
                   <GripHorizontal className="w-3.5 h-3.5 text-slate-400 group-hover:text-white" />
                 </div>
@@ -308,15 +379,13 @@ export default function Dashboard({
                 </div>
               )}
             </div>
-          )}
 
-          {/* Bottom Panel (Vertical Stack) or Right Panel (Side-by-Side): Synchronized Video Player */}
-          {splitRatio < 100 && (
+            {/* Video Player */}
             <div
               style={
-                layoutOrientation === 'vertical'
-                  ? { height: splitRatio === 0 ? '100%' : `${100 - splitRatio}%`, width: '100%' }
-                  : { width: splitRatio === 0 ? '100%' : `${100 - splitRatio}%`, height: '100%' }
+                layoutMode === 'vertical'
+                  ? { height: `${100 - splitRatio}%`, width: '100%' }
+                  : { width: `${100 - splitRatio}%`, height: '100%' }
               }
               className="relative overflow-hidden transition-[height,width] duration-75 ease-out"
             >
@@ -328,8 +397,8 @@ export default function Dashboard({
                 fps={activeEp?.fps || 30}
               />
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Timeline & Playback Controller */}
         <div className="glass-card p-4 rounded-2xl flex flex-col gap-3">
