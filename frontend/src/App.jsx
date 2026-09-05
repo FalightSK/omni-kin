@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard';
 import MobileLogger from './pages/MobileLogger';
 import EKFTuningModal from './components/EKFTuningModal';
 import RobotSetupModal from './components/RobotSetupModal';
+import ConnectPhoneModal from './components/ConnectPhoneModal';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 
 class ErrorBoundary extends Component {
@@ -52,6 +53,7 @@ export default function App() {
   const [selectedEpIdx, setSelectedEpIdx] = useState(-1);
   const [isEkfModalOpen, setIsEkfModalOpen] = useState(false);
   const [isRobotModalOpen, setIsRobotModalOpen] = useState(false);
+  const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [robotConfig, setRobotConfig] = useState({
     robot_type: 'so101',
     offset_x: 0.20,
@@ -141,6 +143,7 @@ export default function App() {
             setCurrentView={setCurrentView}
             onOpenEkfModal={() => setIsEkfModalOpen(true)}
             onOpenRobotModal={() => setIsRobotModalOpen(true)}
+            onOpenConnectModal={() => setIsConnectModalOpen(true)}
             onAddSample={handleAddSample}
             onExportLeRobot={handleExportLeRobot}
             robotConfig={robotConfig}
@@ -170,6 +173,11 @@ export default function App() {
             onClose={() => setIsRobotModalOpen(false)}
             robotConfig={robotConfig}
             onConfigSaved={(newConfig) => setRobotConfig(newConfig)}
+          />
+
+          <ConnectPhoneModal
+            isOpen={isConnectModalOpen}
+            onClose={() => setIsConnectModalOpen(false)}
           />
         </div>
       )}

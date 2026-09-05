@@ -955,30 +955,99 @@ async def export_lerobot():
             "message": f"LeRobot export failed: {str(err)}"
         }, status_code=500)
 
+@app.get("/api/server/info")
+async def get_server_info():
+    """
+    Returns server network configuration, local IP, and mobile URLs.
+    """
+    local_ip = get_local_ip()
+    ssl_cert = os.path.join(BASE_DIR, "cert.pem")
+    ssl_key = os.path.join(BASE_DIR, "key.pem")
+    has_ssl = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
+    return JSONResponse({
+        "local_ip": local_ip,
+        "http_port": 8000,
+        "https_port": 8443 if has_ssl else 8000,
+        "has_ssl": has_ssl,
+        "mobile_url": f"https://{local_ip}:8443/mobile" if has_ssl else f"http://{local_ip}:8000/mobile"
+    })
+
+@app.get("/api/mobile/qr")
+async def get_mobile_qr():
+    """
+    Generates an SVG QR code pointing directly to the mobile camera URL.
+    """
+    try:
+        import qrcode
+        import qrcode.image.svg
+        from fastapi.responses import Response
+
+        local_ip = get_local_ip()
+        ssl_cert = os.path.join(BASE_DIR, "cert.pem")
+        ssl_key = os.path.join(BASE_DIR, "key.pem")
+        has_ssl = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
+        mobile_url = f"https://{local_ip}:8443/mobile" if has_ssl else f"http://{local_ip}:8000/mobile"
+
+        factory = qrcode.image.svg.SvgImage
+        img = qrcode.make(mobile_url, image_factory=factory)
+        svg_content = img.to_string()
+        return Response(content=svg_content, media_type="image/svg+xml")
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 if __name__ == "__main__":
     import uvicorn
     import sys
+    import threading
+
     local_ip = get_local_ip()
 
     ssl_cert = os.path.join(BASE_DIR, "cert.pem")
     ssl_key = os.path.join(BASE_DIR, "key.pem")
     has_certs = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
     use_ssl = ("--ssl" in sys.argv or "-s" in sys.argv or has_certs) and ("--no-ssl" not in sys.argv)
-    protocol = "https" if use_ssl else "http"
 
-    print("\n" + "="*60)
-    print("ArUco-Anchored 3D Trajectory Collector Server Started!")
-    print("="*60)
-    print(f"Desktop Dashboard: {protocol}://localhost:8000")
-    print(f"Phone Mobile URL:  {protocol}://{local_ip}:8000/mobile")
-    print(f"Print ArUco Marker: {protocol}://localhost:8000/api/marker/image")
-    if use_ssl:
-        print("🔒 HTTPS Enabled (Self-Signed Cert)")
-        print("   On phone browser: tap 'Advanced' -> 'Proceed to site' to allow camera/IMU")
-    print("="*60 + "\n")
+    http_port = 8000
+    https_port = 8443
 
-    if use_ssl:
-        uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True, ssl_keyfile=ssl_key, ssl_certfile=ssl_cert)
+    print("\n" + "="*65)
+    print(" OmniKin 3D Trajectory Dataset Collector Server Started!")
+    print("="*65)
+    print(f" Desktop Dashboard (HTTP):  http://localhost:{http_port}")
+    if use_ssl and has_certs:
+        print(f" 📱 Mobile Logger  (HTTPS): https://{local_ip}:{https_port}/mobile")
+        print(f" 📱 Mobile Logger  (HTTP):  http://{local_ip}:{http_port}/mobile (auto-redirect)")
+        print(f" Print ArUco Marker:        http://localhost:{http_port}/api/marker/image")
+        print(f" Mobile QR Code:            http://localhost:{http_port}/api/mobile/qr")
+        print("\n [!] HTTPS Active on Port 8443 (Self-Signed SSL for Camera/IMU):")
+        print("     When opening on your mobile browser, tap:")
+        print(f"     - Android Chrome: 'Advanced' -> 'Proceed to {local_ip} (unsafe)'")
+        print("     - iOS Safari:     'Show Details' -> 'visit this website' -> 'Visit Website'")
     else:
-        uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+        print(f" 📱 Phone Mobile URL:        http://{local_ip}:{http_port}/mobile")
+        print(f" Print ArUco Marker:        http://localhost:{http_port}/api/marker/image")
+    print("="*65 + "\n")
+
+    if use_ssl and has_certs:
+        # Start HTTPS server on port 8443 in a background daemon thread
+        def run_https():
+            config_ssl = uvicorn.Config(
+                app,
+                host="0.0.0.0",
+                port=https_port,
+                ssl_keyfile=ssl_key,
+                ssl_certfile=ssl_cert,
+                log_level="warning"
+            )
+            server_ssl = uvicorn.Server(config_ssl)
+            server_ssl.run()
+
+        ssl_thread = threading.Thread(target=run_https, daemon=True)
+        ssl_thread.start()
+
+        # Run HTTP on port 8000 in the main thread
+        uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
+
 
