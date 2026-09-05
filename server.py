@@ -10,6 +10,7 @@ import json
 import socket
 import shutil
 import io
+import uuid
 import numpy as np
 import cv2
 
@@ -530,21 +531,49 @@ async def delete_episode(episode_index: int):
                     shutil.rmtree(ep_dir, ignore_errors=True)
         else:
             new_db.append(ep)
-    
-    EPISODES_DB = new_db
+
     if not found:
         return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
-    return JSONResponse({"status": "success", "message": f"Episode #{episode_index} deleted", "remaining": len(EPISODES_DB)})
+
+    # Re-index remaining episodes contiguously so episode_index is always 0..N-1
+    for idx, ep in enumerate(new_db):
+        ep['episode_index'] = idx
+
+    EPISODES_DB = new_db
+    return JSONResponse({
+        "status": "success",
+        "message": f"Episode #{episode_index} deleted",
+        "remaining": len(EPISODES_DB),
+        "episodes": EPISODES_DB
+    })
 
 @app.post("/api/episodes/clear")
 async def clear_all_episodes():
     global EPISODES_DB
-    for ep in EPISODES_DB:
-        if os.path.exists(ep.get('video_path', '')):
-            ep_dir = os.path.dirname(ep['video_path'])
-            shutil.rmtree(ep_dir, ignore_errors=True)
+    if os.path.exists(RECORDINGS_DIR):
+        for item in os.listdir(RECORDINGS_DIR):
+            p = os.path.join(RECORDINGS_DIR, item)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            elif item != '.gitkeep':
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+    if os.path.exists(EXPORT_DIR):
+        for item in os.listdir(EXPORT_DIR):
+            p = os.path.join(EXPORT_DIR, item)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            elif item != '.gitkeep':
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
     EPISODES_DB = []
-    return JSONResponse({"status": "success", "message": "All episodes cleared"})
+    return JSONResponse({"status": "success", "message": "All episodes and recordings cleared"})
 
 @app.post("/api/recordings/save")
 async def save_recording(
@@ -559,7 +588,8 @@ async def save_recording(
     """
     try:
         ep_idx = len(EPISODES_DB)
-        ep_dir = os.path.join(RECORDINGS_DIR, f"episode_{ep_idx:04d}")
+        ep_uid = f"rec_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+        ep_dir = os.path.join(RECORDINGS_DIR, ep_uid)
         os.makedirs(ep_dir, exist_ok=True)
 
         # 1. Preserve original video container extension (.webm or .mp4)
@@ -570,6 +600,7 @@ async def save_recording(
 
         video_filename = f"recording{ext}"
         video_path = os.path.join(ep_dir, video_filename)
+        video_url = f"/recordings/{ep_uid}/{video_filename}"
 
         print(f"\n[{time.strftime('%H:%M:%S')}] 📥 Server received upload request for Episode #{ep_idx} ({video.filename}, {video.content_type})")
 
@@ -622,9 +653,10 @@ async def save_recording(
 
         episode_data = {
             'episode_index': ep_idx,
+            'episode_id': ep_uid,
             'task': task,
             'video_path': video_path,
-            'video_url': f"/recordings/episode_{ep_idx:04d}/{video_filename}",
+            'video_url': video_url,
             'num_frames': len(anchored_poses),
             'fps': fps,
             'duration': len(anchored_poses) / fps,
@@ -665,12 +697,14 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
     Generates a synthetic 3D shape demonstration (e.g. 3D circle floating 20cm above ArUco marker).
     """
     ep_idx = len(EPISODES_DB)
-    ep_dir = os.path.join(RECORDINGS_DIR, f"episode_{ep_idx:04d}")
+    sample_uid = f"sample_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+    ep_dir = os.path.join(RECORDINGS_DIR, sample_uid)
     os.makedirs(ep_dir, exist_ok=True)
 
     frame_count = 90
     fps = 30.0
     video_path = os.path.join(ep_dir, "recording.mp4")
+    video_url = f"/recordings/{sample_uid}/recording.mp4"
 
     # Generate synthetic video stream showing the table and ArUco marker
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -712,9 +746,10 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
 
     episode_data = {
         'episode_index': ep_idx,
+        'episode_id': sample_uid,
         'task': task,
         'video_path': video_path,
-        'video_url': f"/recordings/episode_{ep_idx:04d}/recording.mp4",
+        'video_url': video_url,
         'num_frames': frame_count,
         'fps': fps,
         'duration': frame_count / fps,
