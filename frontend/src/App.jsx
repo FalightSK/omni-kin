@@ -1,9 +1,49 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Component } from 'react';
 import Navbar from './components/Navbar';
 import Dashboard from './pages/Dashboard';
 import MobileLogger from './pages/MobileLogger';
 import EKFTuningModal from './components/EKFTuningModal';
 import RobotSetupModal from './components/RobotSetupModal';
+import { AlertCircle, RefreshCw } from 'lucide-react';
+
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('ErrorBoundary caught an error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="fixed inset-0 bg-slate-950 text-white flex flex-col items-center justify-center p-6 text-center z-50">
+          <div className="w-16 h-16 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 mb-4">
+            <AlertCircle className="w-8 h-8" />
+          </div>
+          <h2 className="text-lg font-bold mb-1">Application Error</h2>
+          <p className="text-xs text-slate-400 max-w-md mb-4">
+            {this.state.error?.message || 'An unexpected rendering error occurred.'}
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs flex items-center gap-2"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Reload Application</span>
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function App() {
   const isMobilePath = typeof window !== 'undefined' && window.location.pathname.startsWith('/mobile');
@@ -85,55 +125,54 @@ export default function App() {
     );
   };
 
-  // If in mobile camera mode, render full-screen native camera UI without desktop Navbar
-  if (currentView === 'mobile') {
-    return (
-      <div className="w-screen h-[100dvh] bg-black text-gray-100 font-sans overflow-hidden select-none">
-        <MobileLogger
-          onUploadSuccess={fetchEpisodes}
-          onExit={() => setCurrentView('dashboard')}
-        />
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-[#060911] text-gray-100 flex flex-col font-sans">
-      <Navbar
-        currentView={currentView}
-        setCurrentView={setCurrentView}
-        onOpenEkfModal={() => setIsEkfModalOpen(true)}
-        onOpenRobotModal={() => setIsRobotModalOpen(true)}
-        onAddSample={handleAddSample}
-        onExportLeRobot={handleExportLeRobot}
-        robotConfig={robotConfig}
-      />
+    <ErrorBoundary>
+      {currentView === 'mobile' ? (
+        <div className="w-screen h-[100dvh] bg-black text-gray-100 font-sans overflow-hidden select-none">
+          <MobileLogger
+            onUploadSuccess={fetchEpisodes}
+            onExit={() => setCurrentView('dashboard')}
+          />
+        </div>
+      ) : (
+        <div className="min-h-screen bg-[#060911] text-gray-100 flex flex-col font-sans">
+          <Navbar
+            currentView={currentView}
+            setCurrentView={setCurrentView}
+            onOpenEkfModal={() => setIsEkfModalOpen(true)}
+            onOpenRobotModal={() => setIsRobotModalOpen(true)}
+            onAddSample={handleAddSample}
+            onExportLeRobot={handleExportLeRobot}
+            robotConfig={robotConfig}
+          />
 
-      <main className="flex-1 flex flex-col overflow-hidden">
-        <Dashboard
-          episodes={episodes}
-          selectedEpIdx={selectedEpIdx}
-          setSelectedEpIdx={setSelectedEpIdx}
-          onRefreshEpisodes={fetchEpisodes}
-          onDeleteEpisode={handleDeleteEpisode}
-          robotConfig={robotConfig}
-          onOpenRobotModal={() => setIsRobotModalOpen(true)}
-        />
-      </main>
+          <main className="flex-1 flex flex-col overflow-hidden">
+            <Dashboard
+              episodes={episodes}
+              selectedEpIdx={selectedEpIdx}
+              setSelectedEpIdx={setSelectedEpIdx}
+              onRefreshEpisodes={fetchEpisodes}
+              onDeleteEpisode={handleDeleteEpisode}
+              robotConfig={robotConfig}
+              onOpenRobotModal={() => setIsRobotModalOpen(true)}
+            />
+          </main>
 
-      <EKFTuningModal
-        isOpen={isEkfModalOpen}
-        onClose={() => setIsEkfModalOpen(false)}
-        activeEpisodeIndex={selectedEpIdx}
-        onReprocessComplete={handleReprocessComplete}
-      />
+          <EKFTuningModal
+            isOpen={isEkfModalOpen}
+            onClose={() => setIsEkfModalOpen(false)}
+            activeEpisodeIndex={selectedEpIdx}
+            onReprocessComplete={handleReprocessComplete}
+          />
 
-      <RobotSetupModal
-        isOpen={isRobotModalOpen}
-        onClose={() => setIsRobotModalOpen(false)}
-        robotConfig={robotConfig}
-        onConfigSaved={(newConfig) => setRobotConfig(newConfig)}
-      />
-    </div>
+          <RobotSetupModal
+            isOpen={isRobotModalOpen}
+            onClose={() => setIsRobotModalOpen(false)}
+            robotConfig={robotConfig}
+            onConfigSaved={(newConfig) => setRobotConfig(newConfig)}
+          />
+        </div>
+      )}
+    </ErrorBoundary>
   );
 }

@@ -1,8 +1,16 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { Video } from 'lucide-react';
 
-export default function VideoPlayer({ videoUrl, isPlaying, currentFrameIndex, totalFrames, fps = 30, onTimeUpdate }) {
+export default function VideoPlayer({
+  videoUrl,
+  isPlaying,
+  currentFrameIndex,
+  totalFrames,
+  fps = 30,
+  onTimeUpdate
+}) {
   const videoRef = useRef(null);
+  const [videoDims, setVideoDims] = useState(null);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -25,15 +33,31 @@ export default function VideoPlayer({ videoUrl, isPlaying, currentFrameIndex, to
     }
   }, [currentFrameIndex, fps, totalFrames]);
 
+  const handleLoadedMetadata = () => {
+    const video = videoRef.current;
+    if (video && video.videoWidth && video.videoHeight) {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      const ratio = (w / h).toFixed(2);
+      let aspectLabel = `${w}×${h}`;
+      if (Math.abs(w / h - 16 / 9) < 0.05) aspectLabel += ' (16:9)';
+      else if (Math.abs(w / h - 4 / 3) < 0.05) aspectLabel += ' (4:3)';
+      else if (Math.abs(w / h - 9 / 16) < 0.05) aspectLabel += ' (9:16)';
+      else aspectLabel += ` (${ratio}:1)`;
+      setVideoDims(aspectLabel);
+    }
+  };
+
   return (
-    <div className="w-full h-full relative rounded-2xl overflow-hidden glass-card flex items-center justify-center bg-black">
+    <div className="w-full h-full relative rounded-2xl overflow-hidden glass-card flex items-center justify-center bg-black/95">
       {videoUrl ? (
         <video
           ref={videoRef}
           src={videoUrl}
           playsInline
           muted
-          className="w-full h-full object-cover"
+          onLoadedMetadata={handleLoadedMetadata}
+          className="w-full h-full object-contain max-w-full max-h-full transition-all"
           onTimeUpdate={() => {
             if (videoRef.current && onTimeUpdate) {
               onTimeUpdate(videoRef.current.currentTime);
@@ -47,9 +71,16 @@ export default function VideoPlayer({ videoUrl, isPlaying, currentFrameIndex, to
         </div>
       )}
 
-      <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-md border border-slate-700/60 px-3 py-1.5 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2 pointer-events-none">
-        <span className="w-2 h-2 rounded-full bg-indigo-400" />
-        <span>Camera Viewfinder Stream</span>
+      {/* Top Left: Viewfinder Stream & Aspect Ratio Pill */}
+      <div className="absolute top-3 left-3 bg-slate-900/85 backdrop-blur-md border border-slate-700/60 px-3 py-1.5 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2 pointer-events-none z-10">
+        <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
+        <span>Camera Stream</span>
+        {videoDims && (
+          <>
+            <span className="text-slate-600">|</span>
+            <span className="text-slate-400 font-mono text-[10px]">{videoDims}</span>
+          </>
+        )}
       </div>
     </div>
   );
