@@ -1,5 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { RotateCcw, Eye, Play, Pause, Compass } from 'lucide-react';
 
 export default function Viewport3D({
   trajectoryPoses = [],
@@ -8,10 +10,15 @@ export default function Viewport3D({
 }) {
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
+  const cameraRef = useRef(null);
+  const controlsRef = useRef(null);
   const tubeMeshRef = useRef(null);
   const cursorMeshRef = useRef(null);
   const robotGroupRef = useRef(null);
   const offsetLineRef = useRef(null);
+
+  const [isAutoRotate, setIsAutoRotate] = useState(false);
+  const [activeView, setActiveView] = useState('iso');
 
   useEffect(() => {
     const container = mountRef.current;
@@ -22,25 +29,35 @@ export default function Viewport3D({
     scene.background = new THREE.Color(0x0a0e17);
     sceneRef.current = scene;
 
-    // 2. Camera Setup
-    const camera = new THREE.PerspectiveCamera(
-      45,
-      container.clientWidth / container.clientHeight,
-      0.01,
-      50
-    );
+    // 2. Camera Setup (Z is Up in robotics convention)
+    const width = container.clientWidth || 400;
+    const height = container.clientHeight || 300;
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 50);
     camera.position.set(0.42, -0.48, 0.42);
-    camera.up.set(0, 0, 1); // Z is Up
-    camera.lookAt(0.12, 0.05, 0.08);
+    camera.up.set(0, 0, 1);
+    camera.lookAt(0.15, 0.05, 0.08);
+    cameraRef.current = camera;
 
     // 3. Renderer Setup
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     container.appendChild(renderer.domElement);
 
-    // 4. Lighting
+    // 4. OrbitControls Setup
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0.15, 0.05, 0.08);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.minDistance = 0.08;
+    controls.maxDistance = 3.5;
+    controls.maxPolarAngle = Math.PI / 2 + 0.20; // Prevent looking completely underneath table
+    controls.autoRotate = isAutoRotate;
+    controls.autoRotateSpeed = 2.2;
+    controlsRef.current = controls;
+
+    // 5. Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.75);
     scene.add(ambientLight);
 
@@ -48,7 +65,7 @@ export default function Viewport3D({
     dirLight.position.set(1.0, -1.0, 2.0);
     scene.add(dirLight);
 
-    // 5. Workstation Tabletop Mesh
+    // 6. Workstation Tabletop Mesh
     const tableGeo = new THREE.BoxGeometry(0.90, 0.70, 0.02);
     const tableMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.45 });
     const tableMesh = new THREE.Mesh(tableGeo, tableMat);
@@ -61,7 +78,7 @@ export default function Viewport3D({
     gridHelper.position.set(0.18, 0.12, 0.001);
     scene.add(gridHelper);
 
-    // 6. Dual-ArUco Board Meshes
+    // 7. Dual-ArUco Board Meshes
     // Tag A (10cm) at (0, 0, 0)
     const tagAGeo = new THREE.PlaneGeometry(0.10, 0.10);
     const tagAMat = new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide });
@@ -81,7 +98,7 @@ export default function Viewport3D({
     axesGizmo.position.set(0, 0, 0.005);
     scene.add(axesGizmo);
 
-    // 7. Animated End-Effector Cursor Sphere
+    // 8. Animated End-Effector Cursor Sphere
     const cursorGeo = new THREE.SphereGeometry(0.012, 32, 32);
     const cursorMat = new THREE.MeshStandardMaterial({
       color: 0xf59e0b,
@@ -96,27 +113,65 @@ export default function Viewport3D({
     let animId;
     const animate = () => {
       animId = requestAnimationFrame(animate);
+      controls.update();
       renderer.render(scene, camera);
     };
     animate();
 
-    const handleResize = () => {
-      if (!container) return;
-      camera.aspect = container.clientWidth / container.clientHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(container.clientWidth, container.clientHeight);
-    };
-
-    window.addEventListener('resize', handleResize);
+    // 9. ResizeObserver to dynamically update when panels are dragged or window is resized
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width: newW, height: newH } = entry.contentRect;
+        if (newW > 10 && newH > 10) {
+          camera.aspect = newW / newH;
+          camera.updateProjectionMatrix();
+          renderer.setSize(newW, newH);
+        }
+      }
+    });
+    resizeObserver.observe(container);
 
     return () => {
       cancelAnimationFrame(animId);
-      window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
+      controls.dispose();
       if (renderer.domElement && container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
       }
     };
   }, []);
+
+  // Sync auto-rotate with controls
+  useEffect(() => {
+    if (controlsRef.current) {
+      controlsRef.current.autoRotate = isAutoRotate;
+    }
+  }, [isAutoRotate]);
+
+  // Set Camera View Angle Preset
+  const setViewPreset = (view) => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+
+    setActiveView(view);
+    setIsAutoRotate(false);
+
+    if (view === 'iso') {
+      camera.position.set(0.42, -0.48, 0.42);
+      controls.target.set(0.15, 0.05, 0.08);
+    } else if (view === 'top') {
+      camera.position.set(0.15, 0.05, 0.85);
+      controls.target.set(0.15, 0.05, 0.0);
+    } else if (view === 'front') {
+      camera.position.set(0.15, -0.70, 0.15);
+      controls.target.set(0.15, 0.05, 0.08);
+    } else if (view === 'side') {
+      camera.position.set(0.85, 0.05, 0.15);
+      controls.target.set(0.15, 0.05, 0.08);
+    }
+    controls.update();
+  };
 
   // Update Trajectory Tube & Cursor when trajectoryPoses or currentFrameIndex changes
   useEffect(() => {
@@ -249,7 +304,7 @@ export default function Viewport3D({
     shoulderSphere.position.set(0, 0, L1);
     robotGroup.add(shoulderSphere);
 
-    // Upper arm link (L2) angled up & forward (approx 60 deg)
+    // Upper arm link (L2) angled up & forward (approx 55 deg)
     const upperArmAngle = THREE.MathUtils.degToRad(55);
     const upperArmDx = L2 * Math.cos(upperArmAngle);
     const upperArmDz = L2 * Math.sin(upperArmAngle);
@@ -330,17 +385,73 @@ export default function Viewport3D({
   const { offset_x = 0.20, offset_y = 0.00, yaw_deg = 0.0, robot_type = 'so101' } = robotConfig || {};
 
   return (
-    <div className="w-full h-full relative rounded-2xl overflow-hidden glass-card">
-      <div ref={mountRef} className="w-full h-full" />
+    <div className="w-full h-full relative rounded-2xl overflow-hidden glass-card group">
+      <div ref={mountRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
 
       {/* Top Left: ArUco Origin & Robot Base Info Pill */}
-      <div className="absolute top-3 left-3 bg-slate-900/85 backdrop-blur-md border border-slate-700/70 px-3 py-1.5 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2.5 pointer-events-none">
+      <div className="absolute top-3 left-3 bg-slate-900/85 backdrop-blur-md border border-slate-700/70 px-3 py-1.5 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2.5 pointer-events-none z-10">
         <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
         <span>ArUco Origin: (0,0,0)</span>
         <span className="text-slate-500">|</span>
         <span className="font-semibold text-indigo-300">
           🤖 {robot_type.toUpperCase()} Base: ({(offset_x * 100).toFixed(0)}cm, {(offset_y * 100).toFixed(0)}cm, {yaw_deg.toFixed(0)}°)
         </span>
+      </div>
+
+      {/* Top Right: View Angle Controls & Auto-Rotate Overlay */}
+      <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/85 backdrop-blur-md border border-slate-700/70 p-1 rounded-xl text-[11px] z-10 shadow-lg">
+        <button
+          onClick={() => setViewPreset('iso')}
+          className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+            activeView === 'iso' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+          }`}
+          title="Isometric View"
+        >
+          Iso
+        </button>
+        <button
+          onClick={() => setViewPreset('top')}
+          className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+            activeView === 'top' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+          }`}
+          title="Top-Down View (XY Table Plane)"
+        >
+          Top
+        </button>
+        <button
+          onClick={() => setViewPreset('front')}
+          className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+            activeView === 'front' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+          }`}
+          title="Front View"
+        >
+          Front
+        </button>
+        <button
+          onClick={() => setViewPreset('side')}
+          className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+            activeView === 'side' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+          }`}
+          title="Side View"
+        >
+          Side
+        </button>
+        <div className="w-[1px] h-4 bg-slate-700 mx-0.5" />
+        <button
+          onClick={() => setIsAutoRotate(!isAutoRotate)}
+          className={`p-1.5 rounded-lg transition-all flex items-center gap-1 ${
+            isAutoRotate ? 'bg-purple-600 text-white animate-pulse' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+          }`}
+          title={isAutoRotate ? "Stop Auto-Rotation" : "Start Auto-Rotation"}
+        >
+          <RotateCcw className={`w-3.5 h-3.5 ${isAutoRotate ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+
+      {/* Bottom Left: Interactive Control Hint */}
+      <div className="absolute bottom-3 left-3 bg-slate-900/75 backdrop-blur-sm border border-slate-800/80 px-2.5 py-1 rounded-lg text-[10px] text-slate-400 font-mono pointer-events-none z-10 flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
+        <Compass className="w-3 h-3 text-indigo-400" />
+        <span>Drag: Rotate • Right-drag: Pan • Scroll: Zoom</span>
       </div>
     </div>
   );

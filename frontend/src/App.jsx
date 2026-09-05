@@ -6,7 +6,8 @@ import EKFTuningModal from './components/EKFTuningModal';
 import RobotSetupModal from './components/RobotSetupModal';
 
 export default function App() {
-  const [currentView, setCurrentView] = useState('dashboard');
+  const isMobilePath = typeof window !== 'undefined' && window.location.pathname.startsWith('/mobile');
+  const [currentView, setCurrentView] = useState(isMobilePath ? 'mobile' : 'dashboard');
   const [episodes, setEpisodes] = useState([]);
   const [selectedEpIdx, setSelectedEpIdx] = useState(-1);
   const [isEkfModalOpen, setIsEkfModalOpen] = useState(false);
@@ -84,6 +85,18 @@ export default function App() {
     );
   };
 
+  // If in mobile camera mode, render full-screen native camera UI without desktop Navbar
+  if (currentView === 'mobile') {
+    return (
+      <div className="w-screen h-[100dvh] bg-black text-gray-100 font-sans overflow-hidden select-none">
+        <MobileLogger
+          onUploadSuccess={fetchEpisodes}
+          onExit={() => setCurrentView('dashboard')}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#060911] text-gray-100 flex flex-col font-sans">
       <Navbar
@@ -97,19 +110,15 @@ export default function App() {
       />
 
       <main className="flex-1 flex flex-col overflow-hidden">
-        {currentView === 'dashboard' ? (
-          <Dashboard
-            episodes={episodes}
-            selectedEpIdx={selectedEpIdx}
-            setSelectedEpIdx={setSelectedEpIdx}
-            onRefreshEpisodes={fetchEpisodes}
-            onDeleteEpisode={handleDeleteEpisode}
-            robotConfig={robotConfig}
-            onOpenRobotModal={() => setIsRobotModalOpen(true)}
-          />
-        ) : (
-          <MobileLogger onUploadSuccess={fetchEpisodes} />
-        )}
+        <Dashboard
+          episodes={episodes}
+          selectedEpIdx={selectedEpIdx}
+          setSelectedEpIdx={setSelectedEpIdx}
+          onRefreshEpisodes={fetchEpisodes}
+          onDeleteEpisode={handleDeleteEpisode}
+          robotConfig={robotConfig}
+          onOpenRobotModal={() => setIsRobotModalOpen(true)}
+        />
       </main>
 
       <EKFTuningModal

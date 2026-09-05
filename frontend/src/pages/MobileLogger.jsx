@@ -1,17 +1,41 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Radio, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
+import {
+  Camera,
+  ChevronLeft,
+  RefreshCw,
+  FlipHorizontal,
+  Activity,
+  CheckCircle2,
+  AlertCircle,
+  Sparkles,
+  Sliders
+} from 'lucide-react';
 
-export default function MobileLogger({ onUploadSuccess }) {
+const TASK_MODES = [
+  { id: 'draw 3d circle', label: 'CIRCLE' },
+  { id: 'reach to apple', label: 'APPLE' },
+  { id: 'reach to banana', label: 'BANANA' },
+  { id: 'pick up cup', label: 'PICK CUP' },
+  { id: 'custom', label: 'CUSTOM' }
+];
+
+export default function MobileLogger({ onUploadSuccess, onExit }) {
   const videoRef = useRef(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [taskPreset, setTaskPreset] = useState('draw 3d circle');
-  const [taskCustom, setTaskCustom] = useState('');
-  const [statusMsg, setStatusMsg] = useState('Point at ArUco marker on table');
+  const [activeModeIdx, setActiveModeIdx] = useState(0);
+  const [customTask, setCustomTask] = useState('');
+  const [statusMsg, setStatusMsg] = useState('');
   const [recTime, setRecTime] = useState('00:00.0');
+  const [imuHz, setImuHz] = useState(0);
+  const [showTelemetry, setShowTelemetry] = useState(false);
   const [accelData, setAccelData] = useState([0, 0, 9.81]);
   const [gyroData, setGyroData] = useState([0, 0, 0]);
-  const [imuHz, setImuHz] = useState(0);
+  const [focusPoint, setFocusPoint] = useState(null);
+
+  // Camera devices
+  const [devices, setDevices] = useState([]);
+  const [currentDeviceIdx, setCurrentDeviceIdx] = useState(0);
 
   const mediaRecorderRef = useRef(null);
   const recordedChunksRef = useRef([]);
@@ -20,7 +44,19 @@ export default function MobileLogger({ onUploadSuccess }) {
   const startTimeRef = useRef(0);
   const timerIntervalRef = useRef(null);
 
-  const startCamera = async () => {
+  // Enumerate cameras
+  const refreshDevices = async () => {
+    try {
+      const allDevs = await navigator.mediaDevices.enumerateDevices();
+      const videoDevs = allDevs.filter((d) => d.kind === 'videoinput');
+      setDevices(videoDevs);
+    } catch (e) {
+      console.log('Error enumerating devices:', e);
+    }
+  };
+
+  const startCamera = async (targetDeviceId = null) => {
+    // Request motion permission if iOS 13+
     if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
       try {
         await DeviceMotionEvent.requestPermission();
@@ -30,59 +66,74 @@ export default function MobileLogger({ onUploadSuccess }) {
     }
 
     try {
-      // Find widest available back camera if multiple cameras exist
-      let selectedDeviceId = null;
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = devices.filter(d => d.kind === 'videoinput');
-        // Look for wide/ultrawide rear camera
-        const wideCam = videoDevices.find(d => 
-          (d.label.toLowerCase().includes('wide') || d.label.toLowerCase().includes('ultra') || d.label.toLowerCase().includes('0.5')) &&
-          !d.label.toLowerCase().includes('front')
-        );
-        if (wideCam) {
-          selectedDeviceId = wideCam.deviceId;
+      await refreshDevices();
+
+      // Find widest available rear camera if targetDeviceId is not provided
+      let selectedId = targetDeviceId;
+      if (!selectedId) {
+        try {
+          const devList = await navigator.mediaDevices.enumerateDevices();
+          const videoDevs = devList.filter((d) => d.kind === 'videoinput');
+          const wideCam = videoDevs.find(
+            (d) =>
+              (d.label.toLowerCase().includes('wide') ||
+                d.label.toLowerCase().includes('ultra') ||
+                d.label.toLowerCase().includes('0.5')) &&
+              !d.label.toLowerCase().includes('front')
+          );
+          if (wideCam) selectedId = wideCam.deviceId;
+        } catch (e) {
+          console.log(e);
         }
-      } catch (e) {
-        console.log('Device enumeration error:', e);
       }
 
-      const videoConstraints = selectedDeviceId
-        ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-        : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } };
+      // Stop existing stream if any
+      if (videoRef.current && videoRef.current.srcObject) {
+        const tracks = videoRef.current.srcObject.getTracks();
+        tracks.forEach((t) => t.stop());
+      }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraints,
+      const constraints = {
+        video: selectedId
+          ? { deviceId: { exact: selectedId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+          : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
-      });
+      };
 
-      // Try setting minimum zoom for widest possible field of view
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      // Try setting minimum zoom for widest angle
       try {
         const [track] = stream.getVideoTracks();
         if (track && track.getCapabilities) {
-          const capabilities = track.getCapabilities();
-          if (capabilities.zoom && capabilities.zoom.min !== undefined) {
-            await track.applyConstraints({
-              advanced: [{ zoom: capabilities.zoom.min }]
-            });
-            console.log("Wide camera lens enabled at zoom:", capabilities.zoom.min);
+          const cap = track.getCapabilities();
+          if (cap.zoom && cap.zoom.min !== undefined) {
+            await track.applyConstraints({ advanced: [{ zoom: cap.zoom.min }] });
           }
         }
       } catch (zoomErr) {
-        console.log("Could not apply wide zoom constraint:", zoomErr);
+        console.log('Wide zoom constraint error:', zoomErr);
       }
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
+
       setIsCameraActive(true);
-      setStatusMsg('Ready: ArUco + Feature Extraction + IMU Fusion Active');
+      setStatusMsg('');
       setupImuListeners();
     } catch (err) {
       console.error(err);
       setStatusMsg('Camera error: ' + err.message);
     }
+  };
+
+  const switchCamera = async () => {
+    if (devices.length < 2) return;
+    const nextIdx = (currentDeviceIdx + 1) % devices.length;
+    setCurrentDeviceIdx(nextIdx);
+    await startCamera(devices[nextIdx].deviceId);
   };
 
   const setupImuListeners = () => {
@@ -111,10 +162,12 @@ export default function MobileLogger({ onUploadSuccess }) {
       });
     }
 
-    setInterval(() => {
+    const interval = setInterval(() => {
       setImuHz(imuSampleCountRef.current);
       imuSampleCountRef.current = 0;
     }, 1000);
+
+    return () => clearInterval(interval);
   };
 
   const startRecording = () => {
@@ -137,11 +190,12 @@ export default function MobileLogger({ onUploadSuccess }) {
     };
 
     mediaRecorder.start(30);
-    setStatusMsg('Drawing 3D shape relative to marker...');
 
     timerIntervalRef.current = setInterval(() => {
       const elapsed = (performance.timeOrigin + performance.now() - startTimeRef.current) / 1000.0;
-      const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+      const mins = Math.floor(elapsed / 60)
+        .toString()
+        .padStart(2, '0');
       const secs = (elapsed % 60).toFixed(1).padStart(4, '0');
       setRecTime(`${mins}:${secs}`);
     }, 100);
@@ -150,7 +204,7 @@ export default function MobileLogger({ onUploadSuccess }) {
   const stopRecording = async () => {
     setIsRecording(false);
     clearInterval(timerIntervalRef.current);
-    setStatusMsg('Uploading raw sensor logs to server...');
+    setStatusMsg('Processing 3D motion & sensor logs...');
 
     const mediaRecorder = mediaRecorderRef.current;
     if (!mediaRecorder) return;
@@ -160,7 +214,9 @@ export default function MobileLogger({ onUploadSuccess }) {
       const mimeType = recordedChunksRef.current[0]?.type || 'video/webm';
       const ext = mimeType.includes('mp4') ? '.mp4' : '.webm';
       const blob = new Blob(recordedChunksRef.current, { type: mimeType });
-      const task = taskPreset === 'custom' ? taskCustom : taskPreset;
+
+      const selectedMode = TASK_MODES[activeModeIdx];
+      const task = selectedMode.id === 'custom' ? customTask || 'custom motion' : selectedMode.id;
 
       const formData = new FormData();
       formData.append('video', blob, `recording${ext}`);
@@ -168,107 +224,229 @@ export default function MobileLogger({ onUploadSuccess }) {
       formData.append('task', task);
 
       try {
-        setStatusMsg('⚙️ Server is calculating 3D Trajectory (Dual-ArUco PnP + EKF Fusion)...');
         const res = await fetch('/api/recordings/save', { method: 'POST', body: formData });
         const data = await res.json();
         if (data.status === 'success') {
-          setStatusMsg(`🎉 Server Saved Episode #${data.episode_index} (${data.num_frames} frames)!`);
+          setStatusMsg(`Episode #${data.episode_index} Saved (${data.num_frames} frames)`);
           if (onUploadSuccess) onUploadSuccess();
+          setTimeout(() => setStatusMsg(''), 3500);
         } else {
-          setStatusMsg('❌ Server error: ' + (data.message || 'Processing failed'));
+          setStatusMsg('Error: ' + (data.message || 'Processing failed'));
         }
       } catch (err) {
         console.error(err);
-        setStatusMsg('❌ Upload failed: ' + err.message);
+        setStatusMsg('Upload failed: ' + err.message);
       }
     };
   };
 
+  // Screen tap to focus animation
+  const handleTapViewfinder = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setFocusPoint({ x, y });
+    setTimeout(() => setFocusPoint(null), 1200);
+  };
+
   return (
-    <div className="flex-1 flex flex-col h-[calc(100vh-60px)] relative overflow-hidden bg-black text-left">
-      {/* Viewfinder Video Stream */}
-      <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
-        <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+    <div className="fixed inset-0 w-screen h-[100dvh] bg-black select-none overflow-hidden touch-manipulation flex flex-col justify-between z-50">
+      {/* Background Fullscreen Video Feed */}
+      <div
+        onClick={handleTapViewfinder}
+        className="absolute inset-0 w-full h-full bg-black overflow-hidden cursor-crosshair"
+      >
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className="w-full h-full object-cover"
+        />
 
-        {/* Clean, unobstructed wide video feed - no black marks or reticle */}
-
-        {!isCameraActive && (
-          <div className="absolute inset-4 glass-card rounded-2xl p-6 flex flex-col items-center justify-center text-center gap-4 z-20">
-            <Camera className="w-12 h-12 text-indigo-400" />
-            <div>
-              <h2 className="text-base font-bold text-slate-100">🎯 ArUco + Feature Extraction + IMU</h2>
-              <p className="text-xs text-slate-400 mt-1">Wide-angle VIO tracking with seamless tag-loss recovery.</p>
-            </div>
-            <button
-              onClick={startCamera}
-              className="px-6 py-3 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-bold text-sm shadow-lg shadow-indigo-600/30"
-            >
-              ⚡ START CAMERA & IMU
-            </button>
-          </div>
+        {/* Tap-to-Focus Reticle Effect */}
+        {focusPoint && (
+          <div
+            style={{ left: focusPoint.x - 30, top: focusPoint.y - 30 }}
+            className="absolute w-16 h-16 border-2 border-amber-400/90 rounded-sm pointer-events-none animate-ping"
+          />
         )}
-
-        {/* HUD Overlay */}
-        <div className="absolute top-3 left-3 right-3 flex justify-between pointer-events-none z-10">
-          <div className="bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-xl border border-slate-700/60 text-xs font-mono flex items-center gap-2">
-            <span className={`w-2.5 h-2.5 rounded-full ${isRecording ? 'bg-rose-500 animate-pulse' : 'bg-slate-500'}`} />
-            <span className="text-slate-200">{recTime}</span>
-          </div>
-          <div className="bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-xl border border-slate-700/60 text-xs font-mono text-slate-300">
-            IMU: <strong className="text-indigo-400">{imuHz}</strong> Hz
-          </div>
-        </div>
-
-        {/* Telemetry Strip */}
-        <div className="absolute bottom-3 left-3 right-3 flex justify-between pointer-events-none z-10 text-[10px] font-mono text-slate-400">
-          <div className="bg-slate-900/80 backdrop-blur-md px-2.5 py-1 rounded-lg border border-slate-800">
-            ACC: [{accelData[0].toFixed(1)}, {accelData[1].toFixed(1)}, {accelData[2].toFixed(1)}]
-          </div>
-          <div className="bg-slate-900/80 backdrop-blur-md px-2.5 py-1 rounded-lg border border-slate-800">
-            GYR: [{gyroData[0].toFixed(1)}, {gyroData[1].toFixed(1)}, {gyroData[2].toFixed(1)}]
-          </div>
-        </div>
       </div>
 
-      {/* Control Panel Footer */}
-      <div className="glass-card p-4 flex flex-col gap-3 z-20 border-t border-slate-800">
-        <div className="flex gap-2">
-          <select
-            value={taskPreset}
-            onChange={(e) => setTaskPreset(e.target.value)}
-            className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-medium text-slate-200 outline-none"
-          >
-            <option value="draw 3d circle">draw 3d circle</option>
-            <option value="reach to apple">reach to apple</option>
-            <option value="reach to banana">reach to banana</option>
-            <option value="pick up cup">pick up cup</option>
-            <option value="custom">Custom...</option>
-          </select>
-          {taskPreset === 'custom' && (
-            <input
-              type="text"
-              placeholder="Enter task..."
-              value={taskCustom}
-              onChange={(e) => setTaskCustom(e.target.value)}
-              className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 outline-none"
-            />
+      {/* Top Bar Overlay (Camera App Style) */}
+      <div className="relative z-30 pt-safe px-4 pt-3 pb-2 flex items-center justify-between bg-gradient-to-b from-black/80 via-black/40 to-transparent">
+        {/* Left: Exit/Back to Dashboard */}
+        <button
+          onClick={onExit}
+          className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-md border border-white/10 flex items-center justify-center text-white/90 active:scale-95 transition-all shadow-md"
+          title="Back to Dashboard"
+        >
+          <ChevronLeft className="w-6 h-6" />
+        </button>
+
+        {/* Center: Recording Timer or Status Badge */}
+        <div className="flex items-center gap-2">
+          {isRecording ? (
+            <div className="bg-rose-600/90 backdrop-blur-md px-3.5 py-1.5 rounded-full border border-rose-400/40 flex items-center gap-2 shadow-lg shadow-rose-600/30">
+              <span className="w-2.5 h-2.5 rounded-full bg-white animate-ping" />
+              <span className="font-mono text-sm font-bold text-white tracking-wider">{recTime}</span>
+            </div>
+          ) : (
+            <div className="bg-black/50 backdrop-blur-md px-3 py-1 rounded-full border border-white/10 flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${isCameraActive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+              <span className="text-xs font-semibold text-white/90 tracking-wide">
+                {isCameraActive ? 'ArUco + EKF Active' : 'Camera Standby'}
+              </span>
+            </div>
           )}
         </div>
 
-        <button
-          onClick={isRecording ? stopRecording : startRecording}
-          disabled={!isCameraActive}
-          className={`w-full py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-lg transition-all disabled:opacity-50 ${
-            isRecording
-              ? 'bg-gradient-to-r from-slate-700 to-slate-800 text-white shadow-slate-900/50'
-              : 'bg-gradient-to-r from-rose-600 to-red-600 text-white shadow-rose-600/30'
-          }`}
-        >
-          <Radio className="w-5 h-5" />
-          <span>{isRecording ? 'STOP RECORDING' : 'START RECORDING'}</span>
-        </button>
+        {/* Right: IMU / Flip Camera Toggle */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowTelemetry(!showTelemetry)}
+            className={`w-10 h-10 rounded-full backdrop-blur-md border flex items-center justify-center transition-all ${
+              showTelemetry
+                ? 'bg-indigo-600 text-white border-indigo-400'
+                : 'bg-black/40 text-white/80 border-white/10'
+            }`}
+            title="Toggle Sensor HUD"
+          >
+            <Activity className="w-4 h-4" />
+          </button>
 
-        <p className="text-[11px] text-center text-slate-400 font-medium">{statusMsg}</p>
+          {devices.length > 1 && (
+            <button
+              onClick={switchCamera}
+              className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-md border border-white/10 flex items-center justify-center text-white/90 active:scale-95 transition-all"
+              title="Switch Camera Lens"
+            >
+              <SwitchCamera className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Floating Status / Upload Toast */}
+      {statusMsg && (
+        <div className="relative z-30 mx-auto px-4 py-2 bg-slate-900/90 backdrop-blur-md border border-indigo-500/40 rounded-full text-xs font-medium text-indigo-200 shadow-xl animate-fade-in flex items-center gap-2">
+          <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+          <span>{statusMsg}</span>
+        </div>
+      )}
+
+      {/* Real-time Telemetry Floating HUD (Optional Toggle) */}
+      {showTelemetry && (
+        <div className="relative z-30 mx-4 bg-black/60 backdrop-blur-md border border-white/10 rounded-xl p-3 text-[11px] font-mono text-slate-300 flex justify-between">
+          <div>
+            <span className="text-slate-500 block text-[9px] uppercase">IMU Rate</span>
+            <span className="text-emerald-400 font-bold">{imuHz} Hz</span>
+          </div>
+          <div>
+            <span className="text-slate-500 block text-[9px] uppercase">Accel [X, Y, Z]</span>
+            <span>
+              {accelData[0].toFixed(1)}, {accelData[1].toFixed(1)}, {accelData[2].toFixed(1)}
+            </span>
+          </div>
+          <div>
+            <span className="text-slate-500 block text-[9px] uppercase">Gyro [α, β, γ]</span>
+            <span>
+              {gyroData[0].toFixed(1)}, {gyroData[1].toFixed(1)}, {gyroData[2].toFixed(1)}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Initial Camera Permission Splash (If camera not active) */}
+      {!isCameraActive && (
+        <div className="absolute inset-0 z-40 bg-black/90 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center gap-5">
+          <div className="w-20 h-20 rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center shadow-xl shadow-indigo-600/40">
+            <Camera className="w-10 h-10 text-white" />
+          </div>
+
+          <div className="max-w-xs">
+            <h2 className="text-lg font-bold text-white tracking-wide">3D Motion Camera</h2>
+            <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+              Captures high-frequency IMU motion & wide-angle video anchored to your ArUco desk marker.
+            </p>
+          </div>
+
+          <button
+            onClick={() => startCamera()}
+            className="w-full max-w-xs py-4 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-sm shadow-xl shadow-indigo-600/30 active:scale-98 transition-all flex items-center justify-center gap-2"
+          >
+            <span>LAUNCH CAMERA</span>
+          </button>
+        </div>
+      )}
+
+      {/* Bottom Camera App Bar (Shutter, Modes, Custom Task Input) */}
+      <div className="relative z-30 pb-safe pb-6 pt-2 flex flex-col items-center bg-gradient-to-t from-black via-black/80 to-transparent">
+        {/* Custom Task Input (Appears only if CUSTOM mode is active) */}
+        {TASK_MODES[activeModeIdx]?.id === 'custom' && (
+          <div className="w-full px-6 mb-3">
+            <input
+              type="text"
+              placeholder="Type task description..."
+              value={customTask}
+              onChange={(e) => setCustomTask(e.target.value)}
+              className="w-full bg-white/10 backdrop-blur-md border border-white/20 rounded-full px-4 py-2 text-xs text-white placeholder-slate-400 outline-none text-center focus:border-indigo-400 transition-colors"
+            />
+          </div>
+        )}
+
+        {/* Mode Carousel (Standard Camera App Tabs) */}
+        <div className="w-full overflow-x-auto no-scrollbar flex items-center justify-center gap-5 py-2 px-4 text-xs font-semibold tracking-wider">
+          {TASK_MODES.map((mode, idx) => {
+            const isSelected = idx === activeModeIdx;
+            return (
+              <button
+                key={mode.id}
+                onClick={() => {
+                  if (!isRecording) setActiveModeIdx(idx);
+                }}
+                disabled={isRecording}
+                className={`transition-all whitespace-nowrap flex flex-col items-center gap-1 ${
+                  isSelected ? 'text-amber-400 scale-105 font-bold' : 'text-slate-400/80 hover:text-white'
+                }`}
+              >
+                <span>{mode.label}</span>
+                {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shadow-sm" />}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Shutter Button Row */}
+        <div className="w-full px-8 mt-2 flex items-center justify-between max-w-sm">
+          {/* Left Dummy / Preset Indicator */}
+          <div className="w-12 h-12 flex items-center justify-center text-slate-400 text-xs font-mono">
+            <span>{activeModeIdx + 1}/{TASK_MODES.length}</span>
+          </div>
+
+          {/* Center: Authentic Camera Circular Shutter Button */}
+          <button
+            onClick={isRecording ? stopRecording : startRecording}
+            disabled={!isCameraActive}
+            className="w-20 h-20 rounded-full border-4 border-white flex items-center justify-center p-1.5 active:scale-95 transition-transform disabled:opacity-40"
+            title={isRecording ? 'Stop Recording' : 'Start Recording'}
+          >
+            <div
+              className={`transition-all duration-300 ${
+                isRecording
+                  ? 'w-7 h-7 rounded-md bg-rose-600 animate-pulse'
+                  : 'w-full h-full rounded-full bg-rose-600 hover:bg-rose-500 shadow-md shadow-rose-600/50'
+              }`}
+            />
+          </button>
+
+          {/* Right: Camera Orientation or Lens Indicator */}
+          <div className="w-12 h-12 flex items-center justify-center text-slate-400">
+            <span className="text-[10px] font-mono border border-white/20 px-1.5 py-0.5 rounded">
+              {devices.length > 0 ? `CAM ${currentDeviceIdx + 1}` : 'WIDE'}
+            </span>
+          </div>
+        </div>
       </div>
     </div>
   );
