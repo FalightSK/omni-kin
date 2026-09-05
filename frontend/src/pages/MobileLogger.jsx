@@ -228,8 +228,9 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         const acc = event.accelerationIncludingGravity || event.acceleration || { x: 0, y: 0, z: 9.81 };
         const rot = event.rotationRate || { alpha: 0, beta: 0, gamma: 0 };
 
+        // Standard W3C mapping: beta=pitch(X), gamma=roll(Y), alpha=yaw(Z)
         const accArr = [acc.x || 0, acc.y || 0, acc.z || 9.81];
-        const rotArr = [rot.alpha || 0, rot.beta || 0, rot.gamma || 0];
+        const rotArr = [rot.beta || 0, rot.gamma || 0, rot.alpha || 0];
 
         setAccelData(accArr);
         setGyroData(rotArr);
@@ -245,11 +246,17 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         if (isRecording) {
           const nowEpoch = performance.timeOrigin + performance.now();
           const elapsedSec = (nowEpoch - startTimeRef.current) / 1000.0;
+          const screenAngle =
+            (typeof window !== 'undefined' && window.screen?.orientation?.angle !== undefined)
+              ? window.screen.orientation.angle
+              : (typeof window !== 'undefined' ? (window.orientation || 0) : 0);
+
           imuDataRef.current.push({
             timestamp: elapsedSec,
             epoch_ms: nowEpoch,
             accel: accArr,
-            gyro: rotArr
+            gyro: rotArr,
+            screen_angle: screenAngle
           });
           imuSampleCountRef.current += 1;
         }
@@ -346,14 +353,8 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     <div
       ref={containerRef}
       className="fixed inset-0 w-screen h-[100dvh] bg-black select-none overflow-hidden touch-manipulation z-50 flex flex-col justify-between"
-      style={{
-        paddingLeft: 'max(0.75rem, env(safe-area-inset-left))',
-        paddingRight: 'max(0.75rem, env(safe-area-inset-right))',
-        paddingTop: 'max(0.5rem, env(safe-area-inset-top))',
-        paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))'
-      }}
     >
-      {/* Background Fullscreen Video Feed */}
+      {/* Background Fullscreen Edge-to-Edge Video Feed */}
       <div
         onClick={handleTapViewfinder}
         className="absolute inset-0 w-full h-full bg-black overflow-hidden cursor-crosshair z-0"
@@ -365,18 +366,6 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
           muted
           className="w-full h-full object-cover"
         />
-
-        {/* 16:9 Widescreen Framing Reticle Guide */}
-        <div className="absolute inset-3 md:inset-6 border border-white/20 rounded-2xl pointer-events-none flex flex-col justify-between p-3">
-          <div className="flex justify-between items-start text-[9px] font-mono text-white/40 tracking-wider">
-            <span>[ 16:9 ARUCO RECORDING ZONE ]</span>
-            <span>AX: {accelData[0] >= 0 ? `+${accelData[0].toFixed(1)}` : accelData[0].toFixed(1)} m/s²</span>
-          </div>
-          <div className="flex justify-between items-end text-[9px] font-mono text-white/40">
-            <span>Z=0 TABLE COPLANAR</span>
-            <span>1080P WIDE</span>
-          </div>
-        </div>
 
         {/* Tap-to-Focus Reticle Effect */}
         {focusPoint && (
@@ -472,7 +461,15 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
       {/* LANDSCAPE LAYOUT (HORIZONTAL DUAL-EDGE ERGONOMICS)                          */}
       {/* ========================================================================= */}
       {isLandscape ? (
-        <div className="relative z-30 w-full h-full flex justify-between items-center pointer-events-none">
+        <div
+          className="relative z-30 w-full h-full flex justify-between items-center pointer-events-none"
+          style={{
+            paddingLeft: 'max(0.75rem, env(safe-area-inset-left))',
+            paddingRight: 'max(0.75rem, env(safe-area-inset-right))',
+            paddingTop: 'max(0.5rem, env(safe-area-inset-top))',
+            paddingBottom: 'max(0.5rem, env(safe-area-inset-bottom))'
+          }}
+        >
           {/* LEFT EDGE: STATUS & SECONDARY CONTROLS */}
           <div className="w-20 h-full flex flex-col justify-between items-center py-2 pointer-events-auto select-none">
             {/* Top Left: Exit & Fullscreen */}
@@ -630,7 +627,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
           </div>
 
           {/* Bottom Portrait Shutter Bar */}
-          <div className="pb-6 flex flex-col items-center gap-3 pointer-events-auto bg-gradient-to-t from-black via-black/80 to-transparent">
+          <div className="pb-6 flex flex-col items-center gap-3 pointer-events-auto">
             {/* Mode Tabs */}
             <div className="flex gap-2 text-xs font-bold">
               {TASK_MODES.map((mode, idx) => (

@@ -154,6 +154,97 @@ def test_aruco_tag_loss_and_feature_recovery():
     assert p_feat[2] > 0, "Recovered camera Z height must be positive"
     print(f"[PASS] test_aruco_tag_loss_and_feature_recovery passed! Source: {f_source}, Camera Z={p_feat[2]:.3f}m")
 
+
+def test_pitch_accuracy():
+    from visual_tracker import rotation_matrix_to_trajectory_euler
+
+    # Nominal looking down at table (R_c2w = diag(1, -1, -1))
+    R_down = np.diag([1.0, -1.0, -1.0])
+    e_down = rotation_matrix_to_trajectory_euler(R_down)
+    assert np.allclose(e_down, [0.0, 0.0, 0.0], atol=1e-5), f"Nominal down orientation should be [0, 0, 0], got {e_down}"
+
+    # Sweep pitch tilts from -30 deg to +30 deg
+    prev_pitch = -999.0
+    for deg in [-30, -20, -10, 0, 10, 20, 30]:
+        th = np.radians(deg)
+        R_tilt = R_down @ np.array([
+            [1.0, 0.0, 0.0],
+            [0.0, np.cos(th), -np.sin(th)],
+            [0.0, np.sin(th), np.cos(th)]
+        ])
+        e = rotation_matrix_to_trajectory_euler(R_tilt)
+        measured_pitch_deg = np.degrees(e[1])
+        assert np.isclose(measured_pitch_deg, deg, atol=0.01), f"Expected pitch {deg} deg, got {measured_pitch_deg:.2f} deg"
+        assert measured_pitch_deg > prev_pitch, "Pitch must be strictly monotonic"
+        prev_pitch = measured_pitch_deg
+
+    print("[PASS] test_pitch_accuracy passed! Pitch is monotonic, linear, and gimbal-lock free.")
+
+
+def test_virtual_slam_landmark_expansion():
+    tracker = VisualInertialTracker(tag_a_size=0.10, tag_b_size=0.05, tag_a_id=0, tag_b_id=1)
+    camera_matrix, dist_coeffs = tracker.estimate_camera_matrix(1280, 720, hfov_degrees=100.0)
+
+    from visual_tracker import ArucoFeatureMapTracker
+    feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
+
+    tag_a_img = tracker.generate_raw_marker(marker_id=0, side_pixels=120)
+
+    # Generate background with dense texture points
+    np.random.seed(123)
+    bg_texture = np.ones((720, 1280, 3), dtype=np.uint8) * 200
+    for _ in range(120):
+        x = np.random.randint(50, 1200)
+        y = np.random.randint(50, 680)
+        cv2.circle(bg_texture, (x, y), np.random.randint(3, 8), (20, 30, 40), -1)
+
+    # Frame 1: ArUco visible at known pose
+    f1 = bg_texture.copy()
+    f1[300:420, 500:620] = cv2.cvtColor(tag_a_img, cv2.COLOR_GRAY2BGR)
+    det1, p1, R1, _, _, _, corners1 = tracker.detect_marker_pnp(f1, camera_matrix, dist_coeffs, return_corners=True)
+    feature_tracker.add_aruco_ground_truth(cv2.cvtColor(f1, cv2.COLOR_BGR2GRAY), p1, R1, corners1)
+
+    # Frame 2: Shift with ArUco still visible
+    f2 = np.roll(bg_texture, shift=30, axis=1)
+    f2[300:420, 530:650] = cv2.cvtColor(tag_a_img, cv2.COLOR_GRAY2BGR)
+    det2, p2, R2, _, _, _, corners2 = tracker.detect_marker_pnp(f2, camera_matrix, dist_coeffs, return_corners=True)
+    feature_tracker.add_aruco_ground_truth(cv2.cvtColor(f2, cv2.COLOR_BGR2GRAY), p2, R2, corners2)
+
+    # Frame 3: Tag occluded completely!
+    f3_lost = np.roll(bg_texture, shift=60, axis=1)
+    cv2.rectangle(f3_lost, (510, 280), (670, 440), (160, 140, 130), -1)
+
+    det3, _, _, _, _, _ = tracker.detect_marker_pnp(f3_lost, camera_matrix, dist_coeffs)
+    assert not det3, "Frame 3: ArUco must NOT be detected"
+
+    success3, p3, R3, src3 = feature_tracker.track_without_aruco(cv2.cvtColor(f3_lost, cv2.COLOR_BGR2GRAY))
+    assert success3, "Virtual SLAM must track pose during tag loss"
+    assert p3 is not None and len(p3) == 3
+
+    # Frame 4: Further motion without tag -> Virtual SLAM continues tracking and expanding map
+    f4_lost = np.roll(bg_texture, shift=90, axis=1)
+    cv2.rectangle(f4_lost, (540, 280), (700, 440), (160, 140, 130), -1)
+    success4, p4, R4, src4 = feature_tracker.track_without_aruco(cv2.cvtColor(f4_lost, cv2.COLOR_BGR2GRAY))
+    assert success4, "Virtual SLAM must sustain tracking over multiple markerless frames"
+    print(f"[PASS] test_virtual_slam_landmark_expansion passed! Landmarks: {len(feature_tracker.landmarks_3d)}, Frame 3: {src3}, Frame 4: {src4}")
+
+
+def test_ekf_velocity_leakage_damping():
+    ekf = VisualInertialEKF()
+    init_p = np.array([0.10, 0.05, 0.35])
+    ekf.reset(init_p, np.zeros(3))
+
+    # Simulate 50 steps of sensor dropout (is_visual_active=False) with persistent accelerometer bias
+    acc_noisy_bias = np.array([0.15, -0.10, 9.81 + 0.12])
+    for _ in range(50):
+        ekf.predict(dt=0.02, accel_body=acc_noisy_bias, gyro_rates=np.zeros(3), is_visual_active=False)
+
+    p_final = ekf.x[0:3]
+    assert np.all(np.abs(p_final[:2]) < 0.8), f"EKF XY position escaped workspace: {p_final[:2]}"
+    assert 0.01 <= p_final[2] <= 0.9, f"EKF Z height escaped workspace: {p_final[2]}"
+    print(f"[PASS] test_ekf_velocity_leakage_damping passed! Final Position: {p_final}")
+
+
 if __name__ == "__main__":
     print("Running ArUco + Feature Extraction + IMU Test Suite...")
     test_marker_generation()
@@ -162,4 +253,7 @@ if __name__ == "__main__":
     test_ekf_params_customization()
     test_trajectory_generation()
     test_aruco_tag_loss_and_feature_recovery()
+    test_pitch_accuracy()
+    test_virtual_slam_landmark_expansion()
+    test_ekf_velocity_leakage_damping()
     print("\nALL ARUCO + FEATURE EXTRACTION + IMU TESTS PASSED SUCCESSFULLY!")
