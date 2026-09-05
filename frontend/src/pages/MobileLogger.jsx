@@ -425,7 +425,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
           <div className="max-w-xs">
             <h2 className="text-lg font-bold text-white tracking-wide">3D Motion Camera</h2>
             <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
-              Hold horizontally over your workspace. Aligned for 16:9 table manipulation capture ($A_x \approx \pm 9.8\,\text{m/s}^2$).
+              Hold horizontally over your workspace. Aligned for 16:9 table manipulation capture (Ax ≈ ±9.8 m/s²).
             </p>
           </div>
 
