@@ -8,7 +8,8 @@ import {
   CheckCircle2,
   AlertCircle,
   Sparkles,
-  Sliders
+  Sliders,
+  SwitchCamera
 } from 'lucide-react';
 
 const TASK_MODES = [

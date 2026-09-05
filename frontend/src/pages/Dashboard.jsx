@@ -11,8 +11,10 @@ import {
   MoveUpRight,
   Bot,
   Columns,
+  Rows,
   PanelRightClose,
   PanelRightOpen,
+  GripHorizontal,
   GripVertical
 } from 'lucide-react';
 
@@ -29,7 +31,8 @@ export default function Dashboard({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
 
-  // Adjustable Panel State
+  // Layout Configuration: Default to 'vertical' stack as requested
+  const [layoutOrientation, setLayoutOrientation] = useState('vertical'); // 'vertical' (top/bottom) or 'horizontal' (side-by-side)
   const [splitRatio, setSplitRatio] = useState(50); // percentage (15 to 85, or 100 / 0)
   const [isDragging, setIsDragging] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -61,16 +64,25 @@ export default function Dashboard({
     return () => clearInterval(interval);
   }, [isPlaying, totalFrames, activeEp?.fps]);
 
-  // Handle Dragging Splitter
+  // Handle Dragging Splitter (supports both vertical stack row-resize and horizontal col-resize)
   useEffect(() => {
     const handleMouseMove = (e) => {
       if (!isDragging || !splitContainerRef.current) return;
       const rect = splitContainerRef.current.getBoundingClientRect();
-      const clientX = e.clientX ?? (e.touches && e.touches[0]?.clientX);
-      if (clientX === undefined) return;
-      const offset = clientX - rect.left;
-      const newRatio = (offset / rect.width) * 100;
-      setSplitRatio(Math.min(85, Math.max(15, newRatio)));
+
+      if (layoutOrientation === 'vertical') {
+        const clientY = e.clientY ?? (e.touches && e.touches[0]?.clientY);
+        if (clientY === undefined) return;
+        const offset = clientY - rect.top;
+        const newRatio = (offset / rect.height) * 100;
+        setSplitRatio(Math.min(85, Math.max(15, newRatio)));
+      } else {
+        const clientX = e.clientX ?? (e.touches && e.touches[0]?.clientX);
+        if (clientX === undefined) return;
+        const offset = clientX - rect.left;
+        const newRatio = (offset / rect.width) * 100;
+        setSplitRatio(Math.min(85, Math.max(15, newRatio)));
+      }
     };
 
     const handleMouseUp = () => {
@@ -89,7 +101,7 @@ export default function Dashboard({
       window.removeEventListener('touchmove', handleMouseMove);
       window.removeEventListener('touchend', handleMouseUp);
     };
-  }, [isDragging]);
+  }, [isDragging, layoutOrientation]);
 
   const currentX = currentPose[0] || 0;
   const currentY = currentPose[1] || 0;
@@ -123,17 +135,42 @@ export default function Dashboard({
     <div
       className={`flex-1 p-4 grid gap-4 overflow-hidden h-[calc(100vh-60px)] transition-all ${
         isSidebarOpen ? 'grid-cols-1 lg:grid-cols-4' : 'grid-cols-1'
-      } ${isDragging ? 'select-none cursor-col-resize' : ''}`}
+      } ${isDragging ? (layoutOrientation === 'vertical' ? 'select-none cursor-row-resize' : 'select-none cursor-col-resize') : ''}`}
     >
-      {/* Main Center Area: Adjustable Viewports & Timeline */}
+      {/* Main Center Area: Stacked Viewports & Timeline */}
       <div className={`${isSidebarOpen ? 'lg:col-span-3' : 'w-full'} flex flex-col gap-3 h-full min-h-0`}>
         {/* Top Control Bar for Viewport Layout Adjustments */}
         <div className="flex items-center justify-between px-1 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-              <Columns className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Panel Layout:</span>
-            </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Orientation Toggle: Vertical Stack (Default) vs Side-by-Side */}
+            <div className="flex items-center gap-1 bg-slate-900/90 p-0.5 rounded-lg border border-slate-800">
+              <button
+                onClick={() => setLayoutOrientation('vertical')}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition-all ${
+                  layoutOrientation === 'vertical'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+                title="Stack 3D Trajectory & Video in Vertical Axis (Top / Bottom)"
+              >
+                <Rows className="w-3.5 h-3.5" />
+                <span>Vertical Stack</span>
+              </button>
+              <button
+                onClick={() => setLayoutOrientation('horizontal')}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition-all ${
+                  layoutOrientation === 'horizontal'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+                title="Place 3D Trajectory & Video Side-by-Side (Left / Right)"
+              >
+                <Columns className="w-3.5 h-3.5" />
+                <span>Side-by-Side</span>
+              </button>
+            </div>
+
+            {/* Split Ratio Presets */}
             <div className="flex items-center gap-1 bg-slate-900/80 p-0.5 rounded-lg border border-slate-800">
               <button
                 onClick={() => setSplitRatio(50)}
@@ -142,29 +179,29 @@ export default function Dashboard({
                     ? 'bg-indigo-600 text-white shadow-sm'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
                 }`}
-                title="50% 3D / 50% Video"
+                title="50% Top / 50% Bottom"
               >
                 50:50
               </button>
               <button
-                onClick={() => setSplitRatio(70)}
+                onClick={() => setSplitRatio(60)}
                 className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                  splitRatio === 70
+                  splitRatio === 60
                     ? 'bg-indigo-600 text-white shadow-sm'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
                 }`}
-                title="70% 3D / 30% Video"
+                title="60% 3D / 40% Video"
               >
                 3D Focus
               </button>
               <button
-                onClick={() => setSplitRatio(30)}
+                onClick={() => setSplitRatio(40)}
                 className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-                  splitRatio === 30
+                  splitRatio === 40
                     ? 'bg-indigo-600 text-white shadow-sm'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
                 }`}
-                title="30% 3D / 70% Video"
+                title="40% 3D / 60% Video"
               >
                 Video Focus
               </button>
@@ -195,7 +232,7 @@ export default function Dashboard({
 
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-slate-500 font-mono hidden sm:inline">
-              Split: {splitRatio}% 3D / {100 - splitRatio}% Video
+              {splitRatio}% 3D • {100 - splitRatio}% Video
             </span>
             <button
               onClick={() => setIsSidebarOpen(!isSidebarOpen)}
@@ -210,23 +247,29 @@ export default function Dashboard({
               ) : (
                 <>
                   <PanelRightOpen className="w-3.5 h-3.5 text-indigo-400" />
-                  <span className="hidden md:inline text-indigo-300">Show Episodes ({episodes.length})</span>
+                  <span className="hidden md:inline text-indigo-300">Episodes ({episodes.length})</span>
                 </>
               )}
             </button>
           </div>
         </div>
 
-        {/* Adjustable Side-by-Side Dual Viewports Container */}
+        {/* Viewports Container: Stacked Vertically by default */}
         <div
           ref={splitContainerRef}
-          className="flex flex-col md:flex-row gap-0 flex-1 min-h-0 relative overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/40"
+          className={`flex ${
+            layoutOrientation === 'vertical' ? 'flex-col' : 'flex-col md:flex-row'
+          } gap-0 flex-1 min-h-0 relative overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950/40`}
         >
-          {/* Left Panel: 3D Viewport */}
+          {/* Top Panel (Vertical Stack) or Left Panel (Side-by-Side): 3D Trajectory Viewport */}
           {splitRatio > 0 && (
             <div
-              style={{ width: splitRatio === 100 ? '100%' : `${splitRatio}%` }}
-              className="h-full relative overflow-hidden transition-[width] duration-75 ease-out"
+              style={
+                layoutOrientation === 'vertical'
+                  ? { height: splitRatio === 100 ? '100%' : `${splitRatio}%`, width: '100%' }
+                  : { width: splitRatio === 100 ? '100%' : `${splitRatio}%`, height: '100%' }
+              }
+              className="relative overflow-hidden transition-[height,width] duration-75 ease-out"
             >
               <Viewport3D
                 trajectoryPoses={poses}
@@ -244,20 +287,38 @@ export default function Dashboard({
                 setIsDragging(true);
               }}
               onTouchStart={() => setIsDragging(true)}
-              className="hidden md:flex w-2.5 hover:w-3 z-30 cursor-col-resize items-center justify-center bg-slate-900/80 hover:bg-indigo-600/30 border-x border-slate-800/80 transition-all select-none group"
-              title="Drag to resize 3D Viewport and Video Player"
+              className={`z-30 items-center justify-center bg-slate-900/90 hover:bg-indigo-600/30 transition-all select-none group ${
+                layoutOrientation === 'vertical'
+                  ? 'flex h-2.5 hover:h-3.5 w-full cursor-row-resize border-y border-slate-800/90'
+                  : 'hidden md:flex w-2.5 hover:w-3.5 h-full cursor-col-resize border-x border-slate-800/90'
+              }`}
+              title={
+                layoutOrientation === 'vertical'
+                  ? 'Drag vertically to resize Top (3D) and Bottom (Video)'
+                  : 'Drag horizontally to resize Left (3D) and Right (Video)'
+              }
             >
-              <div className="w-1 h-8 rounded-full bg-slate-600 group-hover:bg-indigo-400 transition-colors flex items-center justify-center">
-                <GripVertical className="w-3 h-3 text-slate-400 group-hover:text-white" />
-              </div>
+              {layoutOrientation === 'vertical' ? (
+                <div className="w-12 h-1 rounded-full bg-slate-600 group-hover:bg-indigo-400 transition-colors flex items-center justify-center">
+                  <GripHorizontal className="w-3.5 h-3.5 text-slate-400 group-hover:text-white" />
+                </div>
+              ) : (
+                <div className="w-1 h-8 rounded-full bg-slate-600 group-hover:bg-indigo-400 transition-colors flex items-center justify-center">
+                  <GripVertical className="w-3.5 h-3.5 text-slate-400 group-hover:text-white" />
+                </div>
+              )}
             </div>
           )}
 
-          {/* Right Panel: Synchronized Video Player */}
+          {/* Bottom Panel (Vertical Stack) or Right Panel (Side-by-Side): Synchronized Video Player */}
           {splitRatio < 100 && (
             <div
-              style={{ width: splitRatio === 0 ? '100%' : `${100 - splitRatio}%` }}
-              className="h-full relative overflow-hidden transition-[width] duration-75 ease-out"
+              style={
+                layoutOrientation === 'vertical'
+                  ? { height: splitRatio === 0 ? '100%' : `${100 - splitRatio}%`, width: '100%' }
+                  : { width: splitRatio === 0 ? '100%' : `${100 - splitRatio}%`, height: '100%' }
+              }
+              className="relative overflow-hidden transition-[height,width] duration-75 ease-out"
             >
               <VideoPlayer
                 videoUrl={activeEp?.video_url}
