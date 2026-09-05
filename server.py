@@ -957,14 +957,28 @@ async def export_lerobot():
 
 if __name__ == "__main__":
     import uvicorn
+    import sys
     local_ip = get_local_ip()
+
+    ssl_cert = os.path.join(BASE_DIR, "cert.pem")
+    ssl_key = os.path.join(BASE_DIR, "key.pem")
+    has_certs = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
+    use_ssl = ("--ssl" in sys.argv or "-s" in sys.argv or has_certs) and ("--no-ssl" not in sys.argv)
+    protocol = "https" if use_ssl else "http"
 
     print("\n" + "="*60)
     print("ArUco-Anchored 3D Trajectory Collector Server Started!")
     print("="*60)
-    print(f"Desktop Dashboard: http://localhost:8000")
-    print(f"Phone Mobile URL:  http://{local_ip}:8000/mobile")
-    print(f"Print ArUco Marker: http://localhost:8000/api/marker/image")
+    print(f"Desktop Dashboard: {protocol}://localhost:8000")
+    print(f"Phone Mobile URL:  {protocol}://{local_ip}:8000/mobile")
+    print(f"Print ArUco Marker: {protocol}://localhost:8000/api/marker/image")
+    if use_ssl:
+        print("🔒 HTTPS Enabled (Self-Signed Cert)")
+        print("   On phone browser: tap 'Advanced' -> 'Proceed to site' to allow camera/IMU")
     print("="*60 + "\n")
 
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    if use_ssl:
+        uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True, ssl_keyfile=ssl_key, ssl_certfile=ssl_cert)
+    else:
+        uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+

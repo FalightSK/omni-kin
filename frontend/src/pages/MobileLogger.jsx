@@ -108,6 +108,10 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   // Enumerate cameras
   const refreshDevices = async () => {
     try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        setDevices([]);
+        return;
+      }
       const allDevs = await navigator.mediaDevices.enumerateDevices();
       const videoDevs = allDevs.filter((d) => d.kind === 'videoinput');
       setDevices(videoDevs);
@@ -162,6 +166,14 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
           : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
       };
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error(
+          'Camera access requires HTTPS. Please connect to https://' +
+            window.location.hostname +
+            ':8000/mobile'
+        );
+      }
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
@@ -412,6 +424,25 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
           >
             <span>LAUNCH CAMERA & FULLSCREEN</span>
           </button>
+
+          {typeof window !== 'undefined' && !window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' && (
+            <div className="bg-amber-500/15 border border-amber-500/40 rounded-xl p-3 text-[11px] text-amber-200 text-left flex flex-col gap-1 max-w-xs mt-1">
+              <span className="font-bold flex items-center gap-1.5 text-amber-300">
+                <AlertCircle className="w-3.5 h-3.5" />
+                <span>HTTPS Required for Mobile Camera</span>
+              </span>
+              <span>Mobile browsers disable camera on HTTP. Please switch to:</span>
+              <a
+                href={`https://${window.location.hostname}:8000/mobile`}
+                className="text-sky-300 underline font-mono text-[10px] break-all hover:text-white"
+              >
+                https://{window.location.hostname}:8000/mobile
+              </a>
+              <span className="text-[10px] text-slate-400 mt-0.5">
+                (Tap "Advanced" &gt; "Proceed" to accept local cert)
+              </span>
+            </div>
+          )}
         </div>
       )}
 
