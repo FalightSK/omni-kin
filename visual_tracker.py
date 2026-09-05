@@ -14,6 +14,51 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 
+R_CAM_TO_PHONE = np.diag([1.0, -1.0, -1.0])
+
+
+def rotation_matrix_to_trajectory_euler(R_c_to_w):
+    """
+    Computes [roll, pitch, yaw] in radians from camera-to-world rotation matrix:
+      - 0° pitch = phone held level over workspace table (camera looking down at table)
+      - positive pitch = tilted forward
+      - negative pitch = tilted backward
+      - roll = lateral tilt left/right
+      - yaw = azimuthal heading around table normal (Z)
+    At nominal recording orientation (looking straight down at table), euler is [0, 0, 0].
+    """
+    R_p2w = R_c_to_w @ R_CAM_TO_PHONE
+    r = R.from_matrix(R_p2w)
+    ax, ay, az = r.as_euler('xyz', degrees=False)
+    # ax: tilt forward/backward (pitch)
+    # ay: tilt left/right (roll)
+    # az: rotation around normal (yaw)
+    pitch = float(ax)
+    roll = float(ay)
+    yaw = float(az)
+    return np.array([roll, pitch, yaw], dtype=np.float64)
+
+
+def trajectory_euler_to_rotation_matrix(euler):
+    """
+    Reconstructs camera-to-world rotation matrix R_c_to_w from [roll, pitch, yaw].
+    """
+    roll, pitch, yaw = euler
+    r = R.from_euler('xyz', [pitch, roll, yaw])
+    R_p2w = r.as_matrix()
+    return R_p2w @ R_CAM_TO_PHONE
+
+
+def phone_euler_to_rotation_matrix(euler):
+    """
+    Computes phone-to-world rotation matrix for IMU strapdown acceleration rotation.
+    When euler is [0, 0, 0], returns np.eye(3).
+    """
+    roll, pitch, yaw = euler
+    r = R.from_euler('xyz', [pitch, roll, yaw])
+    return r.as_matrix()
+
+
 class VisualInertialEKF:
     """
     12-State Extended Kalman Filter for 6-DoF Visual-Inertial Odometry:
@@ -87,9 +132,11 @@ class VisualInertialEKF:
             [-v[1], v[0], 0.0]
         ], dtype=np.float64)
 
-    def predict(self, dt, accel_body, gyro_rates):
+    def predict(self, dt, accel_body, gyro_rates, is_visual_active=True):
         """
         Non-linear strapdown inertial propagation step.
+        When is_visual_active is False, applies velocity damping and workspace constraints
+        to prevent runaway quadratic drift from sensor bias.
         """
         if not self.is_initialized:
             return
@@ -97,24 +144,39 @@ class VisualInertialEKF:
         dt = float(np.clip(dt, 0.001, 0.2))
 
         # 1. Orientation update
+        # Gyro rates: [pitch_rate, roll_rate, yaw_rate]
+        # euler state is [roll, pitch, yaw]
+        gyro_euler_rates = np.array([gyro_rates[1], gyro_rates[0], gyro_rates[2]], dtype=np.float64)
         euler = self.x[6:9]
-        euler_new = euler + gyro_rates * dt
+        euler_new = euler + gyro_euler_rates * dt
         # Normalize angles to [-pi, pi]
         euler_new = (euler_new + np.pi) % (2.0 * np.pi) - np.pi
 
         # 2. Body-to-World acceleration rotation
-        r = R.from_euler('xyz', euler)
-        R_mat = r.as_matrix()
+        R_mat = phone_euler_to_rotation_matrix(euler)
 
         accel_unbiased = accel_body - self.x[9:12]
         accel_world = R_mat @ accel_unbiased - self.g_world
 
-        # 3. Velocity and Position integration
+        # 3. Velocity and Position integration with visual-loss damping
+        if not is_visual_active:
+            self.x[3:6] *= 0.95
+            v_norm = np.linalg.norm(self.x[3:6])
+            if v_norm > 1.2:
+                self.x[3:6] = self.x[3:6] * (1.2 / v_norm)
+
         v = self.x[3:6]
         p = self.x[0:3]
 
         v_new = v + accel_world * dt
         p_new = p + v * dt + 0.5 * accel_world * (dt ** 2)
+
+        if not is_visual_active:
+            p_new[0] = float(np.clip(p_new[0], -0.8, 0.8))
+            p_new[1] = float(np.clip(p_new[1], -0.4, 0.9))
+            p_new[2] = float(np.clip(p_new[2], 0.01, 0.9))
+        else:
+            p_new[2] = max(0.01, float(p_new[2]))
 
         # Update state vector
         self.x[0:3] = p_new
@@ -220,15 +282,17 @@ class ArucoFeatureMapTracker:
         self.tracked_ids = []
         self.next_pt_id = 0
 
-        # Recent keyframe history for triangulation: list of (frame_idx, p_world, R_world_to_cam, pts_dict)
+        # Recent keyframe history for triangulation: list of (p_world, R_c_to_w, pts_dict)
         self.view_history = []
         self.min_features = 120
         self.max_features = 250
 
-        # Last known pose
+        # Last known camera pose in world frame
         self.last_p_world = np.array([0.075, 0.05, 0.30], dtype=np.float64)
-        self.last_R_world_to_cam = np.eye(3, dtype=np.float64)
+        self.last_R_c_to_w = np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=np.float64)
+        self.last_R_world_to_cam = self.last_R_c_to_w.copy()
         self.prev_gray_pts = None
+        self.last_step_delta = np.zeros(3, dtype=np.float64)
 
     def _extract_new_features(self, gray, mask=None):
         corners = cv2.goodFeaturesToTrack(
@@ -245,9 +309,54 @@ class ArucoFeatureMapTracker:
         refined = cv2.cornerSubPix(gray, np.copy(corners), (5, 5), (-1, -1), criteria)
         return refined.reshape(-1, 2).astype(np.float32)
 
+    def _triangulate_and_expand_map(self, p_cam_world, R_c_to_w, current_pts_dict):
+        """
+        Triangulates newly observed feature points between the current frame and recent keyframes
+        in self.view_history. Expands self.landmarks_3d dynamically in the persistent world frame.
+        """
+        R_w2c_curr = R_c_to_w.T
+        t_w2c_curr = -R_w2c_curr @ p_cam_world.reshape(3, 1)
+        P_curr = self.camera_matrix @ np.hstack([R_w2c_curr, t_w2c_curr])
+
+        for prev_p, prev_R_c_to_w, prev_pts_dict in self.view_history[-5:]:
+            baseline = float(np.linalg.norm(p_cam_world - prev_p))
+            if baseline < 0.012:  # Minimum 12mm baseline for reliable parallax
+                continue
+
+            R_w2c_prev = prev_R_c_to_w.T
+            t_w2c_prev = -R_w2c_prev @ prev_p.reshape(3, 1)
+            P_prev = self.camera_matrix @ np.hstack([R_w2c_prev, t_w2c_prev])
+
+            common_ids = [
+                pid for pid in current_pts_dict
+                if pid in prev_pts_dict and pid not in self.landmarks_3d
+            ]
+            if not common_ids:
+                continue
+
+            pts1 = np.array([prev_pts_dict[pid] for pid in common_ids], dtype=np.float32).T
+            pts2 = np.array([current_pts_dict[pid] for pid in common_ids], dtype=np.float32).T
+
+            pts4d = cv2.triangulatePoints(P_prev, P_curr, pts1, pts2)
+            w = pts4d[3, :]
+            valid_w = np.abs(w) > 1e-4
+            pts3d = (pts4d[:3, :] / np.where(valid_w, w, 1e-4)).T
+
+            for i, pid in enumerate(common_ids):
+                if not valid_w[i]:
+                    continue
+                x_w, y_w, z_w = pts3d[i]
+                if -0.08 <= z_w <= 1.2 and np.linalg.norm([x_w, y_w]) < 2.5:
+                    p_c_curr = R_w2c_curr @ pts3d[i].reshape(3, 1) + t_w2c_curr
+                    p_c_prev = R_w2c_prev @ pts3d[i].reshape(3, 1) + t_w2c_prev
+                    if p_c_curr[2, 0] > 0.04 and p_c_prev[2, 0] > 0.04:
+                        self.landmarks_3d[pid] = np.array([x_w, y_w, z_w], dtype=np.float32)
+
     def add_aruco_ground_truth(self, gray, p_cam_world, R_world_to_cam, aruco_corners_list=None):
+        R_c_to_w = R_world_to_cam
         self.last_p_world = p_cam_world.copy()
-        self.last_R_world_to_cam = R_world_to_cam.copy()
+        self.last_R_c_to_w = R_c_to_w.copy()
+        self.last_R_world_to_cam = R_c_to_w.copy()
 
         mask = np.full(gray.shape, 255, dtype=np.uint8)
         if aruco_corners_list:
@@ -279,37 +388,10 @@ class ArucoFeatureMapTracker:
             self.tracked_pts = np.empty((0, 2), dtype=np.float32)
             self.tracked_ids = []
 
-        t_w_to_c = -R_world_to_cam @ p_cam_world.reshape(3, 1)
-        Rt_curr = np.hstack([R_world_to_cam, t_w_to_c])
-        P_curr = self.camera_matrix @ Rt_curr
+        # Triangulate and expand 3D landmark map
+        self._triangulate_and_expand_map(p_cam_world, R_c_to_w, current_pts_dict)
 
-        for prev_view in self.view_history[-4:]:
-            _, prev_p, prev_R, prev_pts_dict = prev_view
-            baseline = np.linalg.norm(p_cam_world - prev_p)
-            if baseline < 0.015:
-                continue
-
-            prev_t = -prev_R @ prev_p.reshape(3, 1)
-            P_prev = self.camera_matrix @ np.hstack([prev_R, prev_t])
-
-            common_ids = [pid for pid in current_pts_dict if pid in prev_pts_dict and pid not in self.landmarks_3d]
-            if len(common_ids) == 0:
-                continue
-
-            pts1 = np.array([prev_pts_dict[pid] for pid in common_ids], dtype=np.float32).T
-            pts2 = np.array([current_pts_dict[pid] for pid in common_ids], dtype=np.float32).T
-
-            pts4d = cv2.triangulatePoints(P_prev, P_curr, pts1, pts2)
-            w = pts4d[3, :]
-            valid_depth = np.abs(w) > 1e-4
-            pts3d = (pts4d[:3, :] / np.where(valid_depth, w, 1e-4)).T
-
-            for i, pid in enumerate(common_ids):
-                if valid_depth[i]:
-                    x_w, y_w, z_w = pts3d[i]
-                    if -0.05 <= z_w <= 1.2 and np.linalg.norm([x_w, y_w]) < 2.0:
-                        self.landmarks_3d[pid] = np.array([x_w, y_w, z_w], dtype=np.float32)
-
+        # Replenish feature points if depleted
         if len(self.tracked_pts) < self.min_features:
             new_corners = self._extract_new_features(gray, mask=mask)
             if len(new_corners) > 0:
@@ -326,15 +408,15 @@ class ArucoFeatureMapTracker:
                 for i, nid in enumerate(new_ids):
                     current_pts_dict[nid] = new_corners[i]
 
-        self.view_history.append((len(self.view_history), p_cam_world.copy(), R_world_to_cam.copy(), current_pts_dict))
-        if len(self.view_history) > 8:
+        self.view_history.append((p_cam_world.copy(), R_c_to_w.copy(), current_pts_dict))
+        if len(self.view_history) > 10:
             self.view_history.pop(0)
 
         self.prev_gray_pts = self.tracked_pts.copy()
         self.prev_gray = gray.copy()
 
     def track_without_aruco(self, gray, predicted_delta_p=None):
-        if self.prev_gray is None or len(self.tracked_pts) < 8:
+        if self.prev_gray is None or len(self.tracked_pts) < 6:
             return False, None, None, None
 
         pts_curr, status, _ = cv2.calcOpticalFlowPyrLK(
@@ -347,6 +429,7 @@ class ArucoFeatureMapTracker:
         )
         valid_mask = (status.flatten() == 1)
 
+        # Forward-backward consistency check
         if np.sum(valid_mask) > 10:
             pts_back, status_back, _ = cv2.calcOpticalFlowPyrLK(
                 gray,
@@ -367,6 +450,10 @@ class ArucoFeatureMapTracker:
         self.tracked_pts = survived_pts
         self.tracked_ids = survived_ids
 
+        current_pts_dict = {}
+        for i, pid in enumerate(survived_ids):
+            current_pts_dict[pid] = survived_pts[i]
+
         matched_3d = []
         matched_2d = []
         for i, pid in enumerate(survived_ids):
@@ -376,10 +463,11 @@ class ArucoFeatureMapTracker:
 
         pnp_success = False
         p_world = None
-        R_world_to_cam = None
+        R_c_to_w = None
         source = None
 
-        if len(matched_3d) >= 6:
+        # Strategy 1: PnP-RANSAC against 3D landmarks in persistent world frame (>= 4 matches)
+        if len(matched_3d) >= 4:
             pts_3d_arr = np.array(matched_3d, dtype=np.float32)
             pts_2d_arr = np.array(matched_2d, dtype=np.float32)
 
@@ -389,26 +477,25 @@ class ArucoFeatureMapTracker:
                 self.camera_matrix,
                 self.dist_coeffs,
                 flags=cv2.SOLVEPNP_ITERATIVE,
-                reprojectionError=4.0,
-                iterationsCount=150
+                reprojectionError=3.5,
+                iterationsCount=200
             )
 
-            if success and inliers is not None and len(inliers) >= 5:
-                R_cam_to_world, _ = cv2.Rodrigues(rvec)
-                R_world_to_cam = R_cam_to_world.T
-                p_cam_in_world = -R_world_to_cam @ tvec.reshape(3, 1)
+            if success and inliers is not None and len(inliers) >= 4:
+                R_w2c, _ = cv2.Rodrigues(rvec)
+                R_c_to_w = R_w2c.T
+                p_cam_in_world = -R_c_to_w @ tvec.reshape(3, 1)
 
                 X_w = float(p_cam_in_world[0, 0])
                 Y_w = float(p_cam_in_world[1, 0])
                 Z_w = abs(float(p_cam_in_world[2, 0]))
 
                 p_world = np.array([X_w, Y_w, Z_w], dtype=np.float64)
-                self.last_p_world = p_world.copy()
-                self.last_R_world_to_cam = R_world_to_cam.copy()
                 pnp_success = True
                 source = "feature_pnp"
 
-        if not pnp_success and len(survived_pts) >= 8 and self.prev_gray_pts is not None:
+        # Strategy 2: Essential Matrix 2D-2D Visual Odometry Fallback with scale propagation
+        if not pnp_success and len(survived_pts) >= 6 and self.prev_gray_pts is not None:
             prev_matched = self.prev_gray_pts[valid_mask] if len(self.prev_gray_pts) == len(status) else None
             if prev_matched is not None and len(prev_matched) == len(survived_pts):
                 E, mask_e = cv2.findEssentialMat(
@@ -417,7 +504,7 @@ class ArucoFeatureMapTracker:
                     self.camera_matrix,
                     method=cv2.RANSAC,
                     prob=0.999,
-                    threshold=1.0
+                    threshold=1.2
                 )
                 if E is not None and E.shape == (3, 3):
                     _, R_rel, t_rel, _ = cv2.recoverPose(
@@ -432,29 +519,49 @@ class ArucoFeatureMapTracker:
                         norm = np.linalg.norm(predicted_delta_p)
                         if norm > 0.0005:
                             scale = float(norm)
+                    elif np.linalg.norm(self.last_step_delta) > 0.001:
+                        scale = float(np.linalg.norm(self.last_step_delta))
 
+                    scale = float(np.clip(scale, 0.001, 0.04))
                     t_rel_metric = t_rel.flatten() * scale
-                    R_world_to_cam = R_rel @ self.last_R_world_to_cam
-                    p_world = self.last_p_world + self.last_R_world_to_cam.T @ t_rel_metric
-                    p_world[2] = max(0.01, p_world[2])
+                    R_c_to_w = self.last_R_c_to_w @ R_rel.T
+                    p_world = self.last_p_world + self.last_R_c_to_w @ t_rel_metric
+                    p_world[2] = max(0.01, float(p_world[2]))
 
-                    self.last_p_world = p_world.copy()
-                    self.last_R_world_to_cam = R_world_to_cam.copy()
                     pnp_success = True
                     source = "feature_vo"
 
+        # If pose estimated: dynamically expand map and update history (UMI-style SLAM)
+        if pnp_success:
+            self.last_step_delta = p_world - self.last_p_world
+            self.last_p_world = p_world.copy()
+            self.last_R_c_to_w = R_c_to_w.copy()
+            self.last_R_world_to_cam = R_c_to_w.copy()
+
+            # Dynamic triangulation expands landmark map during markerless tracking
+            self._triangulate_and_expand_map(p_world, R_c_to_w, current_pts_dict)
+
+            self.view_history.append((p_world.copy(), R_c_to_w.copy(), current_pts_dict))
+            if len(self.view_history) > 10:
+                self.view_history.pop(0)
+
+        # Replenish feature points
         if len(self.tracked_pts) < self.min_features:
             new_corners = self._extract_new_features(gray)
             if len(new_corners) > 0:
                 new_ids = [self.next_pt_id + i for i in range(len(new_corners))]
                 self.next_pt_id += len(new_corners)
-                self.tracked_pts = np.vstack([self.tracked_pts, new_corners])
-                self.tracked_ids.extend(new_ids)
+                if len(self.tracked_pts) == 0:
+                    self.tracked_pts = new_corners
+                    self.tracked_ids = new_ids
+                else:
+                    self.tracked_pts = np.vstack([self.tracked_pts, new_corners])
+                    self.tracked_ids.extend(new_ids)
 
         self.prev_gray_pts = self.tracked_pts.copy()
         self.prev_gray = gray.copy()
 
-        return pnp_success, p_world, R_world_to_cam, source
+        return pnp_success, p_world, self.last_R_c_to_w, source
 
 
 class VisualInertialTracker:
@@ -599,9 +706,10 @@ class VisualInertialTracker:
         )
         return bordered
 
-    def estimate_camera_matrix(self, width, height, hfov_degrees=78.0):
+    def estimate_camera_matrix(self, width, height, hfov_degrees=100.0):
         """
-        Estimates camera intrinsic matrix K from image resolution and wide-angle phone FOV (78° default).
+        Estimates camera intrinsic matrix K from image resolution and phone FOV.
+        Defaults to 100° horizontal FOV for ultra-wide mobile camera (0.5x).
         """
         fx = (width / 2.0) / np.tan(np.radians(hfov_degrees / 2.0))
         fy = fx
@@ -619,6 +727,7 @@ class VisualInertialTracker:
         """
         Phase 1: Dual-ArUco Rigid Board Detection & Dynamic PnP Solver.
         Returns 6 elements by default for backward-compatibility, or 7 elements if return_corners=True.
+        The 3rd element is R_c_to_w (camera orientation in the world frame).
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
 
@@ -695,10 +804,10 @@ class VisualInertialTracker:
                 return False, None, None, None, None, False, []
             return False, None, None, None, None, False
 
-        # Invert pose: camera position in World (Tag A Bottom-Left Origin) Frame
-        R_cam_to_world, _ = cv2.Rodrigues(rvec)
-        R_world_to_cam = R_cam_to_world.T
-        p_cam_in_world = -R_world_to_cam @ tvec.reshape(3, 1)
+        # Invert pose: camera position and orientation in World Frame
+        R_w2c, _ = cv2.Rodrigues(rvec)
+        R_c_to_w = R_w2c.T
+        p_cam_in_world = -R_c_to_w @ tvec.reshape(3, 1)
 
         X_world = float(p_cam_in_world[0, 0])
         Y_world = float(p_cam_in_world[1, 0])
@@ -706,21 +815,21 @@ class VisualInertialTracker:
 
         p_world = np.array([X_world, Y_world, Z_world], dtype=np.float64)
         if return_corners:
-            return True, p_world, R_world_to_cam, rvec, tvec, is_dual, refined_corners
-        return True, p_world, R_world_to_cam, rvec, tvec, is_dual
+            return True, p_world, R_c_to_w, rvec, tvec, is_dual, refined_corners
+        return True, p_world, R_c_to_w, rvec, tvec, is_dual
 
     def process_video_and_imu(self, video_path, imu_samples, fps=30.0):
         """
-        Sensory fusion: ArUco Ground Truth + Feature Map PnP + 100Hz IMU EKF.
+        Sensory fusion: ArUco Ground Truth + OpenCV Virtual SLAM PnP + 100Hz IMU EKF.
         """
         cap = cv2.VideoCapture(video_path)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        camera_matrix, dist_coeffs = self.estimate_camera_matrix(width, height, hfov_degrees=78.0)
+        camera_matrix, dist_coeffs = self.estimate_camera_matrix(width, height, hfov_degrees=100.0)
 
-        # Initialize ArUco-Coordinated Feature Map Tracker
+        # Initialize OpenCV Virtual SLAM Feature Map Tracker
         feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
 
         video_detections = []  # (frame_idx, p_world, euler, is_dual, source)
@@ -740,8 +849,7 @@ class VisualInertialTracker:
             det, p_world, R_world, rvec, tvec, is_dual, corners = det_res
 
             if det:
-                r = R.from_matrix(R_world)
-                euler = r.as_euler('xyz', degrees=False)
+                euler = rotation_matrix_to_trajectory_euler(R_world)
                 src = "dual_aruco" if is_dual else "single_aruco"
                 video_detections.append((frame_idx, p_world, euler, is_dual, src))
 
@@ -751,8 +859,7 @@ class VisualInertialTracker:
                 # Step 2: ArUco is LOST / Occluded -> Track via Scene Features in ArUco space!
                 f_success, p_feat, R_feat, f_source = feature_tracker.track_without_aruco(gray)
                 if f_success:
-                    r = R.from_matrix(R_feat)
-                    euler = r.as_euler('xyz', degrees=False)
+                    euler = rotation_matrix_to_trajectory_euler(R_feat)
                     video_detections.append((frame_idx, p_feat, euler, False, f_source))
 
             frame_idx += 1
@@ -772,6 +879,7 @@ class VisualInertialTracker:
     def _parse_imu_samples(self, imu_samples, num_frames, fps):
         """
         Converts raw browser IMU samples into formatted timestamps, accelerations, and gyro rates.
+        Rotates body measurements into the camera display coordinate frame using screen_angle.
         """
         if not imu_samples or len(imu_samples) < 5:
             timestamps = np.linspace(0, num_frames / fps, num_frames)
@@ -790,16 +898,18 @@ class VisualInertialTracker:
 
         for s in imu_samples:
             acc = list(s.get('accel', [0.0, 0.0, 9.81]))
+            gyro = list(s.get('gyro', [0.0, 0.0, 0.0]))
             angle = s.get('screen_angle', 0)
             if angle == 90:
                 acc = [-acc[1], acc[0], acc[2]]
+                gyro = [-gyro[1], gyro[0], gyro[2]]
             elif angle == 270 or angle == -90:
                 acc = [acc[1], -acc[0], acc[2]]
+                gyro = [gyro[1], -gyro[0], gyro[2]]
             elif angle == 180:
                 acc = [-acc[0], -acc[1], acc[2]]
+                gyro = [-gyro[0], -gyro[1], gyro[2]]
             accels.append(acc)
-
-            gyro = s.get('gyro', [0.0, 0.0, 0.0])
             gyros.append([np.radians(gyro[0]), np.radians(gyro[1]), np.radians(gyro[2])])
 
         accels = np.array(accels, dtype=np.float64)
@@ -810,6 +920,7 @@ class VisualInertialTracker:
     def _run_ekf_fusion(self, num_frames, fps, video_detections, imu_data):
         """
         Full EKF propagation and measurement update loop across video and IMU timelines.
+        Safely bridges pre-detection cold starts and periods of marker loss.
         """
         ekf = VisualInertialEKF(**self.ekf_params)
 
@@ -820,10 +931,15 @@ class VisualInertialTracker:
             first_f, first_p, first_e, _, _ = video_detections[0]
             ekf.reset(first_p, first_e)
         else:
-            default_p = np.array([0.075, 0.05, 0.30])
-            ekf.reset(default_p, np.zeros(3))
+            first_f = 0
+            first_p = np.array([0.075, 0.05, 0.30])
+            first_e = np.zeros(3)
+            ekf.reset(first_p, first_e)
 
         final_poses = np.zeros((num_frames, 6), dtype=np.float64)
+        if first_f > 0:
+            final_poses[0:first_f] = np.hstack([first_p, first_e])
+
         imu_times = imu_data['timestamps']
         imu_accels = imu_data['accels']
         imu_gyros = imu_data['gyros']
@@ -834,14 +950,15 @@ class VisualInertialTracker:
         imu_idx = 0
         current_time = imu_times[0]
 
-        for f in range(num_frames):
+        for f in range(first_f, num_frames):
             target_time = video_times[f]
+            is_vis = (f in vis_map)
 
             # Step IMU up to target video frame time
             while imu_idx < num_imu - 1 and imu_times[imu_idx + 1] <= target_time:
                 dt = imu_times[imu_idx + 1] - imu_times[imu_idx]
                 if dt > 0:
-                    ekf.predict(dt, imu_accels[imu_idx], imu_gyros[imu_idx])
+                    ekf.predict(dt, imu_accels[imu_idx], imu_gyros[imu_idx], is_visual_active=is_vis)
                 imu_idx += 1
 
             # Final prediction step to exact frame timestamp
@@ -849,17 +966,17 @@ class VisualInertialTracker:
             if dt_rem > 0:
                 acc_sample = imu_accels[min(imu_idx, num_imu - 1)]
                 gyro_sample = imu_gyros[min(imu_idx, num_imu - 1)]
-                ekf.predict(dt_rem, acc_sample, gyro_sample)
+                ekf.predict(dt_rem, acc_sample, gyro_sample, is_visual_active=is_vis)
                 current_time = target_time
 
             # Visual measurement update if ArUco or Feature Map detected in this frame
-            if f in vis_map:
+            if is_vis:
                 p_meas, euler_meas, is_dual, src = vis_map[f]
                 ekf.update_visual(p_meas, euler_meas, is_dual=is_dual, source=src)
 
             # Store filtered 6-DoF pose [X, Y, Z, Roll, Pitch, Yaw]
             pos = ekf.x[0:3].copy()
-            pos[2] = max(0.01, pos[2])  # Keep above table surface
+            pos[2] = max(0.01, float(pos[2]))  # Keep above table surface
             rot = ekf.x[6:9].copy()
             final_poses[f] = np.hstack([pos, rot])
 
