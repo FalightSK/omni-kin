@@ -13,6 +13,16 @@ export default function VideoPlayer({
   const videoRef = useRef(null);
   const [videoDims, setVideoDims] = useState(null);
 
+  // Reset dimensions and reload video cleanly on URL switch
+  useEffect(() => {
+    setVideoDims(null);
+    const video = videoRef.current;
+    if (video) {
+      video.currentTime = 0;
+      video.load();
+    }
+  }, [videoUrl]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -28,8 +38,8 @@ export default function VideoPlayer({
     const video = videoRef.current;
     if (!video || !totalFrames || totalFrames <= 0) return;
 
-    const targetTime = currentFrameIndex / fps;
-    if (Math.abs(video.currentTime - targetTime) > 0.15) {
+    const targetTime = Math.max(0, currentFrameIndex / (fps || 30));
+    if (Number.isFinite(targetTime) && Math.abs(video.currentTime - targetTime) > 0.05) {
       video.currentTime = targetTime;
     }
   }, [currentFrameIndex, fps, totalFrames]);
@@ -46,6 +56,12 @@ export default function VideoPlayer({
       else if (Math.abs(w / h - 9 / 16) < 0.05) aspectLabel += ' (9:16)';
       else aspectLabel += ` (${ratio}:1)`;
       setVideoDims(aspectLabel);
+
+      // Seek to current frame on initial metadata load if needed
+      const targetTime = Math.max(0, currentFrameIndex / (fps || 30));
+      if (Number.isFinite(targetTime) && targetTime > 0) {
+        video.currentTime = targetTime;
+      }
     }
   };
 
@@ -53,10 +69,12 @@ export default function VideoPlayer({
     <div className="w-full h-full relative rounded-2xl overflow-hidden glass-card flex items-center justify-center bg-black/95 select-none">
       {videoUrl ? (
         <video
+          key={videoUrl}
           ref={videoRef}
           src={videoUrl}
           playsInline
           muted
+          preload="auto"
           onLoadedMetadata={handleLoadedMetadata}
           className="w-full h-full object-contain max-w-full max-h-full transition-all"
           onTimeUpdate={() => {

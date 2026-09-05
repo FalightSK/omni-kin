@@ -29,6 +29,7 @@ export default function Dashboard({
   setSelectedEpIdx,
   onRefreshEpisodes,
   onDeleteEpisode,
+  onClearAllEpisodes,
   onReprocessActive,
   robotConfig,
   onOpenRobotModal
@@ -50,12 +51,21 @@ export default function Dashboard({
   const activeEp = episodes.find((e) => e.episode_index === selectedEpIdx) || episodes[0] || null;
   const poses = activeEp?.poses || [];
   const totalFrames = activeEp?.num_frames || 0;
-  const currentPose = poses[currentFrameIndex] || [0, 0, 0, 0, 0, 0];
+  const safeFrameIndex = totalFrames > 0 ? Math.min(Math.max(0, currentFrameIndex), totalFrames - 1) : 0;
+  const currentPose = poses[safeFrameIndex] || [0, 0, 0, 0, 0, 0];
 
+  // Sync selectedEpIdx if activeEp resolved to a different episode
+  useEffect(() => {
+    if (activeEp && selectedEpIdx !== activeEp.episode_index) {
+      setSelectedEpIdx(activeEp.episode_index);
+    }
+  }, [activeEp, selectedEpIdx, setSelectedEpIdx]);
+
+  // Reset playback and frame position whenever active episode or video URL changes
   useEffect(() => {
     setCurrentFrameIndex(0);
     setIsPlaying(false);
-  }, [selectedEpIdx]);
+  }, [activeEp?.episode_index, activeEp?.video_url]);
 
   useEffect(() => {
     let interval = null;
@@ -261,7 +271,7 @@ export default function Dashboard({
             <div className="w-full h-full relative">
               <Viewport3D
                 trajectoryPoses={poses}
-                currentFrameIndex={currentFrameIndex}
+                currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}
               />
             </div>
@@ -311,7 +321,7 @@ export default function Dashboard({
                   <VideoPlayer
                     videoUrl={activeEp?.video_url}
                     isPlaying={isPlaying}
-                    currentFrameIndex={currentFrameIndex}
+                    currentFrameIndex={safeFrameIndex}
                     totalFrames={totalFrames}
                     fps={activeEp?.fps || 30}
                     showBadge={false}
@@ -351,7 +361,7 @@ export default function Dashboard({
             >
               <Viewport3D
                 trajectoryPoses={poses}
-                currentFrameIndex={currentFrameIndex}
+                currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}
               />
             </div>
@@ -392,7 +402,7 @@ export default function Dashboard({
               <VideoPlayer
                 videoUrl={activeEp?.video_url}
                 isPlaying={isPlaying}
-                currentFrameIndex={currentFrameIndex}
+                currentFrameIndex={safeFrameIndex}
                 totalFrames={totalFrames}
                 fps={activeEp?.fps || 30}
               />
@@ -416,7 +426,7 @@ export default function Dashboard({
                 type="range"
                 min="0"
                 max={Math.max(0, totalFrames - 1)}
-                value={currentFrameIndex}
+                value={safeFrameIndex}
                 onChange={(e) => {
                   setIsPlaying(false);
                   setCurrentFrameIndex(parseInt(e.target.value) || 0);
@@ -424,9 +434,9 @@ export default function Dashboard({
                 className="w-full accent-indigo-500 cursor-pointer h-2 bg-slate-800 rounded-lg"
               />
               <div className="flex justify-between text-[11px] font-mono text-slate-400">
-                <span>Frame {currentFrameIndex + 1} of {totalFrames}</span>
+                <span>Frame {safeFrameIndex + 1} of {totalFrames}</span>
                 <span>
-                  {((currentFrameIndex / (activeEp?.fps || 30)) || 0).toFixed(2)}s / {(activeEp?.duration || 0).toFixed(2)}s
+                  {((safeFrameIndex / (activeEp?.fps || 30)) || 0).toFixed(2)}s / {(activeEp?.duration || 0).toFixed(2)}s
                 </span>
               </div>
             </div>
@@ -476,8 +486,8 @@ export default function Dashboard({
             <div>
               <span className="text-[10px] text-slate-500 uppercase block font-sans">Gripper</span>
               <span className="text-xs font-semibold text-amber-400">
-                {activeEp?.gripper_states?.[currentFrameIndex]
-                  ? `${activeEp.gripper_states[currentFrameIndex].toFixed(0)}%`
+                {activeEp?.gripper_states?.[safeFrameIndex]
+                  ? `${activeEp.gripper_states[safeFrameIndex].toFixed(0)}%`
                   : '100%'}
               </span>
             </div>
@@ -495,13 +505,24 @@ export default function Dashboard({
                 Episodes ({episodes.length})
               </h2>
             </div>
-            <button
-              onClick={onRefreshEpisodes}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-              title="Refresh Episodes"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-1">
+              {episodes.length > 0 && onClearAllEpisodes && (
+                <button
+                  onClick={onClearAllEpisodes}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                  title="Clear All Episodes"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              )}
+              <button
+                onClick={onRefreshEpisodes}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+                title="Refresh Episodes"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto flex flex-col gap-2 pr-1">

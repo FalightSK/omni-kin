@@ -62,14 +62,27 @@ export default function App() {
     yaw_deg: 0.0
   });
 
-  const fetchEpisodes = async () => {
+  const fetchEpisodes = async (preferredIndex = null) => {
     try {
       const res = await fetch('/api/episodes');
       const data = await res.json();
-      setEpisodes(data || []);
-      if (data && data.length > 0 && selectedEpIdx === -1) {
-        setSelectedEpIdx(data[0].episode_index);
+      const list = data || [];
+      setEpisodes(list);
+
+      if (list.length === 0) {
+        setSelectedEpIdx(-1);
+        return;
       }
+
+      setSelectedEpIdx((prevIdx) => {
+        if (preferredIndex !== null && list.some((e) => e.episode_index === preferredIndex)) {
+          return preferredIndex;
+        }
+        if (prevIdx !== -1 && list.some((e) => e.episode_index === prevIdx)) {
+          return prevIdx;
+        }
+        return list[0].episode_index;
+      });
     } catch (err) {
       console.error("Failed to fetch episodes", err);
     }
@@ -96,9 +109,19 @@ export default function App() {
     if (!window.confirm(`Delete Episode #${index}?`)) return;
     try {
       await fetch(`/api/episodes/${index}`, { method: 'DELETE' });
-      fetchEpisodes();
+      await fetchEpisodes();
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleClearAllEpisodes = async () => {
+    if (!window.confirm("Are you sure you want to CLEAR ALL recorded episodes and datasets? This cannot be undone.")) return;
+    try {
+      await fetch('/api/episodes/clear', { method: 'POST' });
+      await fetchEpisodes();
+    } catch (err) {
+      console.error("Failed to clear episodes", err);
     }
   };
 
@@ -156,6 +179,7 @@ export default function App() {
               setSelectedEpIdx={setSelectedEpIdx}
               onRefreshEpisodes={fetchEpisodes}
               onDeleteEpisode={handleDeleteEpisode}
+              onClearAllEpisodes={handleClearAllEpisodes}
               robotConfig={robotConfig}
               onOpenRobotModal={() => setIsRobotModalOpen(true)}
             />
