@@ -1021,12 +1021,103 @@ class VisualInertialTracker:
 
         return annotated
 
+    def render_canny_frame(
+        self,
+        frame,
+        camera_matrix,
+        dist_coeffs,
+        frame_idx,
+        total_frames,
+        fps,
+        p_world=None,
+        euler=None,
+        rvec=None,
+        tvec=None,
+        corners=None,
+        ids_list=None,
+        tracked_pts=None
+    ):
+        """
+        Renders an authentic OpenCV Canny edge detection visualization:
+          - High-contrast edge map computed with cv2.Canny(gray, 50, 150)
+          - Edge contours illuminated in cyan over the real scene
+          - ArUco tag bounding boxes drawn in vibrant neon green with corner indices
+          - 3D coordinate frame axes standing on the physical marker origin
+          - Actively detected feature corner points highlighted
+          - OpenCV Canny Diagnostic HUD banner
+        """
+        height, width = frame.shape[:2]
+
+        # 1. Compute OpenCV Canny Edges
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 1.2)
+        edges = cv2.Canny(blurred, 50, 150)
+
+        # 2. Dark moody background with blended real video (28% brightness) + glowing cyan edges
+        dimmed_frame = (frame.astype(np.float32) * 0.28).astype(np.uint8)
+        annotated = dimmed_frame.copy()
+        annotated[edges > 0] = [255, 230, 0]  # Vibrant Cyan BGR for Canny edges
+
+        # 3. Draw tracked optical feature corners (FAST / Shi-Tomasi)
+        if tracked_pts is not None and len(tracked_pts) > 0:
+            for pt in tracked_pts:
+                u, v = int(round(float(pt[0]))), int(round(float(pt[1])))
+                if 0 <= u < width and 0 <= v < height:
+                    cv2.circle(annotated, (u, v), 3, (0, 255, 255), -1, cv2.LINE_AA)
+
+        # 4. Draw ArUco Bounding Boxes, Corner Points, and Labels
+        if corners is not None and len(corners) > 0:
+            for i, c in enumerate(corners):
+                pts = c[0].astype(np.int32)
+                # Outer thick neon green bounding box
+                cv2.polylines(annotated, [pts], isClosed=True, color=(0, 255, 0), thickness=3, lineType=cv2.LINE_AA)
+                # Corner dots
+                for c_idx, corner in enumerate(pts):
+                    c_col = (0, 0, 255) if c_idx == 0 else (0, 255, 255)
+                    cv2.circle(annotated, tuple(corner), 5, c_col, -1, cv2.LINE_AA)
+
+                tid = ids_list[i] if (ids_list and i < len(ids_list)) else i
+                label = f"Tag A (ID {tid} Origin [0,0,0])" if tid == self.tag_a_id else f"Tag B (ID {tid} +15cm)" if tid == self.tag_b_id else f"ArUco ID {tid}"
+
+                # Bounding box tag banner
+                pt0 = pts[0]
+                box_w = 175
+                box_h = 22
+                bx = max(5, pt0[0])
+                by = max(box_h + 4, pt0[1] - 8)
+                cv2.rectangle(annotated, (bx - 2, by - box_h), (bx + box_w, by), (12, 16, 24), -1)
+                cv2.rectangle(annotated, (bx - 2, by - box_h), (bx + box_w, by), (0, 255, 0), 1)
+                cv2.putText(annotated, label, (bx + 3, by - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 255, 0), 1, cv2.LINE_AA)
+
+        # 5. Draw 3D coordinate axes if pose is available
+        if rvec is not None and tvec is not None and camera_matrix is not None:
+            try:
+                cv2.drawFrameAxes(annotated, camera_matrix, dist_coeffs, rvec, tvec, 0.08, 2)
+            except Exception:
+                pass
+
+        # 6. Top Canny Diagnostic HUD
+        hud_h = 44
+        overlay = annotated.copy()
+        cv2.rectangle(overlay, (0, 0), (width, hud_h), (12, 16, 24), -1)
+        cv2.addWeighted(overlay, 0.85, annotated, 0.15, 0, annotated)
+        cv2.line(annotated, (0, hud_h), (width, hud_h), (0, 230, 255), 1)
+
+        cv2.circle(annotated, (18, 22), 5, (0, 230, 255), -1, cv2.LINE_AA)
+        cv2.putText(annotated, "OPENCV CANNY EDGE DETECTION & ARUCO BOUNDING BOXES", (30, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 230, 255), 2, cv2.LINE_AA)
+
+        f_text = f"Frame {frame_idx + 1}/{max(1, total_frames)}  |  Canny T1=50, T2=150"
+        cv2.putText(annotated, f_text, (max(width - 340, 300), 27), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (200, 220, 240), 1, cv2.LINE_AA)
+
+        return annotated
+
     def process_video_and_imu(
         self,
         video_path,
         imu_samples,
         fps=30.0,
         output_dev_video_path=None,
+        output_canny_video_path=None,
         return_dev_info=False
     ):
         """
@@ -1044,9 +1135,12 @@ class VisualInertialTracker:
         feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
 
         dev_writer = None
+        canny_writer = None
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         if output_dev_video_path:
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             dev_writer = cv2.VideoWriter(output_dev_video_path, fourcc, fps, (width, height))
+        if output_canny_video_path:
+            canny_writer = cv2.VideoWriter(output_canny_video_path, fourcc, fps, (width, height))
 
         video_detections = []  # (frame_idx, p_world, euler, is_dual, source)
         dev_telemetry = []
@@ -1097,6 +1191,21 @@ class VisualInertialTracker:
                 else:
                     src = "imu"
 
+            # Extract bounding boxes for telemetry
+            detected_bboxes = []
+            if det and corners is not None and len(corners) > 0:
+                for i_box, c_box in enumerate(corners):
+                    c_pts = c_box[0]
+                    t_box_id = int(self.last_detected_ids[i_box]) if (i_box < len(self.last_detected_ids)) else i_box
+                    detected_bboxes.append({
+                        'id': t_box_id,
+                        'name': 'Tag A (Origin)' if t_box_id == self.tag_a_id else 'Tag B (Offset)' if t_box_id == self.tag_b_id else f'Tag {t_box_id}',
+                        'corners': c_pts.tolist(),
+                        'center': [round(float(c_pts[:, 0].mean()), 1), round(float(c_pts[:, 1].mean()), 1)],
+                        'width_px': round(float(np.linalg.norm(c_pts[1] - c_pts[0])), 1),
+                        'height_px': round(float(np.linalg.norm(c_pts[2] - c_pts[1])), 1)
+                    })
+
             # Record per-frame dev telemetry
             dev_telemetry.append({
                 'frame_idx': frame_idx,
@@ -1105,6 +1214,7 @@ class VisualInertialTracker:
                 'num_features': len(feature_tracker.tracked_pts),
                 'is_dual': is_dual if det else False,
                 'tags_detected': list(self.last_detected_ids) if det else [],
+                'bounding_boxes': detected_bboxes,
                 'pose': p_curr.tolist() if p_curr is not None else [0.0, 0.0, 0.0],
                 'euler': euler_curr.tolist() if euler_curr is not None else [0.0, 0.0, 0.0]
             })
@@ -1131,11 +1241,32 @@ class VisualInertialTracker:
                 )
                 dev_writer.write(dev_frame)
 
+            # Render canny visualization frame
+            if canny_writer is not None:
+                canny_frame = self.render_canny_frame(
+                    frame=frame,
+                    camera_matrix=camera_matrix,
+                    dist_coeffs=dist_coeffs,
+                    frame_idx=frame_idx,
+                    total_frames=total_frames,
+                    fps=fps,
+                    p_world=p_curr,
+                    euler=euler_curr,
+                    rvec=rvec_curr,
+                    tvec=tvec_curr,
+                    corners=corners if det else None,
+                    ids_list=self.last_detected_ids if det else None,
+                    tracked_pts=feature_tracker.tracked_pts
+                )
+                canny_writer.write(canny_frame)
+
             frame_idx += 1
 
         cap.release()
         if dev_writer is not None:
             dev_writer.release()
+        if canny_writer is not None:
+            canny_writer.release()
 
         num_frames = frame_idx
         if num_frames == 0:
@@ -1289,7 +1420,7 @@ class VisualInertialTracker:
 
         return final_poses
 
-    def reprocess_episode_trajectory(self, video_path, imu_samples, fps=30.0, output_dev_video_path=None, return_dev_info=False):
+    def reprocess_episode_trajectory(self, video_path, imu_samples, fps=30.0, output_dev_video_path=None, output_canny_video_path=None, return_dev_info=False):
         """
         Re-filters an existing video and IMU recording using the latest EKF parameters.
         """
@@ -1298,6 +1429,7 @@ class VisualInertialTracker:
             imu_samples,
             fps=fps,
             output_dev_video_path=output_dev_video_path,
+            output_canny_video_path=output_canny_video_path,
             return_dev_info=return_dev_info
         )
 
