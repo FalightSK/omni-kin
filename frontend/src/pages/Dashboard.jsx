@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Viewport3D from '../components/Viewport3D';
 import VideoPlayer from '../components/VideoPlayer';
+import DevVisionMonitor from '../components/DevVisionMonitor';
 import {
   Play,
   Pause,
@@ -223,14 +224,14 @@ export default function Dashboard({
 
   return (
     <div
-      className={`flex-1 p-4 grid gap-4 min-h-[calc(100dvh-60px)] lg:h-[calc(100dvh-60px)] lg:overflow-hidden transition-all ${
-        isSidebarOpen ? 'grid-cols-1 lg:grid-cols-4' : 'grid-cols-1'
-      } ${isDragging ? 'select-none' : ''}`}
+      className={`flex-1 p-4 grid gap-4 grid-cols-1 ${
+        isSidebarOpen ? 'lg:grid-cols-4' : 'lg:grid-cols-1'
+      } transition-all ${isDragging ? 'select-none' : ''}`}
     >
-      {/* Main Center Area: Big 3D Preview with Inset Camera & Timeline */}
+      {/* Main Center Area: Big 3D Preview with Inset Camera, Timeline, & OpenCV Dev Center */}
       <div
         ref={scrollContainerRef}
-        className={`${isSidebarOpen ? 'lg:col-span-3' : 'w-full'} flex flex-col gap-3 h-full min-h-0 overflow-y-auto overflow-x-hidden pr-2 pb-8 custom-scrollbar`}
+        className={`${isSidebarOpen ? 'lg:col-span-3' : 'w-full'} flex flex-col gap-4 pb-16`}
       >
         {/* Top Control Bar for Layout Modes */}
         <div className="flex items-center justify-between px-1 text-xs">
@@ -601,10 +602,30 @@ export default function Dashboard({
               </span>
             </div>
           </div>
+        </div>
 
-          {/* Intuitive OpenCV Scene Anchoring & ArUco Dev Diagnostic Panel */}
-          {isDevView && (
-            <div ref={devPanelRef} className="bg-slate-950/95 p-4 rounded-2xl border border-amber-500/40 text-left text-xs flex flex-col gap-3 shadow-xl">
+        {/* Intuitive OpenCV Scene Anchoring, Real Video Bounding Boxes & Canny Dev Diagnostic Panel */}
+        {isDevView && (
+          <div ref={devPanelRef} className="flex flex-col gap-4">
+            {/* Live OpenCV Computer Vision Monitor: Real Video with ArUco Bounding Boxes, Canny View & Keypoint Tracking */}
+            <DevVisionMonitor
+              videoUrl={activeEp?.video_url}
+              devVideoUrl={activeEp?.dev_video_url}
+              cannyVideoUrl={activeEp?.canny_video_url}
+              devTelemetry={activeEp?.dev_telemetry || []}
+              currentFrameIndex={safeFrameIndex}
+              totalFrames={totalFrames}
+              fps={activeEp?.fps || 30}
+              isPlaying={isPlaying}
+              onTogglePlay={() => setIsPlaying(!isPlaying)}
+              onSeekFrame={(idx) => {
+                setIsPlaying(false);
+                setCurrentFrameIndex(idx);
+              }}
+            />
+
+            {/* OpenCV Scene Anchoring & Real-World Calibration Details */}
+            <div className="bg-slate-950/95 p-4 rounded-2xl border border-amber-500/40 text-left text-xs flex flex-col gap-3 shadow-xl">
               {/* Header: Title, Active Anchor Mode Pill, and Concept Guide Toggle */}
               <div className="flex items-center justify-between flex-wrap gap-2 border-b border-slate-800/80 pb-3">
                 <div className="flex items-center gap-2.5">
@@ -892,13 +913,13 @@ export default function Dashboard({
                 )}
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
-      {/* Right Sidebar: Episode Storage Drawer (Collapsible) */}
+      {/* Right Sidebar: Episode Storage Drawer (Collapsible & Sticky) */}
       {isSidebarOpen && (
-        <div className="glass-card p-4 rounded-2xl flex flex-col gap-3 h-full overflow-hidden text-left transition-all">
+        <div className="glass-card p-4 rounded-2xl flex flex-col gap-3 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100vh-2rem)] overflow-hidden text-left transition-all">
           <div className="flex items-center justify-between border-b border-slate-800 pb-3">
             <div className="flex items-center gap-2">
               <Layers className="w-4 h-4 text-indigo-400" />

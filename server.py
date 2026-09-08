@@ -642,11 +642,16 @@ async def save_recording(
         dev_video_path = os.path.join(ep_dir, dev_video_filename)
         dev_video_url = f"/recordings/{ep_uid}/{dev_video_filename}"
 
+        canny_video_filename = "canny_visualization.mp4"
+        canny_video_path = os.path.join(ep_dir, canny_video_filename)
+        canny_video_url = f"/recordings/{ep_uid}/{canny_video_filename}"
+
         anchored_poses, dev_telemetry = visual_tracker.process_video_and_imu(
             video_path,
             parsed_imu,
             fps=fps,
             output_dev_video_path=dev_video_path,
+            output_canny_video_path=canny_video_path,
             return_dev_info=True
         )
 
@@ -668,6 +673,7 @@ async def save_recording(
             'video_path': video_path,
             'video_url': video_url,
             'dev_video_url': dev_video_url,
+            'canny_video_url': canny_video_url,
             'dev_telemetry': dev_telemetry,
             'num_frames': len(anchored_poses),
             'fps': fps,
@@ -726,6 +732,11 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
     dev_video_path = os.path.join(ep_dir, dev_video_filename)
     dev_video_url = f"/recordings/{sample_uid}/{dev_video_filename}"
     dev_out = cv2.VideoWriter(dev_video_path, fourcc, fps, (640, 480))
+
+    canny_video_filename = "canny_visualization.mp4"
+    canny_video_path = os.path.join(ep_dir, canny_video_filename)
+    canny_video_url = f"/recordings/{sample_uid}/{canny_video_filename}"
+    canny_out = cv2.VideoWriter(canny_video_path, fourcc, fps, (640, 480))
 
     marker_img = visual_tracker.generate_marker_image(marker_id=0, side_pixels=140, border_pixels=10)
     mh, mw = marker_img.shape
@@ -790,6 +801,37 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
         )
         dev_out.write(dev_frame)
 
+        # Render Canny Edge + ArUco bounding frame
+        canny_frame = visual_tracker.render_canny_frame(
+            frame=frame,
+            camera_matrix=cam_k,
+            dist_coeffs=dist,
+            frame_idx=i,
+            total_frames=frame_count,
+            fps=fps,
+            p_world=np.array([p[0], p[1], p[2]]),
+            euler=np.array([p[3], p[4], p[5]]),
+            rvec=rvec_sim,
+            tvec=tvec_sim,
+            corners=marker_corners if mode_src == "dual_aruco" else None,
+            ids_list=[0],
+            tracked_pts=synth_pts
+        )
+        canny_out.write(canny_frame)
+
+        # Compute synthetic bounding box
+        sample_bboxes = []
+        if mode_src == "dual_aruco":
+            c_pts = marker_corners[0][0]
+            sample_bboxes.append({
+                'id': 0,
+                'name': 'Tag A (Origin)',
+                'corners': c_pts.tolist(),
+                'center': [round(float(c_pts[:, 0].mean()), 1), round(float(c_pts[:, 1].mean()), 1)],
+                'width_px': 140.0,
+                'height_px': 140.0
+            })
+
         dev_telemetry.append({
             'frame_idx': i,
             'source': mode_src,
@@ -797,6 +839,7 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
             'num_features': len(synth_pts),
             'is_dual': True if mode_src == "dual_aruco" else False,
             'tags_detected': [0] if mode_src == "dual_aruco" else [],
+            'bounding_boxes': sample_bboxes,
             'pose': [float(p[0]), float(p[1]), float(p[2])],
             'euler': [float(p[3]), float(p[4]), float(p[5])]
         })
@@ -806,6 +849,7 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
 
     out.release()
     dev_out.release()
+    canny_out.release()
 
     anchored_poses = np.array(anchored_poses)
     actions = np.roll(anchored_poses, -1, axis=0)
@@ -819,6 +863,7 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
         'video_path': video_path,
         'video_url': video_url,
         'dev_video_url': dev_video_url,
+        'canny_video_url': canny_video_url,
         'dev_telemetry': dev_telemetry,
         'num_frames': frame_count,
         'fps': fps,
@@ -882,14 +927,17 @@ async def reprocess_episode(episode_index: int):
     fps = target_ep.get('fps', 30.0)
     ep_dir = os.path.dirname(video_path)
     dev_video_path = os.path.join(ep_dir, "dev_visualization.mp4")
+    canny_video_path = os.path.join(ep_dir, "canny_visualization.mp4")
     ep_uid = target_ep.get('episode_id', f"episode_{episode_index}")
     dev_video_url = f"/recordings/{ep_uid}/dev_visualization.mp4"
+    canny_video_url = f"/recordings/{ep_uid}/canny_visualization.mp4"
 
     new_poses, dev_telemetry = visual_tracker.reprocess_episode_trajectory(
         video_path,
         imu_data,
         fps=fps,
         output_dev_video_path=dev_video_path,
+        output_canny_video_path=canny_video_path,
         return_dev_info=True
     )
     new_poses = np.array(new_poses)
@@ -900,6 +948,7 @@ async def reprocess_episode(episode_index: int):
     actions[-1] = new_poses[-1]
     target_ep['actions'] = actions.tolist()
     target_ep['dev_video_url'] = dev_video_url
+    target_ep['canny_video_url'] = canny_video_url
     target_ep['dev_telemetry'] = dev_telemetry
 
     return JSONResponse({
@@ -907,7 +956,8 @@ async def reprocess_episode(episode_index: int):
         "episode_index": episode_index,
         "num_frames": len(new_poses),
         "poses": new_poses.tolist(),
-        "dev_video_url": dev_video_url
+        "dev_video_url": dev_video_url,
+        "canny_video_url": canny_video_url
     })
 
 @app.post("/api/episodes/{episode_index}/dev_video")
@@ -927,8 +977,10 @@ async def generate_episode_dev_video(episode_index: int):
 
     ep_dir = os.path.dirname(video_path)
     dev_video_path = os.path.join(ep_dir, "dev_visualization.mp4")
+    canny_video_path = os.path.join(ep_dir, "canny_visualization.mp4")
     ep_uid = target_ep.get('episode_id', f"episode_{episode_index}")
     dev_video_url = f"/recordings/{ep_uid}/dev_visualization.mp4"
+    canny_video_url = f"/recordings/{ep_uid}/canny_visualization.mp4"
 
     if not os.path.exists(dev_video_path) or target_ep.get('dev_telemetry') is None:
         fps = target_ep.get('fps', 30.0)
@@ -937,14 +989,17 @@ async def generate_episode_dev_video(episode_index: int):
             target_ep.get('imu_data', []),
             fps=fps,
             output_dev_video_path=dev_video_path,
+            output_canny_video_path=canny_video_path,
             return_dev_info=True
         )
         target_ep['dev_telemetry'] = dev_telemetry
 
     target_ep['dev_video_url'] = dev_video_url
+    target_ep['canny_video_url'] = canny_video_url
     return JSONResponse({
         "status": "success",
         "dev_video_url": dev_video_url,
+        "canny_video_url": canny_video_url,
         "dev_telemetry": target_ep.get('dev_telemetry', [])
     })
 
