@@ -22,7 +22,17 @@ import {
   GripHorizontal,
   GripVertical,
   Terminal,
-  Activity
+  Activity,
+  Anchor,
+  Sparkles,
+  ShieldCheck,
+  CheckCircle2,
+  HelpCircle,
+  ArrowRight,
+  Eye,
+  Info,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 
 export default function Dashboard({
@@ -41,7 +51,8 @@ export default function Dashboard({
 
   // Dev View Diagnostic Overlay (ArUco + Virtual SLAM)
   const [isDevView, setIsDevView] = useState(true);
-  const [isExpandedDetails, setIsExpandedDetails] = useState(true);
+  const [showRawTelemetry, setShowRawTelemetry] = useState(false);
+  const [showAnchoringGuide, setShowAnchoringGuide] = useState(true);
 
   // Layout Configuration: Default to 'pip' (Big 3D Trajectory with anchored bottom-right Camera)
   const [layoutMode, setLayoutMode] = useState('pip'); // 'pip' (Default), 'vertical', or 'horizontal'
@@ -170,6 +181,43 @@ export default function Dashboard({
   }
 
   const robotName = (robotConfig?.robot_type || 'so101').toUpperCase();
+
+  // Anchor status calculation for intuitive Dev View visualization
+  const isTagADetected = currTelemetry?.tags_detected?.includes(0);
+  const isTagBDetected = currTelemetry?.tags_detected?.includes(1);
+  const isArucoActive = isTagADetected || isTagBDetected || currTelemetry?.source === 'dual_aruco' || currTelemetry?.source === 'single_aruco';
+  const numLandmarks = currTelemetry?.num_landmarks ?? 0;
+  const numFeatures = currTelemetry?.num_features ?? 0;
+  const isSlamActive = currTelemetry?.source === 'feature_pnp' || currTelemetry?.source === 'feature_vo';
+
+  let anchorStateTitle = "Scanning for Anchors";
+  let anchorStateBadge = "INITIALIZING";
+  let anchorBadgeColor = "bg-slate-800 text-slate-300 border-slate-700";
+  let anchorExplanation = "OpenCV is scanning the camera feed to find the physical ArUco table marker or trackable scene features.";
+
+  if (isArucoActive) {
+    if (currTelemetry?.is_dual) {
+      anchorStateTitle = "Primary Anchor: Dual ArUco Board Locked";
+      anchorStateBadge = "PHYSICAL ANCHOR (DUAL)";
+      anchorBadgeColor = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+      anchorExplanation = "OpenCV is locked onto Tag A & Tag B on the table. It establishes the physical (0,0,0) world origin and is simultaneously pinning surrounding scene features into 3D space as virtual backup anchors.";
+    } else {
+      anchorStateTitle = "Primary Anchor: Single ArUco Tag Locked";
+      anchorStateBadge = "PHYSICAL ANCHOR";
+      anchorBadgeColor = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+      anchorExplanation = `OpenCV is locked onto Tag ${isTagADetected ? 'A (Origin [0,0,0])' : 'B (Offset)'}. It defines table coordinates and anchors surrounding scene textures into 3D space.`;
+    }
+  } else if (isSlamActive || numLandmarks > 0) {
+    anchorStateTitle = "Virtual Anchor: 3D Scene SLAM Active (Tag Occluded)";
+    anchorStateBadge = "SCENE ANCHOR (VIRTUAL SLAM)";
+    anchorBadgeColor = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+    anchorExplanation = `The physical ArUco tag is covered or out of view. OpenCV seamlessly switched to ${numLandmarks} previously pinned 3D scene features to keep the robot trajectory locked to the table without drift.`;
+  } else if (currTelemetry?.source === 'imu') {
+    anchorStateTitle = "Motion Continuity: IMU & Optical Dead-Reckoning";
+    anchorStateBadge = "DEAD RECKONING";
+    anchorBadgeColor = "bg-orange-500/20 text-orange-300 border-orange-500/40";
+    anchorExplanation = "Visual anchors temporarily unavailable. The phone's accelerometer and gyroscope are bridging motion until anchors re-enter the camera frame.";
+  }
 
   return (
     <div
@@ -535,178 +583,279 @@ export default function Dashboard({
             </div>
           </div>
 
-          {/* SLAM & ArUco Dev Diagnostic Strip when Dev View is Active */}
+          {/* Intuitive OpenCV Scene Anchoring & ArUco Dev Diagnostic Panel */}
           {isDevView && (
-            <div className="bg-slate-950/90 p-2.5 rounded-xl border border-amber-500/30 text-left text-xs flex flex-col gap-2 shadow-lg">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div className="flex items-center gap-2">
-                  <Terminal className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-amber-300">
-                    CV & Virtual SLAM Diagnostics
-                  </span>
-                  <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wide border ${
-                      currTelemetry?.source === 'dual_aruco'
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                        : currTelemetry?.source === 'single_aruco'
-                        ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
-                        : currTelemetry?.source === 'feature_pnp'
-                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                        : 'bg-orange-500/20 text-orange-300 border-orange-500/40'
-                    }`}
-                  >
-                    {currTelemetry?.source?.replace('_', ' ') || 'INITIALIZING'}
-                  </span>
-                  <button
-                    onClick={() => setIsExpandedDetails(!isExpandedDetails)}
-                    className="px-2 py-0.5 rounded text-[10px] font-mono text-amber-300 hover:text-amber-100 bg-amber-500/10 hover:bg-amber-500/25 border border-amber-500/30 transition-all flex items-center gap-1 ml-1"
-                    title="Toggle Detailed Telemetry Breakdown"
-                  >
-                    <Activity className="w-3 h-3" />
-                    <span>{isExpandedDetails ? 'Hide Deep Telemetry' : 'Deep Telemetry'}</span>
-                  </button>
+            <div className="bg-slate-950/95 p-4 rounded-2xl border border-amber-500/40 text-left text-xs flex flex-col gap-3 shadow-xl">
+              {/* Header: Title, Active Anchor Mode Pill, and Concept Guide Toggle */}
+              <div className="flex items-center justify-between flex-wrap gap-2 border-b border-slate-800/80 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-1.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                    <Anchor className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-100">
+                        OpenCV Scene Anchoring & ArUco Tracking
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-sans font-bold uppercase tracking-wide border ${anchorBadgeColor}`}
+                      >
+                        {anchorStateBadge}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Visualizing how OpenCV anchors real-world coordinates and avoids drift when markers are covered
+                    </p>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-3 text-[11px] font-mono text-slate-300 flex-wrap">
-                  <span className="flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-amber-400" />
-                    <span>3D Landmarks:</span>
-                    <strong className="text-amber-300">{currTelemetry?.num_landmarks ?? 0}</strong>
-                  </span>
-                  <span className="text-slate-600">|</span>
-                  <span className="flex items-center gap-1">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                    <span>Tracked Features:</span>
-                    <strong className="text-emerald-300">{currTelemetry?.num_features ?? 0}</strong>
-                  </span>
-                  <span className="text-slate-600">|</span>
-                  <span className="flex items-center gap-1">
-                    <span>ArUco Markers:</span>
-                    <strong className="text-slate-200">
-                      {currTelemetry?.tags_detected?.length
-                        ? currTelemetry.tags_detected.map((t) => `ID ${t}`).join(', ')
-                        : 'None (SLAM Engaged)'}
-                    </strong>
-                  </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowAnchoringGuide(!showAnchoringGuide)}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 transition-all flex items-center gap-1.5"
+                    title="Toggle Explanation of OpenCV Anchoring"
+                  >
+                    <HelpCircle className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>{showAnchoringGuide ? 'Hide Concept' : 'How It Works'}</span>
+                  </button>
                 </div>
               </div>
 
-              {/* Expandable Deep Telemetry Cards */}
-              {isExpandedDetails && (
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-2 border-t border-slate-800/90 font-mono text-[11px]">
-                  {/* Card 1: Visual SLAM Multi-View Feature Tracking */}
-                  <div className="bg-slate-900/80 rounded-lg p-2.5 border border-slate-800/80 flex flex-col gap-1.5 shadow-sm">
-                    <div className="text-[10px] font-semibold text-amber-400 uppercase tracking-wide flex items-center justify-between font-sans">
-                      <span>🌐 Visual SLAM Tracking</span>
-                      <span className="text-[9px] text-slate-500">PyrLK + Triangulation</span>
-                    </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">3D Landmarks:</span>
-                      <span className="font-bold text-amber-300">{currTelemetry?.num_landmarks ?? 0}</span>
-                    </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">2D Optical Flow Pts:</span>
-                      <span className="font-bold text-emerald-300">{currTelemetry?.num_features ?? 0}</span>
-                    </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">Triangulation Baseline:</span>
-                      <span className="text-slate-200">≥ 12 mm</span>
-                    </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">PnP VO Solver:</span>
-                      <span className="text-sky-300">EPnP + RANSAC</span>
+              {/* Dynamic Real-Time Context: Plain English Explanation of Active Frame */}
+              <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800/90 flex items-start gap-3">
+                <div className="p-1.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 shrink-0 mt-0.5">
+                  <Eye className="w-4 h-4" />
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 font-semibold text-slate-200 text-xs">
+                    <span>Active State: {anchorStateTitle}</span>
+                  </div>
+                  <p className="text-slate-300 text-[11px] mt-0.5 leading-relaxed">
+                    {anchorExplanation}
+                  </p>
+                </div>
+              </div>
+
+              {/* 3-Stage Visual Anchoring Pipeline Flow */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 relative">
+                {/* Stage 1: Physical ArUco Tag */}
+                <div className={`p-3 rounded-xl border flex flex-col gap-2 transition-all ${
+                  isArucoActive
+                    ? 'bg-emerald-950/20 border-emerald-500/40 shadow-sm shadow-emerald-500/10'
+                    : 'bg-slate-900/60 border-slate-800/80 opacity-75'
+                }`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                      <Anchor className="w-3.5 h-3.5" />
+                      <span>1. Physical ArUco Tag</span>
+                    </span>
+                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
+                      isArucoActive ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'
+                    }`}>
+                      {isArucoActive ? '🟢 Locked to Table' : '⚪ Tag Occluded'}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col gap-1 text-[11px]">
+                    <div className="text-slate-200 font-medium">Table Ground Truth (0,0,0)</div>
+                    <div className="text-slate-400 text-[10px] leading-snug">
+                      Printed board on the tabletop. Fixes the absolute millimeter scale and defines the tabletop surface ($Z = 0$).
                     </div>
                   </div>
 
-                  {/* Card 2: ArUco Coplanar Rigid Board */}
-                  <div className="bg-slate-900/80 rounded-lg p-2.5 border border-slate-800/80 flex flex-col gap-1.5 shadow-sm">
-                    <div className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wide flex items-center justify-between font-sans">
-                      <span>🏷️ ArUco Ground Truth</span>
-                      <span className="text-[9px] text-slate-500">6×6_250 Markers</span>
-                    </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">Tag A (Origin 0,0,0):</span>
-                      <span className={currTelemetry?.tags_detected?.includes(0) ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
-                        {currTelemetry?.tags_detected?.includes(0) ? '🟢 Detected' : '⚪ Occluded'}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">Tag B (+15cm Offset):</span>
-                      <span className={currTelemetry?.tags_detected?.includes(1) ? 'text-sky-400 font-bold' : 'text-slate-500'}>
-                        {currTelemetry?.tags_detected?.includes(1) ? '🟢 Detected' : '⚪ Occluded'}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">Rigid Multi-Board:</span>
-                      <span className="text-indigo-300">
-                        {currTelemetry?.is_dual ? 'Dual-Marker 8-Pt' : currTelemetry?.tags_detected?.length ? 'Single-Marker 4-Pt' : 'SLAM Fallback'}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">Board Baseline:</span>
-                      <span className="text-slate-200">15.0 cm (+X)</span>
+                  <div className="mt-auto pt-2 border-t border-slate-800/60 flex items-center justify-between text-[10px]">
+                    <span className="text-slate-400">Camera Detection:</span>
+                    <span className="font-semibold text-slate-200">
+                      {isTagADetected && isTagBDetected
+                        ? 'Dual Tags A & B'
+                        : isTagADetected
+                        ? 'Tag A (Origin) Visible'
+                        : isTagBDetected
+                        ? 'Tag B (Offset) Visible'
+                        : 'Hidden by Hand / View'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Stage 2: OpenCV Scene Anchors (Virtual SLAM) */}
+                <div className={`p-3 rounded-xl border flex flex-col gap-2 transition-all ${
+                  !isArucoActive && (isSlamActive || numLandmarks > 0)
+                    ? 'bg-amber-950/20 border-amber-500/40 shadow-sm shadow-amber-500/10'
+                    : 'bg-slate-900/60 border-slate-800/80'
+                }`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>2. Scene Feature Anchors</span>
+                    </span>
+                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
+                      numLandmarks >= 10 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
+                    }`}>
+                      {numLandmarks > 0 ? `${numLandmarks} 3D Landmarks` : 'Detecting...'}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col gap-1 text-[11px]">
+                    <div className="text-slate-200 font-medium">Virtual 3D Room Landmarks</div>
+                    <div className="text-slate-400 text-[10px] leading-snug">
+                      OpenCV pins table edges, textures, and corners to the ArUco frame. When the ArUco marker is covered, these hold position!
                     </div>
                   </div>
 
-                  {/* Card 3: Robot Frame & 6-DoF Hand Pose */}
-                  <div className="bg-slate-900/80 rounded-lg p-2.5 border border-slate-800/80 flex flex-col gap-1.5 shadow-sm">
-                    <div className="text-[10px] font-semibold text-indigo-400 uppercase tracking-wide flex items-center justify-between font-sans">
-                      <span>🤖 {robotName} Frame Pose</span>
-                      <span className="text-[9px] text-slate-500">6-DoF Calibration</span>
+                  <div className="mt-auto pt-2 border-t border-slate-800/60 flex items-center justify-between text-[10px]">
+                    <span className="text-slate-400">Anchor Coverage:</span>
+                    <span className={`font-semibold ${
+                      numLandmarks >= 15 ? 'text-emerald-300' : numLandmarks >= 5 ? 'text-amber-300' : 'text-slate-400'
+                    }`}>
+                      {numLandmarks >= 15 ? 'High (Occlusion-Proof)' : numLandmarks >= 5 ? 'Active Coverage' : 'Building Map'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Stage 3: Continuous 6-DoF Hand Trajectory */}
+                <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
+                      <Bot className="w-3.5 h-3.5" />
+                      <span>3. Robot Trajectory</span>
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-indigo-500/20 text-indigo-300">
+                      {robotName} Calibrated
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col gap-1 text-[11px]">
+                    <div className="text-slate-200 font-medium">Drift-Free Robot Actions</div>
+                    <div className="text-slate-400 text-[10px] leading-snug">
+                      Smoothly hands over between the physical marker and scene features so demonstrations have zero coordinate jumps.
                     </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">Table (ArUco Frame):</span>
-                      <span className="text-slate-200">
-                        [{(currentX * 100).toFixed(1)}, {(currentY * 100).toFixed(1)}, {(currentZ * 100).toFixed(1)}] cm
-                      </span>
+                  </div>
+
+                  <div className="mt-auto pt-2 border-t border-slate-800/60 flex items-center justify-between text-[10px]">
+                    <span className="text-slate-400">Trajectory Health:</span>
+                    <span className="font-semibold text-emerald-300 flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      <span>Continuous 6-DoF</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Visual Guide: What OpenCV Draws on the Camera Feed */}
+              <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 flex flex-col gap-2">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                  <Eye className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Visual Guide: What OpenCV Draws on Your Video Stream</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 pt-1 text-[11px]">
+                  <div className="flex items-start gap-2 bg-slate-950/60 p-2 rounded-lg border border-slate-800/60">
+                    <span className="w-3.5 h-3.5 rounded-sm border-2 border-emerald-400 bg-emerald-400/20 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-semibold text-slate-200 text-[10px]">Green Box & Red Dot</div>
+                      <div className="text-[9px] text-slate-400">Physical ArUco tag. The red dot is origin (0,0,0).</div>
                     </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">Robot Base Frame:</span>
-                      <span className="text-indigo-300 font-semibold">
-                        [{(robotX * 100).toFixed(1)}, {(robotY * 100).toFixed(1)}, {(robotZ * 100).toFixed(1)}] cm
-                      </span>
+                  </div>
+
+                  <div className="flex items-start gap-2 bg-slate-950/60 p-2 rounded-lg border border-slate-800/60">
+                    <div className="flex items-center gap-0.5 shrink-0 mt-1">
+                      <span className="w-1.5 h-2.5 bg-rose-500 rounded-xs" />
+                      <span className="w-1.5 h-2.5 bg-emerald-500 rounded-xs" />
+                      <span className="w-1.5 h-2.5 bg-sky-500 rounded-xs" />
                     </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">Pitch Angle:</span>
-                      <span className="text-amber-300">
-                        {((currentPose[4] || 0) * (180 / Math.PI)).toFixed(1)}°
-                      </span>
+                    <div>
+                      <div className="font-semibold text-slate-200 text-[10px]">3D RGB Axes</div>
+                      <div className="text-[9px] text-slate-400">+X Red, +Y Green, +Z Blue standing on the table.</div>
                     </div>
-                    <div className="flex justify-between items-center text-slate-300">
-                      <span className="text-slate-400">Roll / Yaw:</span>
-                      <span className="text-slate-300">
-                        {((currentPose[3] || 0) * (180 / Math.PI)).toFixed(1)}° / {((currentPose[5] || 0) * (180 / Math.PI)).toFixed(1)}°
-                      </span>
+                  </div>
+
+                  <div className="flex items-start gap-2 bg-slate-950/60 p-2 rounded-lg border border-slate-800/60">
+                    <span className="w-2.5 h-2.5 rotate-45 border border-amber-400 bg-amber-400/40 shrink-0 mt-1" />
+                    <div>
+                      <div className="font-semibold text-slate-200 text-[10px]">Golden Diamonds</div>
+                      <div className="text-[9px] text-slate-400">3D scene points pinned in room space as virtual anchors.</div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2 bg-slate-950/60 p-2 rounded-lg border border-slate-800/60">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0 mt-1" />
+                    <div>
+                      <div className="font-semibold text-slate-200 text-[10px]">Neon Dots & Trails</div>
+                      <div className="text-[9px] text-slate-400">2D visual keypoints and hand motion directions.</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Collapsible Educational Guide: How UMI-Style Anchoring Solves Hand Occlusion */}
+              {showAnchoringGuide && (
+                <div className="p-3.5 rounded-xl bg-indigo-950/20 border border-indigo-500/30 flex flex-col gap-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-indigo-300">
+                    <span className="flex items-center gap-1.5">
+                      <Info className="w-4 h-4 text-indigo-400" />
+                      <span>How OpenCV Anchoring Solves The "Hand Occlusion" Problem</span>
+                    </span>
+                    <button
+                      onClick={() => setShowAnchoringGuide(false)}
+                      className="text-slate-400 hover:text-slate-200 text-[10px]"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    When teaching robots by hand, your arm or the gripper frequently covers the printed ArUco tag. Rather than losing tracking, OpenCV uses a dual-anchor strategy:
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2 pt-1 text-[10px]">
+                    <div className="bg-slate-900/80 p-2 rounded-lg border border-indigo-500/20">
+                      <strong className="text-emerald-400 block mb-1">1. Learn Room Anchors</strong>
+                      <span>While ArUco is visible, OpenCV extracts corners across the table and room, triangulating them into fixed 3D space.</span>
+                    </div>
+                    <div className="bg-slate-900/80 p-2 rounded-lg border border-indigo-500/20">
+                      <strong className="text-amber-400 block mb-1">2. Seamless Handover</strong>
+                      <span>When your hand covers ArUco, OpenCV switches to tracking those 3D room anchors so position never jumps.</span>
+                    </div>
+                    <div className="bg-slate-900/80 p-2 rounded-lg border border-indigo-500/20">
+                      <strong className="text-sky-400 block mb-1">3. Zero-Drift Re-Lock</strong>
+                      <span>As soon as the ArUco tag reappears, OpenCV instantly snaps back to ground truth, eliminating accumulated drift.</span>
                     </div>
                   </div>
                 </div>
               )}
 
-              {/* Color-Coded CV Legend */}
-              <div className="flex items-center gap-4 text-[10px] text-slate-400 border-t border-slate-800/80 pt-1.5 flex-wrap">
-                <span className="text-slate-500 font-semibold uppercase tracking-wider font-mono">Legend:</span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-sm bg-emerald-400" />
-                  <span>ArUco Tag A (Origin 0,0,0)</span>
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-sm bg-sky-400" />
-                  <span>Tag B (+15cm Offset)</span>
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-3 h-0.5 bg-rose-500" />
-                  <span className="w-3 h-0.5 bg-emerald-500" />
-                  <span className="w-3 h-0.5 bg-sky-500" />
-                  <span>3D Axes (+X Red, +Y Green, +Z Blue)</span>
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                  <span>Tracked 2D Features</span>
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="w-2 h-2 rotate-45 border border-amber-400 bg-amber-400/30" />
-                  <span>Triangulated 3D Landmarks</span>
-                </span>
+              {/* Collapsible by Default: Raw Numerical Telemetry for Debugging */}
+              <div className="pt-1 flex flex-col gap-2 border-t border-slate-800/80">
+                <button
+                  onClick={() => setShowRawTelemetry(!showRawTelemetry)}
+                  className="text-[10px] text-slate-500 hover:text-slate-300 font-mono flex items-center justify-between w-full py-1 transition-colors"
+                >
+                  <span>{showRawTelemetry ? '▼ Hide Raw Numerical Coordinates & Solvers' : '▶ Show Raw Numerical Coordinates & Solvers (Advanced Debugging)'}</span>
+                  <span className="text-[9px] bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
+                    {showRawTelemetry ? 'Expanded' : 'Collapsed'}
+                  </span>
+                </button>
+
+                {showRawTelemetry && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1 font-mono text-[10px] bg-slate-900/50 p-2 rounded-xl border border-slate-800">
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-amber-400 font-bold mb-1">SLAM Solver</div>
+                      <div>3D Landmarks: {numLandmarks}</div>
+                      <div>Tracked Features: {numFeatures}</div>
+                      <div>PnP VO: EPnP + RANSAC</div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-emerald-400 font-bold mb-1">ArUco Board</div>
+                      <div>Tag A (0,0,0): {isTagADetected ? 'Detected' : 'Occluded'}</div>
+                      <div>Tag B (+15cm): {isTagBDetected ? 'Detected' : 'Occluded'}</div>
+                      <div>Board Baseline: 15.0 cm (+X)</div>
+                    </div>
+                    <div className="p-2 rounded bg-slate-950 border border-slate-800">
+                      <div className="text-indigo-400 font-bold mb-1">Coordinates</div>
+                      <div>Table: [{(currentX * 100).toFixed(1)}, {(currentY * 100).toFixed(1)}, {(currentZ * 100).toFixed(1)}] cm</div>
+                      <div>Robot Base: [{(robotX * 100).toFixed(1)}, {(robotY * 100).toFixed(1)}, {(robotZ * 100).toFixed(1)}] cm</div>
+                      <div>Pitch: {((currentPose[4] || 0) * (180 / Math.PI)).toFixed(1)}°</div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

@@ -143,26 +143,30 @@ export default function VideoPlayer({
         </div>
       )}
 
-      {/* Top Right: Real-time SLAM & ArUco Telemetry Tag when in Dev View */}
+      {/* Top Right: Real-time Anchor Status Badge when in Dev View */}
       {isDevView && currTelemetry && (
-        <div className="absolute top-3 right-3 bg-slate-950/90 backdrop-blur-md border border-amber-500/40 px-2.5 py-1 rounded-xl text-[10px] font-mono text-amber-300 flex items-center gap-2 z-20 shadow-xl pointer-events-none">
+        <div className="absolute top-3 right-3 bg-slate-950/90 backdrop-blur-md border border-amber-500/40 px-3 py-1.5 rounded-xl text-[11px] font-sans text-amber-300 flex items-center gap-2 z-20 shadow-xl pointer-events-none">
           <span
-            className={`w-2 h-2 rounded-full animate-pulse ${
-              currTelemetry.source === 'dual_aruco'
-                ? 'bg-emerald-400'
-                : currTelemetry.source === 'single_aruco'
-                ? 'bg-sky-400'
-                : currTelemetry.source === 'feature_pnp'
-                ? 'bg-amber-400'
-                : 'bg-orange-400'
+            className={`w-2.5 h-2.5 rounded-full animate-pulse ${
+              currTelemetry.source === 'dual_aruco' || currTelemetry.source === 'single_aruco'
+                ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50'
+                : currTelemetry.source === 'feature_pnp' || currTelemetry.source === 'feature_vo'
+                ? 'bg-amber-400 shadow-sm shadow-amber-400/50'
+                : 'bg-orange-400 shadow-sm shadow-orange-400/50'
             }`}
           />
-          <span className="font-bold uppercase tracking-wider">
-            {currTelemetry.source?.replace('_', ' ')}
+          <span className="font-semibold text-slate-100">
+            {currTelemetry.source === 'dual_aruco'
+              ? '🏷️ ArUco Dual Board (Table Locked)'
+              : currTelemetry.source === 'single_aruco'
+              ? '🏷️ ArUco Tag (Table Locked)'
+              : currTelemetry.source === 'feature_pnp' || currTelemetry.source === 'feature_vo'
+              ? '🌐 Virtual SLAM (Scene Anchors Active)'
+              : '⚡ Inertial Continuity'}
           </span>
           <span className="text-slate-600">|</span>
-          <span className="text-slate-300">
-            {currTelemetry.num_landmarks} LMs · {currTelemetry.num_features} Fts
+          <span className="text-slate-300 font-mono text-[10px]">
+            {currTelemetry.tags_detected?.length > 0 ? 'Tag Visible' : 'Tag Hidden (Anchored to Scene)'}
           </span>
         </div>
       )}
