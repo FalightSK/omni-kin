@@ -74,8 +74,11 @@ export default function Dashboard({
   const devPanelRef = useRef(null);
   const scrollContainerRef = useRef(null);
 
+  const [overridePoses, setOverridePoses] = useState(null);
+  const debouncedSmoothRef = useRef(null);
+
   const activeEp = episodes.find((e) => e.episode_index === selectedEpIdx) || episodes[0] || null;
-  const poses = activeEp?.poses || [];
+  const poses = overridePoses || activeEp?.poses || [];
   const totalFrames = activeEp?.num_frames || 0;
   const safeFrameIndex = totalFrames > 0 ? Math.min(Math.max(0, currentFrameIndex), totalFrames - 1) : 0;
   const currentPose = poses[safeFrameIndex] || [0, 0, 0, 0, 0, 0];
@@ -88,19 +91,24 @@ export default function Dashboard({
     }
   }, [activeEp, selectedEpIdx, setSelectedEpIdx]);
 
-  // Ensure dev_video_url is generated for the active episode if requested
+  // Reset override poses when switching active episode
   useEffect(() => {
-    if (activeEp && !activeEp.dev_video_url && activeEp.video_path && onRefreshEpisodes) {
+    setOverridePoses(null);
+  }, [activeEp?.episode_index]);
+
+  // Ensure dev_video_url and canny_video_url are generated for the active episode if requested
+  useEffect(() => {
+    if (activeEp && (!activeEp.dev_video_url || !activeEp.canny_video_url) && activeEp.video_path && onRefreshEpisodes) {
       fetch(`/api/episodes/${activeEp.episode_index}/dev_video`, { method: 'POST' })
         .then((r) => r.json())
         .then((data) => {
-          if (data.status === 'success' && data.dev_video_url) {
+          if (data.status === 'success' && (data.dev_video_url || data.canny_video_url)) {
             onRefreshEpisodes();
           }
         })
         .catch(() => {});
     }
-  }, [activeEp?.episode_index, activeEp?.dev_video_url, activeEp?.video_path, onRefreshEpisodes]);
+  }, [activeEp?.episode_index, activeEp?.dev_video_url, activeEp?.canny_video_url, activeEp?.video_path, onRefreshEpisodes]);
 
   // Reset playback and frame position whenever active episode or video URL changes
   useEffect(() => {
@@ -112,7 +120,7 @@ export default function Dashboard({
     if (!activeEp) return;
     setSmoothingMethod(newMethod);
     const win = newWindowMs !== undefined ? newWindowMs : smoothingWindowMs;
-    if (newWindowMs !== undefined) setSmoothingWindowMs(newWindowMs);
+    if (newWindowMs !== undefined) setSmoothingWindowMs(win);
 
     setIsSmoothingApplying(true);
     try {
@@ -123,6 +131,7 @@ export default function Dashboard({
       });
       const data = await res.json();
       if (data.status === 'success' && data.poses) {
+        setOverridePoses(data.poses);
         if (onUpdateEpisodePoses) {
           onUpdateEpisodePoses(data.poses);
         }
@@ -132,6 +141,16 @@ export default function Dashboard({
     } finally {
       setIsSmoothingApplying(false);
     }
+  };
+
+  const handleSliderChange = (newVal) => {
+    setSmoothingWindowMs(newVal);
+    if (debouncedSmoothRef.current) {
+      clearTimeout(debouncedSmoothRef.current);
+    }
+    debouncedSmoothRef.current = setTimeout(() => {
+      handleApplySmoothing(smoothingMethod, newVal);
+    }, 120);
   };
 
   useEffect(() => {
@@ -692,10 +711,7 @@ export default function Dashboard({
                   max="600"
                   step="50"
                   value={smoothingWindowMs}
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value);
-                    setSmoothingWindowMs(val);
-                  }}
+                  onChange={(e) => handleSliderChange(parseInt(e.target.value))}
                   onMouseUp={(e) => handleApplySmoothing(smoothingMethod, parseInt(e.target.value))}
                   onTouchEnd={(e) => handleApplySmoothing(smoothingMethod, parseInt(e.target.value))}
                   className="w-24 accent-indigo-500 cursor-pointer h-1.5 bg-slate-800 rounded"

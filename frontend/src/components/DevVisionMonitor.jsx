@@ -67,16 +67,17 @@ export default function DevVisionMonitor({
     }
   }, [isPlaying]);
 
-  // Sync current frame index with parent timeline
+  // Sync current frame index with parent timeline when paused
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !totalFrames || totalFrames <= 0) return;
+    if (isPlaying) return; // CRITICAL: Never seek while playing to avoid decoder thrashing
 
     const targetTime = Math.max(0, currentFrameIndex / (fps || 30));
-    if (Number.isFinite(targetTime) && Math.abs(video.currentTime - targetTime) > 0.04) {
+    if (Number.isFinite(targetTime) && Math.abs(video.currentTime - targetTime) > 0.05) {
       video.currentTime = targetTime;
     }
-  }, [currentFrameIndex, fps, totalFrames]);
+  }, [currentFrameIndex, fps, totalFrames, isPlaying]);
 
   // Draw ArUco bounding boxes, corner points, tag name badges, and 3D coordinate frame axes
   const drawBoundingBoxes = useCallback((ctx, width, height) => {
@@ -285,155 +286,26 @@ export default function DevVisionMonitor({
     drawBoundingBoxes(ctx, width, height);
   }, [visionMode, devTelemetry, currentFrameIndex, totalFrames, fps, drawBoundingBoxes]);
 
-  // Client-side Sobel/Canny gradient edge processor on HTML5 canvas
-  const renderClientCanny = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState < 2) return;
-
-    const width = video.videoWidth || 1280;
-    const height = video.videoHeight || 720;
-
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(video, 0, 0, width, height);
-
-    try {
-      const imgData = ctx.getImageData(0, 0, width, height);
-      const data = imgData.data;
-      const output = ctx.createImageData(width, height);
-      const outData = output.data;
-
-      const gray = new Uint8Array(width * height);
-      for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-        gray[j] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
-      }
-
-      const tLow = cannyThresholdLow;
-      const tHigh = cannyThresholdHigh;
-
-      for (let y = 1; y < height - 1; y++) {
-        const rowOffset = y * width;
-        for (let x = 1; x < width - 1; x++) {
-          const idx = rowOffset + x;
-
-          const gx =
-            -gray[idx - width - 1] +
-            gray[idx - width + 1] -
-            2 * gray[idx - 1] +
-            2 * gray[idx + 1] -
-            gray[idx + width - 1] +
-            gray[idx + width + 1];
-
-          const gy =
-            -gray[idx - width - 1] -
-            2 * gray[idx - width] -
-            gray[idx - width + 1] +
-            gray[idx + width - 1] +
-            2 * gray[idx + width] +
-            gray[idx + width + 1];
-
-          const mag = Math.abs(gx) + Math.abs(gy);
-          const pIdx = idx * 4;
-
-          if (mag >= tHigh) {
-            outData[pIdx] = 0;
-            outData[pIdx + 1] = 230;
-            outData[pIdx + 2] = 255;
-            outData[pIdx + 3] = 255;
-          } else if (mag >= tLow) {
-            outData[pIdx] = 0;
-            outData[pIdx + 1] = 160;
-            outData[pIdx + 2] = 180;
-            outData[pIdx + 3] = 200;
-          } else {
-            outData[pIdx] = (data[pIdx] * 0.22) | 0;
-            outData[pIdx + 1] = (data[pIdx + 1] * 0.22) | 0;
-            outData[pIdx + 2] = (data[pIdx + 2] * 0.22) | 0;
-            outData[pIdx + 3] = 255;
-          }
-        }
-      }
-
-      ctx.putImageData(output, 0, 0);
-
-      // Top Canny HUD banner
-      ctx.save();
-      const hudH = 44;
-      ctx.fillStyle = 'rgba(12, 16, 24, 0.85)';
-      ctx.fillRect(0, 0, width, hudH);
-      ctx.strokeStyle = 'rgba(0, 230, 255, 0.4)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, hudH);
-      ctx.lineTo(width, hudH);
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.arc(20, 22, 5, 0, Math.PI * 2);
-      ctx.fillStyle = '#00e6ff';
-      ctx.fill();
-
-      ctx.font = 'bold 12px ui-monospace, monospace';
-      ctx.fillStyle = '#00e6ff';
-      ctx.fillText('OPENCV CANNY EDGE DETECTION & ARUCO BOUNDING BOXES', 35, 26);
-
-      const cannyInfo = `Frame ${currentFrameIndex + 1}/${Math.max(1, totalFrames)}  |  T1=${tLow}, T2=${tHigh}`;
-      ctx.fillStyle = '#cbd5e1';
-      ctx.font = '11px ui-monospace, monospace';
-      const cWidth = ctx.measureText(cannyInfo).width;
-      ctx.fillText(cannyInfo, width - cWidth - 20, 26);
-      ctx.restore();
-
-      // Also overlay ArUco bounding boxes on Canny view
-      drawBoundingBoxes(ctx, width, height);
-    } catch (err) {}
-  }, [cannyThresholdLow, cannyThresholdHigh, currentFrameIndex, totalFrames, drawBoundingBoxes]);
-
-  // Trigger rendering when mode or frame changes
+  // Trigger rendering when mode or frame changes (only for non-prerendered fallback)
   useEffect(() => {
-    if (visionMode === 'canny') {
-      renderClientCanny();
-    } else if (visionMode === 'dev') {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    if (visionMode === 'dev' && !usePreRenderedDev) {
       renderDevOverlays();
     } else {
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
-  }, [visionMode, currentFrameIndex, renderClientCanny, renderDevOverlays]);
-
-  // Animation loop during playback
-  useEffect(() => {
-    if (!isPlaying) return;
-
-    let animId;
-    const loop = () => {
-      if (visionMode === 'canny') {
-        renderClientCanny();
-      } else if (visionMode === 'dev') {
-        renderDevOverlays();
-      }
-      animId = requestAnimationFrame(loop);
-    };
-    loop();
-    return () => cancelAnimationFrame(animId);
-  }, [isPlaying, visionMode, renderClientCanny, renderDevOverlays]);
+  }, [visionMode, usePreRenderedDev, currentFrameIndex, renderDevOverlays]);
 
   // Handle video metadata
   const handleLoadedMetadata = () => {
     const video = videoRef.current;
     if (video && video.videoWidth && video.videoHeight) {
       setVideoDims(`${video.videoWidth}×${video.videoHeight}`);
-      if (visionMode === 'canny') {
-        renderClientCanny();
-      } else if (visionMode === 'dev') {
+      if (visionMode === 'dev' && !usePreRenderedDev) {
         renderDevOverlays();
       }
     }
@@ -547,22 +419,12 @@ export default function DevVisionMonitor({
           }}
           onLoadedMetadata={handleLoadedMetadata}
           onLoadedData={() => {
-            if (visionMode === 'canny' && !usePreRenderedCanny) renderClientCanny();
-            else if (visionMode === 'dev' && !usePreRenderedDev) renderDevOverlays();
+            if (visionMode === 'dev' && !usePreRenderedDev) renderDevOverlays();
           }}
           onSeeked={() => {
-            if (visionMode === 'canny' && !usePreRenderedCanny) renderClientCanny();
-            else if (visionMode === 'dev' && !usePreRenderedDev) renderDevOverlays();
+            if (visionMode === 'dev' && !usePreRenderedDev) renderDevOverlays();
           }}
-          onTimeUpdate={() => {
-            if (!isPlaying) {
-              if (visionMode === 'canny' && !usePreRenderedCanny) renderClientCanny();
-              else if (visionMode === 'dev' && !usePreRenderedDev) renderDevOverlays();
-            }
-          }}
-          className={`w-full h-full object-contain ${
-            visionMode === 'canny' && !usePreRenderedCanny ? 'opacity-0' : 'opacity-100'
-          }`}
+          className="w-full h-full object-contain opacity-100"
         />
 
         {/* Real-time OpenCV / ArUco Canvas Overlay (active when not using pre-rendered video) */}

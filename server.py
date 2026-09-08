@@ -100,6 +100,98 @@ lerobot_exporter = LeRobotExporter(
     workspace_calibrator=workspace_calibrator
 )
 
+def save_episode_meta(ep_data):
+    try:
+        ep_uid = ep_data.get('episode_id')
+        if not ep_uid:
+            return
+        ep_dir = os.path.join(RECORDINGS_DIR, ep_uid)
+        os.makedirs(ep_dir, exist_ok=True)
+        meta_path = os.path.join(ep_dir, "episode_meta.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(ep_data, f, indent=2)
+    except Exception as e:
+        print(f"Error saving episode metadata: {e}")
+
+def load_episodes_from_disk():
+    global EPISODES_DB
+    loaded = []
+    if not os.path.exists(RECORDINGS_DIR):
+        return
+    for item in sorted(os.listdir(RECORDINGS_DIR)):
+        item_path = os.path.join(RECORDINGS_DIR, item)
+        if not os.path.isdir(item_path) or item.startswith('.'):
+            continue
+        meta_path = os.path.join(item_path, "episode_meta.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    ep_data = json.load(f)
+                    if 'dev_video_url' not in ep_data and os.path.exists(os.path.join(item_path, "dev_visualization.mp4")):
+                        ep_data['dev_video_url'] = f"/recordings/{item}/dev_visualization.mp4"
+                    if 'canny_video_url' not in ep_data and os.path.exists(os.path.join(item_path, "canny_visualization.mp4")):
+                        ep_data['canny_video_url'] = f"/recordings/{item}/canny_visualization.mp4"
+                    loaded.append(ep_data)
+            except Exception as e:
+                print(f"Error reading {meta_path}: {e}")
+        else:
+            video_files = [f for f in os.listdir(item_path) if f.startswith("recording.")]
+            if video_files:
+                video_filename = video_files[0]
+                video_path = os.path.join(item_path, video_filename)
+                try:
+                    cap = cv2.VideoCapture(video_path)
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                    cap.release()
+                    dev_path = os.path.join(item_path, "dev_visualization.mp4")
+                    canny_path = os.path.join(item_path, "canny_visualization.mp4")
+                    poses, telem = visual_tracker.process_video_and_imu(
+                        video_path,
+                        [],
+                        fps=fps,
+                        output_dev_video_path=dev_path,
+                        output_canny_video_path=canny_path,
+                        return_dev_info=True
+                    )
+                    actions = np.roll(poses, -1, axis=0)
+                    actions[-1] = poses[-1]
+                    timestamps = np.linspace(0, len(poses) / fps, len(poses))
+                    ep_data = {
+                        'episode_index': len(loaded),
+                        'episode_id': item,
+                        'task': 'reach to apple',
+                        'video_path': video_path,
+                        'video_url': f'/recordings/{item}/{video_filename}',
+                        'dev_video_url': f'/recordings/{item}/dev_visualization.mp4',
+                        'canny_video_url': f'/recordings/{item}/canny_visualization.mp4',
+                        'dev_telemetry': telem,
+                        'num_frames': len(poses),
+                        'fps': fps,
+                        'duration': len(poses) / fps,
+                        'anchor': 'aruco_feature_imu_fusion',
+                        'marker_size_cm': 10.0,
+                        'poses': poses.tolist(),
+                        'raw_poses': getattr(visual_tracker, 'last_raw_trajectory', poses).tolist(),
+                        'ee_poses': poses.tolist(),
+                        'gripper_states': [100.0] * len(poses),
+                        'actions': actions.tolist(),
+                        'timestamps': timestamps.tolist(),
+                        'imu_data': [],
+                        'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
+                    }
+                    save_episode_meta(ep_data)
+                    loaded.append(ep_data)
+                except Exception as e:
+                    print(f"Error auto-processing {item}: {e}")
+
+    for idx, ep in enumerate(loaded):
+        ep['episode_index'] = idx
+    EPISODES_DB = loaded
+    print(f"[{time.strftime('%H:%M:%S')}] 📂 Loaded {len(EPISODES_DB)} saved episodes from disk.")
+
+# Load existing recordings on server initialization
+load_episodes_from_disk()
+
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -538,6 +630,7 @@ async def delete_episode(episode_index: int):
     # Re-index remaining episodes contiguously so episode_index is always 0..N-1
     for idx, ep in enumerate(new_db):
         ep['episode_index'] = idx
+        save_episode_meta(ep)
 
     EPISODES_DB = new_db
     return JSONResponse({
@@ -691,6 +784,7 @@ async def save_recording(
         }
 
         EPISODES_DB.append(episode_data)
+        save_episode_meta(episode_data)
         print(f"[{time.strftime('%H:%M:%S')}] 🎉 Episode #{ep_idx} successfully calculated via ArUco+Feature+IMU fusion ({len(anchored_poses)} frames)!\n")
 
         return JSONResponse({
@@ -726,8 +820,11 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
     video_url = f"/recordings/{sample_uid}/recording.mp4"
 
     # Generate synthetic video stream showing the table and ArUco marker
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
     out = cv2.VideoWriter(video_path, fourcc, fps, (640, 480))
+    if not out.isOpened():
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(video_path, fourcc, fps, (640, 480))
 
     dev_video_filename = "dev_visualization.mp4"
     dev_video_path = os.path.join(ep_dir, dev_video_filename)
@@ -872,6 +969,7 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
         'anchor': 'aruco_dict_6x6_250_id0',
         'marker_size_cm': 10.0,
         'poses': anchored_poses.tolist(),
+        'raw_poses': anchored_poses.tolist(),
         'ee_poses': anchored_poses.tolist(),
         'gripper_states': gripper_states,
         'actions': actions.tolist(),
@@ -881,6 +979,7 @@ async def generate_sample_recording(task: str = "reach to apple", shape: str = "
     }
 
     EPISODES_DB.append(episode_data)
+    save_episode_meta(episode_data)
 
     return JSONResponse({
         "status": "success",
@@ -964,6 +1063,7 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
     target_ep['canny_video_url'] = canny_video_url
     target_ep['dev_telemetry'] = dev_telemetry
     target_ep['active_smoothing'] = {'method': smooth_method, 'time_window_ms': smooth_window_ms}
+    save_episode_meta(target_ep)
 
     return JSONResponse({
         "status": "success",
@@ -1010,6 +1110,7 @@ async def smooth_episode_trajectory(episode_index: int, payload: dict = Body(...
     actions[-1] = smoothed_poses[-1]
     target_ep['actions'] = actions.tolist()
     target_ep['active_smoothing'] = {'method': method, 'time_window_ms': time_window_ms}
+    save_episode_meta(target_ep)
 
     return JSONResponse({
         "status": "success",
@@ -1055,6 +1156,7 @@ async def generate_episode_dev_video(episode_index: int):
 
     target_ep['dev_video_url'] = dev_video_url
     target_ep['canny_video_url'] = canny_video_url
+    save_episode_meta(target_ep)
     return JSONResponse({
         "status": "success",
         "dev_video_url": dev_video_url,
