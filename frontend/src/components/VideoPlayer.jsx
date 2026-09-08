@@ -43,12 +43,13 @@ export default function VideoPlayer({
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !totalFrames || totalFrames <= 0) return;
+    if (isPlaying) return; // CRITICAL: Never seek while playing to avoid decoder thrashing
 
     const targetTime = Math.max(0, currentFrameIndex / (fps || 30));
     if (Number.isFinite(targetTime) && Math.abs(video.currentTime - targetTime) > 0.05) {
       video.currentTime = targetTime;
     }
-  }, [currentFrameIndex, fps, totalFrames]);
+  }, [currentFrameIndex, fps, totalFrames, isPlaying]);
 
   const handleLoadedMetadata = () => {
     const video = videoRef.current;
