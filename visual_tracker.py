@@ -956,11 +956,11 @@ class VisualInertialTracker:
         cv2.line(annotated, (0, hud_h), (width, hud_h), (40, 50, 70), 1)
 
         source_cfg = {
-            'dual_aruco': ('DUAL ARUCO (8-PT PNP)', (0, 255, 128)),
-            'single_aruco': ('SINGLE ARUCO PNP', (255, 215, 0)),
-            'feature_pnp': ('VIRTUAL SLAM (3D PNP)', (0, 215, 255)),
-            'feature_vo': ('OPTICAL FLOW VO', (0, 140, 255)),
-            'imu': ('IMU EKF DEAD RECKON', (80, 80, 255))
+            'dual_aruco': ('ANCHOR: DUAL ARUCO BOARD (TABLE LOCKED)', (0, 255, 128)),
+            'single_aruco': ('ANCHOR: ARUCO TAG (TABLE LOCKED)', (255, 215, 0)),
+            'feature_pnp': ('ANCHOR: 3D SCENE FEATURES (TAG OCCLUDED)', (0, 215, 255)),
+            'feature_vo': ('ANCHOR: OPTICAL FLOW VO', (0, 140, 255)),
+            'imu': ('CONTINUITY: IMU DEAD-RECKON', (80, 80, 255))
         }
         src_label, src_color = source_cfg.get(source, ('INITIALIZING', (180, 180, 180)))
 
@@ -973,7 +973,7 @@ class VisualInertialTracker:
 
         lm_count = len(landmarks_3d) if landmarks_3d else 0
         feat_count = len(tracked_pts) if tracked_pts is not None else 0
-        stats_text = f"SLAM Map: {lm_count} 3D Landmarks  |  Tracked Features: {feat_count}"
+        stats_text = f"Scene Anchors: {lm_count} Pinned 3D Points  |  Optical Features: {feat_count}"
         cv2.putText(annotated, stats_text, (18, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (170, 200, 250), 1, cv2.LINE_AA)
 
         if p_world is not None:
@@ -984,7 +984,7 @@ class VisualInertialTracker:
             pose_text = f"Cam: [{x_cm:+.1f}, {y_cm:+.1f}, {z_cm:+.1f}] cm  |  Pitch: {pitch_deg:+.1f}°"
             cv2.putText(annotated, pose_text, (max(width - 360, 200), 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 240, 180), 1, cv2.LINE_AA)
 
-        cv2.putText(annotated, "OMNIKIN DEV VIEW: ARUCO + VIRTUAL SLAM", (12, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (130, 150, 180), 1, cv2.LINE_AA)
+        cv2.putText(annotated, "OMNIKIN DEV VIEW: ARUCO & 3D SCENE ANCHORING", (12, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (130, 150, 180), 1, cv2.LINE_AA)
 
         return annotated
 
