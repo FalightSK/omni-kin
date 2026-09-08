@@ -157,13 +157,13 @@ class VisualInertialEKF:
 
         accel_unbiased = accel_body - self.x[9:12]
         accel_world = R_mat @ accel_unbiased - self.g_world
-
         # 3. Velocity and Position integration with visual-loss damping
         if not is_visual_active:
-            self.x[3:6] *= 0.95
+            self.x[3:6] *= 0.65  # Strong velocity decay during visual loss to prevent rocket acceleration
+            accel_world = np.clip(accel_world, -1.8, 1.8)
             v_norm = np.linalg.norm(self.x[3:6])
-            if v_norm > 1.2:
-                self.x[3:6] = self.x[3:6] * (1.2 / v_norm)
+            if v_norm > 0.4:
+                self.x[3:6] = self.x[3:6] * (0.4 / v_norm)
 
         v = self.x[3:6]
         p = self.x[0:3]
@@ -178,15 +178,13 @@ class VisualInertialEKF:
         else:
             p_new[2] = max(0.01, float(p_new[2]))
 
-        # Update state vector
         self.x[0:3] = p_new
         self.x[3:6] = v_new
         self.x[6:9] = euler_new
 
-        # 4. Compute Jacobian F for Covariance Propagation
+        # 4. Error State Transition Matrix F (12 x 12)
         F = np.eye(self.state_dim, dtype=np.float64)
         F[0:3, 3:6] = np.eye(3) * dt
-        F[0:3, 9:12] = -0.5 * R_mat * (dt ** 2)
         F[3:6, 9:12] = -R_mat * dt
 
         # Orientation sensitivity on acceleration
@@ -197,11 +195,12 @@ class VisualInertialEKF:
         # Covariance propagation P_k = F P_{k-1} F^T + Q * dt
         self.P = F @ self.P @ F.T + self.Q * dt
 
-    def update_visual(self, p_meas, euler_meas, is_dual=True, source="dual_aruco"):
+    def update_visual(self, p_meas, euler_meas, is_dual=True, source="dual_aruco", v_meas=None):
         """
         EKF Measurement update with 6-DoF visual pose.
         Adaptive measurement covariance R_meas provides tighter confidence for ground-truth ArUco
         and robust confidence for ArUco-anchored feature map PnP.
+        Optionally anchors internal velocity state to visual displacement velocity v_meas.
         """
         if not self.is_initialized:
             self.reset(p_meas, euler_meas)
@@ -249,6 +248,10 @@ class VisualInertialEKF:
         # State update
         self.x = self.x + K @ y
         self.x[6:9] = (self.x[6:9] + np.pi) % (2.0 * np.pi) - np.pi
+
+        # Anchor velocity state to visual displacement to eliminate drift
+        if v_meas is not None:
+            self.x[3:6] = 0.65 * self.x[3:6] + 0.35 * v_meas
 
         # Joseph Form Covariance Update for numerical stability
         I_KH = np.eye(self.state_dim, dtype=np.float64) - K @ H
@@ -710,10 +713,10 @@ class VisualInertialTracker:
         )
         return bordered
 
-    def estimate_camera_matrix(self, width, height, hfov_degrees=100.0):
+    def estimate_camera_matrix(self, width, height, hfov_degrees=75.0):
         """
         Estimates camera intrinsic matrix K from image resolution and phone FOV.
-        Defaults to 100° horizontal FOV for ultra-wide mobile camera (0.5x).
+        Defaults to 75.0° horizontal FOV for standard smartphone main camera (~26mm equivalent).
         """
         fx = (width / 2.0) / np.tan(np.radians(hfov_degrees / 2.0))
         fy = fx
@@ -743,6 +746,8 @@ class VisualInertialTracker:
         if ids is None or len(ids) == 0:
             self.last_detected_ids = []
             self.last_detected_corners = []
+            self.last_rvec = None
+            self.last_tvec = None
             if return_corners:
                 return False, None, None, None, None, False, []
             return False, None, None, None, None, False
@@ -789,14 +794,37 @@ class VisualInertialTracker:
             matched_2d = refined_corners[0][0].astype(np.float32)
             flags = cv2.SOLVEPNP_IPPE_SQUARE
 
-        # Solve Perspective-n-Point
-        success, rvec, tvec = cv2.solvePnP(
-            matched_3d,
-            matched_2d,
-            camera_matrix,
-            dist_coeffs,
-            flags=flags
-        )
+        # Solve Perspective-n-Point with temporal continuity
+        success = False
+        rvec = None
+        tvec = None
+
+        has_prev_guess = hasattr(self, 'last_rvec') and self.last_rvec is not None and self.last_tvec is not None
+        if has_prev_guess:
+            try:
+                r_guess = self.last_rvec.copy()
+                t_guess = self.last_tvec.copy()
+                success, rvec, tvec = cv2.solvePnP(
+                    matched_3d,
+                    matched_2d,
+                    camera_matrix,
+                    dist_coeffs,
+                    rvec=r_guess,
+                    tvec=t_guess,
+                    useExtrinsicGuess=True,
+                    flags=cv2.SOLVEPNP_ITERATIVE
+                )
+            except Exception:
+                success = False
+
+        if not success:
+            success, rvec, tvec = cv2.solvePnP(
+                matched_3d,
+                matched_2d,
+                camera_matrix,
+                dist_coeffs,
+                flags=flags
+            )
 
         if not success and flags != cv2.SOLVEPNP_ITERATIVE:
             success, rvec, tvec = cv2.solvePnP(
@@ -808,9 +836,14 @@ class VisualInertialTracker:
             )
 
         if not success:
+            self.last_rvec = None
+            self.last_tvec = None
             if return_corners:
                 return False, None, None, None, None, False, []
             return False, None, None, None, None, False
+
+        self.last_rvec = rvec.copy()
+        self.last_tvec = tvec.copy()
 
         # Invert pose: camera position and orientation in World Frame
         R_w2c, _ = cv2.Rodrigues(rvec)
@@ -1005,7 +1038,7 @@ class VisualInertialTracker:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        camera_matrix, dist_coeffs = self.estimate_camera_matrix(width, height, hfov_degrees=100.0)
+        camera_matrix, dist_coeffs = self.estimate_camera_matrix(width, height, hfov_degrees=75.0)
 
         # Initialize OpenCV Virtual SLAM Feature Map Tracker
         feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
@@ -1193,6 +1226,8 @@ class VisualInertialTracker:
 
         imu_idx = 0
         current_time = imu_times[0]
+        last_vis_p = None
+        last_vis_time = None
 
         for f in range(first_f, num_frames):
             target_time = video_times[f]
@@ -1216,13 +1251,41 @@ class VisualInertialTracker:
             # Visual measurement update if ArUco or Feature Map detected in this frame
             if is_vis:
                 p_meas, euler_meas, is_dual, src = vis_map[f]
-                ekf.update_visual(p_meas, euler_meas, is_dual=is_dual, source=src)
+                v_vis = None
+                if last_vis_p is not None and last_vis_time is not None:
+                    dt_vis = target_time - last_vis_time
+                    if dt_vis > 0.001:
+                        v_vis = np.clip((p_meas - last_vis_p) / dt_vis, -2.5, 2.5)
+                last_vis_p = p_meas.copy()
+                last_vis_time = target_time
+                ekf.update_visual(p_meas, euler_meas, is_dual=is_dual, source=src, v_meas=v_vis)
 
             # Store filtered 6-DoF pose [X, Y, Z, Roll, Pitch, Yaw]
             pos = ekf.x[0:3].copy()
             pos[2] = max(0.01, float(pos[2]))  # Keep above table surface
             rot = ekf.x[6:9].copy()
             final_poses[f] = np.hstack([pos, rot])
+
+        # Step 2: Smooth occlusion gaps with C1 Hermite Interpolation (UMI Standard)
+        vis_frame_indices = sorted(list(vis_map.keys()))
+        if len(vis_frame_indices) >= 2:
+            for i in range(len(vis_frame_indices) - 1):
+                f0 = vis_frame_indices[i]
+                f1 = vis_frame_indices[i + 1]
+                gap = f1 - f0 - 1
+                if 0 < gap <= 45:
+                    p0 = final_poses[f0, :3]
+                    p1 = final_poses[f1, :3]
+                    r0 = final_poses[f0, 3:]
+                    r1 = final_poses[f1, 3:]
+                    for step, f_gap in enumerate(range(f0 + 1, f1)):
+                        s = (step + 1) / (gap + 1)
+                        # Smooth Hermite ease curve: 3s^2 - 2s^3
+                        w = s * s * (3.0 - 2.0 * s)
+                        final_poses[f_gap, :3] = (1.0 - w) * p0 + w * p1
+                        # Unwrapped angular interpolation
+                        diff_rot = (r1 - r0 + np.pi) % (2.0 * np.pi) - np.pi
+                        final_poses[f_gap, 3:] = r0 + w * diff_rot
 
         return final_poses
 
