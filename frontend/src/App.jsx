@@ -180,6 +180,7 @@ export default function App() {
               onRefreshEpisodes={fetchEpisodes}
               onDeleteEpisode={handleDeleteEpisode}
               onClearAllEpisodes={handleClearAllEpisodes}
+              onUpdateEpisodePoses={handleReprocessComplete}
               robotConfig={robotConfig}
               onOpenRobotModal={() => setIsRobotModalOpen(true)}
             />

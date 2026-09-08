@@ -20,7 +20,7 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-from fastapi import FastAPI, Request, File, UploadFile, Form, Response
+from fastapi import FastAPI, Request, File, UploadFile, Form, Response, Body
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -681,6 +681,7 @@ async def save_recording(
             'anchor': 'aruco_feature_imu_fusion',
             'marker_size_cm': 10.0,
             'poses': anchored_poses.tolist(),
+            'raw_poses': getattr(visual_tracker, 'last_raw_trajectory', anchored_poses).tolist(),
             'ee_poses': anchored_poses.tolist(),
             'gripper_states': gripper_states,
             'actions': actions.tolist(),
@@ -904,9 +905,9 @@ async def update_ekf_parameters(request: Request):
     return JSONResponse({"status": "success", "params": updated})
 
 @app.post("/api/episodes/{episode_index}/reprocess")
-async def reprocess_episode(episode_index: int):
+async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
     """
-    Re-filters an existing recorded episode with the current EKF parameters.
+    Re-filters an existing recorded episode with the current EKF parameters and adaptive calibration.
     """
     global EPISODES_DB
     target_ep = None
@@ -932,17 +933,29 @@ async def reprocess_episode(episode_index: int):
     dev_video_url = f"/recordings/{ep_uid}/dev_visualization.mp4"
     canny_video_url = f"/recordings/{ep_uid}/canny_visualization.mp4"
 
+    smooth_opt = True
+    smooth_method = "savgol"
+    smooth_window_ms = 250
+    if payload:
+        smooth_opt = payload.get('smooth', True)
+        smooth_method = payload.get('smooth_method', 'savgol')
+        smooth_window_ms = int(payload.get('smooth_window_ms', 250))
+
     new_poses, dev_telemetry = visual_tracker.reprocess_episode_trajectory(
         video_path,
         imu_data,
         fps=fps,
         output_dev_video_path=dev_video_path,
         output_canny_video_path=canny_video_path,
-        return_dev_info=True
+        return_dev_info=True,
+        smooth=smooth_opt,
+        smooth_method=smooth_method,
+        smooth_window_ms=smooth_window_ms
     )
     new_poses = np.array(new_poses)
 
     target_ep['poses'] = new_poses.tolist()
+    target_ep['raw_poses'] = getattr(visual_tracker, 'last_raw_trajectory', new_poses).tolist()
     target_ep['ee_poses'] = new_poses.tolist()
     actions = np.roll(new_poses, -1, axis=0)
     actions[-1] = new_poses[-1]
@@ -950,6 +963,7 @@ async def reprocess_episode(episode_index: int):
     target_ep['dev_video_url'] = dev_video_url
     target_ep['canny_video_url'] = canny_video_url
     target_ep['dev_telemetry'] = dev_telemetry
+    target_ep['active_smoothing'] = {'method': smooth_method, 'time_window_ms': smooth_window_ms}
 
     return JSONResponse({
         "status": "success",
@@ -958,6 +972,51 @@ async def reprocess_episode(episode_index: int):
         "poses": new_poses.tolist(),
         "dev_video_url": dev_video_url,
         "canny_video_url": canny_video_url
+    })
+
+@app.post("/api/episodes/{episode_index}/smooth")
+async def smooth_episode_trajectory(episode_index: int, payload: dict = Body(...)):
+    """
+    Dynamically re-smooths an episode's 3D trajectory using Savitzky-Golay or Moving Average.
+    """
+    global EPISODES_DB
+    target_ep = None
+    for ep in EPISODES_DB:
+        if ep['episode_index'] == episode_index:
+            target_ep = ep
+            break
+
+    if not target_ep:
+        return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+
+    raw_poses = target_ep.get('raw_poses') or target_ep.get('poses', [])
+    if not raw_poses or len(raw_poses) < 4:
+        return JSONResponse({"status": "error", "message": "Insufficient poses to smooth"}, status_code=400)
+
+    method = payload.get('method', 'savgol')
+    time_window_ms = int(payload.get('time_window_ms', 250))
+    fps = target_ep.get('fps', 30.0)
+
+    if method == "raw":
+        smoothed_poses = np.array(raw_poses)
+    else:
+        smoothed_poses = visual_tracker.smooth_trajectory(
+            raw_poses, fps=fps, method=method, time_window_ms=time_window_ms
+        )
+
+    target_ep['poses'] = smoothed_poses.tolist()
+    target_ep['ee_poses'] = smoothed_poses.tolist()
+    actions = np.roll(smoothed_poses, -1, axis=0)
+    actions[-1] = smoothed_poses[-1]
+    target_ep['actions'] = actions.tolist()
+    target_ep['active_smoothing'] = {'method': method, 'time_window_ms': time_window_ms}
+
+    return JSONResponse({
+        "status": "success",
+        "episode_index": episode_index,
+        "poses": smoothed_poses.tolist(),
+        "method": method,
+        "time_window_ms": time_window_ms
     })
 
 @app.post("/api/episodes/{episode_index}/dev_video")

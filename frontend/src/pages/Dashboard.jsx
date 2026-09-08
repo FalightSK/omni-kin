@@ -44,11 +44,17 @@ export default function Dashboard({
   onDeleteEpisode,
   onClearAllEpisodes,
   onReprocessActive,
+  onUpdateEpisodePoses,
   robotConfig,
   onOpenRobotModal
 }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
+
+  // Trajectory Smoothing Configuration (Savitzky-Golay / Moving Average)
+  const [smoothingMethod, setSmoothingMethod] = useState('savgol');
+  const [smoothingWindowMs, setSmoothingWindowMs] = useState(250);
+  const [isSmoothingApplying, setIsSmoothingApplying] = useState(false);
 
   // Dev View Diagnostic Overlay (ArUco + Virtual SLAM)
   const [isDevView, setIsDevView] = useState(true);
@@ -101,6 +107,32 @@ export default function Dashboard({
     setCurrentFrameIndex(0);
     setIsPlaying(false);
   }, [activeEp?.episode_index, activeEp?.video_url]);
+
+  const handleApplySmoothing = async (newMethod, newWindowMs) => {
+    if (!activeEp) return;
+    setSmoothingMethod(newMethod);
+    const win = newWindowMs !== undefined ? newWindowMs : smoothingWindowMs;
+    if (newWindowMs !== undefined) setSmoothingWindowMs(newWindowMs);
+
+    setIsSmoothingApplying(true);
+    try {
+      const res = await fetch(`/api/episodes/${activeEp.episode_index}/smooth`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: newMethod, time_window_ms: win })
+      });
+      const data = await res.json();
+      if (data.status === 'success' && data.poses) {
+        if (onUpdateEpisodePoses) {
+          onUpdateEpisodePoses(data.poses);
+        }
+      }
+    } catch (err) {
+      console.error('Error applying smoothing:', err);
+    } finally {
+      setIsSmoothingApplying(false);
+    }
+  };
 
   useEffect(() => {
     let interval = null;
@@ -601,6 +633,76 @@ export default function Dashboard({
                   : '100%'}
               </span>
             </div>
+          </div>
+
+          {/* Interactive Trajectory Smoothing Bar */}
+          <div className="flex items-center justify-between flex-wrap gap-2 bg-slate-900/80 p-2.5 rounded-xl border border-slate-800 text-xs">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-indigo-400" />
+              <span className="font-semibold text-slate-200">Trajectory Smoothing:</span>
+            </div>
+
+            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
+              <button
+                onClick={() => handleApplySmoothing('raw')}
+                disabled={isSmoothingApplying}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
+                  smoothingMethod === 'raw'
+                    ? 'bg-slate-700 text-white shadow-sm font-semibold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Raw / Unfiltered
+              </button>
+
+              <button
+                onClick={() => handleApplySmoothing('savgol')}
+                disabled={isSmoothingApplying}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1 transition-all ${
+                  smoothingMethod === 'savgol'
+                    ? 'bg-indigo-600 text-white shadow-sm font-semibold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Savitzky-Golay Polynomial Filter (Preserves peaks, removes jitter)"
+              >
+                <span>✨ Savitzky-Golay</span>
+                <span className="text-[9px] bg-indigo-500/40 px-1 rounded text-indigo-100 font-mono">Recommended</span>
+              </button>
+
+              <button
+                onClick={() => handleApplySmoothing('moving_average')}
+                disabled={isSmoothingApplying}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
+                  smoothingMethod === 'moving_average'
+                    ? 'bg-indigo-600 text-white shadow-sm font-semibold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+                title="Centered Gaussian/Moving Average"
+              >
+                Moving Average
+              </button>
+            </div>
+
+            {smoothingMethod !== 'raw' && (
+              <div className="flex items-center gap-2 font-mono text-[11px] text-slate-400">
+                <span>Window:</span>
+                <input
+                  type="range"
+                  min="100"
+                  max="600"
+                  step="50"
+                  value={smoothingWindowMs}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value);
+                    setSmoothingWindowMs(val);
+                  }}
+                  onMouseUp={(e) => handleApplySmoothing(smoothingMethod, parseInt(e.target.value))}
+                  onTouchEnd={(e) => handleApplySmoothing(smoothingMethod, parseInt(e.target.value))}
+                  className="w-24 accent-indigo-500 cursor-pointer h-1.5 bg-slate-800 rounded"
+                />
+                <span className="text-indigo-300 w-12">{smoothingWindowMs}ms</span>
+              </div>
+            )}
           </div>
         </div>
 
