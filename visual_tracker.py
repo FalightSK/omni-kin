@@ -11,6 +11,7 @@ Implements:
 
 import cv2
 import numpy as np
+import scipy.signal
 from scipy.spatial.transform import Rotation as R
 
 
@@ -775,6 +776,184 @@ class VisualInertialTracker:
         dist_coeffs = np.zeros((4, 1), dtype=np.float32)
         return camera_matrix, dist_coeffs
 
+    def calibrate_camera_adaptive(self, cap_or_path, width, height, max_scan_frames=60):
+        """
+        Generalized 3-Tier Adaptive Self-Calibration Solver for ANY smartphone lens:
+          - Tier 1: Multi-View In-Situ Calibration via cv2.calibrateCamera on collected ArUco views.
+          - Tier 2: Analytical Closed-Form Zhang Homography decomposition for single-tag views.
+          - Tier 3: Adaptive smartphone prior based on aspect ratio and typical FOV.
+        Returns: (camera_matrix, dist_coeffs)
+        """
+        is_own_cap = False
+        if isinstance(cap_or_path, str):
+            cap = cv2.VideoCapture(cap_or_path)
+            is_own_cap = True
+        else:
+            cap = cap_or_path
+
+        if cap is None or not cap.isOpened():
+            return self.estimate_camera_matrix(width, height, hfov_degrees=78.0)
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            if is_own_cap:
+                cap.release()
+            return self.estimate_camera_matrix(width, height, hfov_degrees=78.0)
+
+        step = max(1, total_frames // max_scan_frames)
+        all_obj_pts = []
+        all_img_pts = []
+        focal_homographies = []
+
+        cx = width / 2.0
+        cy = height / 2.0
+        T_center = np.array([[1, 0, -cx], [0, 1, -cy], [0, 0, 1]], dtype=np.float64)
+
+        for f_no in range(0, total_frames, step):
+            cap.set(cv2.CAP_PROP_POS_FRAMES, f_no)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+
+            if self.detector is not None:
+                corners, ids, _ = self.detector.detectMarkers(gray)
+            else:
+                corners, ids, _ = cv2.aruco.detectMarkers(gray, self.dictionary)
+
+            if ids is None or len(ids) == 0:
+                continue
+
+            ids_flat = ids.flatten().tolist()
+            if self.tag_a_id in ids_flat and self.tag_b_id in ids_flat:
+                idx_a = ids_flat.index(self.tag_a_id)
+                idx_b = ids_flat.index(self.tag_b_id)
+                c_a = corners[idx_a][0].astype(np.float32)
+                c_b = corners[idx_b][0].astype(np.float32)
+                all_obj_pts.append(self.board_8p_3d)
+                all_img_pts.append(np.vstack([c_a, c_b]))
+            elif self.tag_a_id in ids_flat:
+                idx_a = ids_flat.index(self.tag_a_id)
+                c_a = corners[idx_a][0].astype(np.float32)
+                all_obj_pts.append(self.tag_a_3d)
+                all_img_pts.append(c_a)
+            elif self.tag_b_id in ids_flat:
+                idx_b = ids_flat.index(self.tag_b_id)
+                c_b = corners[idx_b][0].astype(np.float32)
+                all_obj_pts.append(self.tag_b_3d)
+                all_img_pts.append(c_b)
+
+            for i_tag, tid in enumerate(ids_flat):
+                if tid in [self.tag_a_id, self.tag_b_id]:
+                    tag_pts = corners[i_tag][0].astype(np.float32)
+                    obj_2d = self.tag_a_3d[:, :2]
+                    H, _ = cv2.findHomography(obj_2d, tag_pts)
+                    if H is not None:
+                        H_norm = T_center @ H
+                        h1 = H_norm[:, 0]
+                        h2 = H_norm[:, 1]
+                        den = h1[2] * h2[2]
+                        if abs(den) > 1e-6:
+                            num = -(h1[0] * h2[0] + h1[1] * h2[1])
+                            ratio = num / den
+                            if ratio > 0:
+                                f_cand = np.sqrt(ratio)
+                                hfov_cand = np.degrees(2 * np.arctan((width / 2.0) / f_cand))
+                                if 40.0 <= hfov_cand <= 130.0:
+                                    focal_homographies.append(float(f_cand))
+
+        if is_own_cap:
+            cap.release()
+        else:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        # Tier 1: Multi-view cv2.calibrateCamera
+        if len(all_img_pts) >= 6:
+            try:
+                ret_rms, K_calib, dist_calib, _, _ = cv2.calibrateCamera(
+                    all_obj_pts,
+                    all_img_pts,
+                    (width, height),
+                    None,
+                    None,
+                    flags=cv2.CALIB_FIX_PRINCIPAL_POINT | cv2.CALIB_ZERO_TANGENT_DIST
+                )
+                fx_c = float(K_calib[0, 0])
+                fy_c = float(K_calib[1, 1])
+                hfov_c = np.degrees(2 * np.arctan((width / 2.0) / fx_c))
+                aspect_ratio = fx_c / (fy_c if fy_c > 0 else 1.0)
+
+                if ret_rms < 2.5 and 40.0 <= hfov_c <= 130.0 and 0.80 <= aspect_ratio <= 1.25:
+                    print(f"[Adaptive Calibration Tier 1] Success! RMS={ret_rms:.2f}px, HFOV={hfov_c:.1f}deg, fx={fx_c:.1f}, dist={dist_calib.ravel()[:2]}")
+                    return K_calib.astype(np.float32), dist_calib.astype(np.float32)
+            except Exception as e:
+                print(f"[Adaptive Calibration Tier 1] Fallback: {e}")
+
+        # Tier 2: Closed-form homography focal estimation
+        if len(focal_homographies) >= 2:
+            median_f = float(np.median(focal_homographies))
+            hfov_h = np.degrees(2 * np.arctan((width / 2.0) / median_f))
+            print(f"[Adaptive Calibration Tier 2] Homography: Median fx={median_f:.1f}, HFOV={hfov_h:.1f}deg")
+            K_hom = np.array([
+                [median_f, 0, cx],
+                [0, median_f, cy],
+                [0, 0, 1]
+            ], dtype=np.float32)
+            k1_prior = -0.04 if hfov_h > 90.0 else 0.0
+            dist_hom = np.array([[k1_prior], [0.0], [0.0], [0.0]], dtype=np.float32)
+            return K_hom, dist_hom
+
+        # Tier 3: Adaptive smartphone prior
+        print("[Adaptive Calibration Tier 3] Using general smartphone prior (HFOV=78.0deg)")
+        return self.estimate_camera_matrix(width, height, hfov_degrees=78.0)
+
+    def smooth_trajectory(self, poses, fps=30.0, method="savgol", time_window_ms=250):
+        """
+        Generalized Zero-Phase Trajectory Smoother for variable smartphone FPS:
+          - Physical-time parametrized window length: W = odd_int(time_window_ms * fps / 1000)
+          - Methods:
+              * 'savgol': Savitzky-Golay polynomial regression (order 2), preserves intentional reach peaks
+              * 'moving_average': Centered Gaussian/uniform moving average
+          - Unwraps continuous Euler angles to eliminate +-pi gimbal boundaries.
+        """
+        poses = np.asarray(poses, dtype=np.float64)
+        if len(poses) < 4:
+            return poses.copy()
+
+        fps_val = max(5.0, float(fps))
+        win_len = int(round(fps_val * (time_window_ms / 1000.0)))
+        if win_len % 2 == 0:
+            win_len += 1
+        win_len = max(3, win_len)
+        if win_len >= len(poses):
+            win_len = (len(poses) - 1) if (len(poses) - 1) % 2 == 1 else max(3, len(poses) - 2)
+
+        pos = poses[:, :3]
+        rot = poses[:, 3:6]
+
+        if method == "savgol":
+            poly = min(2, win_len - 1)
+            pos_smooth = scipy.signal.savgol_filter(pos, window_length=win_len, polyorder=poly, axis=0)
+            rot_unwrapped = np.unwrap(rot, axis=0)
+            rot_smooth = scipy.signal.savgol_filter(rot_unwrapped, window_length=win_len, polyorder=poly, axis=0)
+        else:
+            pad = win_len // 2
+            kernel = np.ones(win_len) / win_len
+            pos_pad = np.pad(pos, ((pad, pad), (0, 0)), mode="edge")
+            pos_smooth = np.zeros_like(pos)
+            for d in range(3):
+                pos_smooth[:, d] = np.convolve(pos_pad[:, d], kernel, mode="valid")
+
+            rot_unwrapped = np.unwrap(rot, axis=0)
+            rot_pad = np.pad(rot_unwrapped, ((pad, pad), (0, 0)), mode="edge")
+            rot_smooth = np.zeros_like(rot)
+            for d in range(3):
+                rot_smooth[:, d] = np.convolve(rot_pad[:, d], kernel, mode="valid")
+
+        rot_normalized = (rot_smooth + np.pi) % (2 * np.pi) - np.pi
+        return np.hstack([pos_smooth, rot_normalized])
+
+
     def detect_marker_pnp(self, frame, camera_matrix, dist_coeffs, return_corners=False):
         """
         Phase 1: Dual-ArUco Rigid Board Detection & Dynamic PnP Solver.
@@ -1163,7 +1342,10 @@ class VisualInertialTracker:
         fps=30.0,
         output_dev_video_path=None,
         output_canny_video_path=None,
-        return_dev_info=False
+        return_dev_info=False,
+        smooth=True,
+        smooth_method="savgol",
+        smooth_window_ms=250
     ):
         """
         Sensory fusion: ArUco Ground Truth + OpenCV Virtual SLAM PnP + 100Hz IMU EKF.
@@ -1174,18 +1356,24 @@ class VisualInertialTracker:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        camera_matrix, dist_coeffs = self.estimate_camera_matrix(width, height, hfov_degrees=75.0)
+        # Generalized 3-Tier Adaptive Self-Calibration for ANY phone lens
+        camera_matrix, dist_coeffs = self.calibrate_camera_adaptive(cap, width, height)
 
         # Initialize OpenCV Virtual SLAM Feature Map Tracker
         feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
 
         dev_writer = None
         canny_writer = None
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        # Prefer H.264 (avc1) with Cisco OpenH264 for universal HTML5 browser playback, fallback to mp4v
+        fourcc = cv2.VideoWriter_fourcc(*'avc1')
         if output_dev_video_path:
             dev_writer = cv2.VideoWriter(output_dev_video_path, fourcc, fps, (width, height))
+            if not dev_writer.isOpened():
+                dev_writer = cv2.VideoWriter(output_dev_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
         if output_canny_video_path:
             canny_writer = cv2.VideoWriter(output_canny_video_path, fourcc, fps, (width, height))
+            if not canny_writer.isOpened():
+                canny_writer = cv2.VideoWriter(output_canny_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
         video_detections = []  # (frame_idx, p_world, euler, is_dual, source)
         dev_telemetry = []
@@ -1325,6 +1513,12 @@ class VisualInertialTracker:
 
         # Run EKF Fusion
         final_trajectory = self._run_ekf_fusion(num_frames, fps, video_detections, parsed_imu)
+        self.last_raw_trajectory = final_trajectory.copy()
+        if smooth and len(final_trajectory) >= 4:
+            final_trajectory = self.smooth_trajectory(
+                final_trajectory, fps=fps, method=smooth_method, time_window_ms=smooth_window_ms
+            )
+
         if return_dev_info:
             return final_trajectory, dev_telemetry
         return final_trajectory
@@ -1536,7 +1730,18 @@ class VisualInertialTracker:
 
         return final_poses
 
-    def reprocess_episode_trajectory(self, video_path, imu_samples, fps=30.0, output_dev_video_path=None, output_canny_video_path=None, return_dev_info=False):
+    def reprocess_episode_trajectory(
+        self,
+        video_path,
+        imu_samples,
+        fps=30.0,
+        output_dev_video_path=None,
+        output_canny_video_path=None,
+        return_dev_info=False,
+        smooth=True,
+        smooth_method="savgol",
+        smooth_window_ms=250
+    ):
         """
         Re-filters an existing video and IMU recording using the latest EKF parameters.
         """
@@ -1546,7 +1751,10 @@ class VisualInertialTracker:
             fps=fps,
             output_dev_video_path=output_dev_video_path,
             output_canny_video_path=output_canny_video_path,
-            return_dev_info=return_dev_info
+            return_dev_info=return_dev_info,
+            smooth=smooth,
+            smooth_method=smooth_method,
+            smooth_window_ms=smooth_window_ms
         )
 
     def generate_synthetic_anchored_trajectory(self, num_frames=90, shape="circle"):

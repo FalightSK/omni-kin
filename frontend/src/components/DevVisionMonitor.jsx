@@ -38,6 +38,23 @@ export default function DevVisionMonitor({
   const [cannyThresholdLow, setCannyThresholdLow] = useState(50);
   const [cannyThresholdHigh, setCannyThresholdHigh] = useState(150);
   const [videoDims, setVideoDims] = useState(null);
+  const [videoError, setVideoError] = useState(false);
+
+  useEffect(() => {
+    setVideoError(false);
+  }, [visionMode, devVideoUrl, cannyVideoUrl]);
+
+  let currentVideoSrc = videoUrl;
+  let usePreRenderedDev = false;
+  let usePreRenderedCanny = false;
+
+  if (visionMode === 'dev' && devVideoUrl && !videoError) {
+    currentVideoSrc = devVideoUrl;
+    usePreRenderedDev = true;
+  } else if (visionMode === 'canny' && cannyVideoUrl && !videoError) {
+    currentVideoSrc = cannyVideoUrl;
+    usePreRenderedCanny = true;
+  }
 
   // Sync play/pause with parent timeline
   useEffect(() => {
@@ -516,38 +533,43 @@ export default function DevVisionMonitor({
 
       {/* 2. Video Stage: Displaying Real Video with OpenCV Augmentations */}
       <div className="relative w-full aspect-video max-h-[520px] bg-black rounded-xl overflow-hidden border border-slate-800/80 shadow-2xl flex items-center justify-center group">
-        {/* Underlying Authentic Camera Video */}
+        {/* Underlying Authentic Camera or Pre-Rendered Dev Video */}
         <video
+          key={currentVideoSrc}
           ref={videoRef}
-          src={videoUrl}
+          src={currentVideoSrc}
           playsInline
           muted
           preload="auto"
+          onError={(e) => {
+            console.warn("Dev video decode error, falling back to real-time canvas:", currentVideoSrc, e);
+            setVideoError(true);
+          }}
           onLoadedMetadata={handleLoadedMetadata}
           onLoadedData={() => {
-            if (visionMode === 'canny') renderClientCanny();
-            else if (visionMode === 'dev') renderDevOverlays();
+            if (visionMode === 'canny' && !usePreRenderedCanny) renderClientCanny();
+            else if (visionMode === 'dev' && !usePreRenderedDev) renderDevOverlays();
           }}
           onSeeked={() => {
-            if (visionMode === 'canny') renderClientCanny();
-            else if (visionMode === 'dev') renderDevOverlays();
+            if (visionMode === 'canny' && !usePreRenderedCanny) renderClientCanny();
+            else if (visionMode === 'dev' && !usePreRenderedDev) renderDevOverlays();
           }}
           onTimeUpdate={() => {
             if (!isPlaying) {
-              if (visionMode === 'canny') renderClientCanny();
-              else if (visionMode === 'dev') renderDevOverlays();
+              if (visionMode === 'canny' && !usePreRenderedCanny) renderClientCanny();
+              else if (visionMode === 'dev' && !usePreRenderedDev) renderDevOverlays();
             }
           }}
           className={`w-full h-full object-contain ${
-            visionMode === 'canny' ? 'opacity-0' : 'opacity-100'
+            visionMode === 'canny' && !usePreRenderedCanny ? 'opacity-0' : 'opacity-100'
           }`}
         />
 
-        {/* Real-time OpenCV / ArUco Canvas Overlay */}
+        {/* Real-time OpenCV / ArUco Canvas Overlay (active when not using pre-rendered video) */}
         <canvas
           ref={canvasRef}
           className={`absolute inset-0 w-full h-full object-contain pointer-events-none ${
-            visionMode === 'raw' ? 'hidden' : 'block'
+            usePreRenderedDev || usePreRenderedCanny || visionMode === 'raw' ? 'hidden' : 'block'
           }`}
         />
 
