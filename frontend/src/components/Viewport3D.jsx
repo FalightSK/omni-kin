@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { RotateCcw, Eye, Play, Pause, Compass } from 'lucide-react';
+import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d } from 'lucide-react';
 
 export default function Viewport3D({
   trajectoryPoses = [],
@@ -19,6 +19,7 @@ export default function Viewport3D({
 
   const [isAutoRotate, setIsAutoRotate] = useState(false);
   const [activeView, setActiveView] = useState('iso');
+  const [isOrbitTouchEnabled, setIsOrbitTouchEnabled] = useState(true);
 
   useEffect(() => {
     const container = mountRef.current;
@@ -55,7 +56,23 @@ export default function Viewport3D({
     controls.maxPolarAngle = Math.PI / 2 + 0.20; // Prevent looking completely underneath table
     controls.autoRotate = isAutoRotate;
     controls.autoRotateSpeed = 2.2;
+    // Disable default wheel capture so ordinary mouse wheel scrolls the page freely!
+    controls.enableZoom = false;
     controlsRef.current = controls;
+
+    // Allow Ctrl + Mouse Wheel (or Cmd + Wheel) to zoom 3D camera without scrolling page
+    const handleWheel = (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+        const zoomDelta = e.deltaY > 0 ? 0.15 : -0.15;
+        if ((zoomDelta > 0 && dir.length() < 4.0) || (zoomDelta < 0 && dir.length() > 0.12)) {
+          camera.position.addScaledVector(dir, zoomDelta);
+          controls.update();
+        }
+      }
+    };
+    container.addEventListener('wheel', handleWheel, { passive: false });
 
     // 5. Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.75);
@@ -134,6 +151,7 @@ export default function Viewport3D({
     return () => {
       cancelAnimationFrame(animId);
       resizeObserver.disconnect();
+      container.removeEventListener('wheel', handleWheel);
       controls.dispose();
       if (renderer.domElement && container.contains(renderer.domElement)) {
         container.removeChild(renderer.domElement);
@@ -147,6 +165,47 @@ export default function Viewport3D({
       controlsRef.current.autoRotate = isAutoRotate;
     }
   }, [isAutoRotate]);
+
+  // Sync touch orbit mode with controls
+  useEffect(() => {
+    if (!controlsRef.current) return;
+    if (isOrbitTouchEnabled) {
+      controlsRef.current.touches = {
+        ONE: THREE.TOUCH.ROTATE,
+        TWO: THREE.TOUCH.DOLLY_PAN
+      };
+      controlsRef.current.enabled = true;
+    } else {
+      controlsRef.current.touches = {
+        ONE: null,
+        TWO: THREE.TOUCH.DOLLY_PAN
+      };
+      controlsRef.current.enabled = false;
+    }
+  }, [isOrbitTouchEnabled]);
+
+  // Zoom In / Out Handlers
+  const handleZoomIn = () => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+    const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+    if (dir.length() > 0.12) {
+      camera.position.addScaledVector(dir, -0.20);
+      controls.update();
+    }
+  };
+
+  const handleZoomOut = () => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+    const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+    if (dir.length() < 4.0) {
+      camera.position.addScaledVector(dir, 0.20);
+      controls.update();
+    }
+  };
 
   // Set Camera View Angle Preset
   const setViewPreset = (view) => {
@@ -386,7 +445,11 @@ export default function Viewport3D({
 
   return (
     <div className="w-full h-full relative rounded-2xl overflow-hidden glass-card group">
-      <div ref={mountRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
+      <div
+        ref={mountRef}
+        className={`w-full h-full ${isOrbitTouchEnabled ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
+        style={{ touchAction: isOrbitTouchEnabled ? 'none' : 'pan-y' }}
+      />
 
       {/* Top Left: ArUco Origin & Robot Base Info Pill */}
       <div className="absolute top-3 left-3 bg-slate-900/85 backdrop-blur-md border border-slate-700/70 px-3 py-1.5 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2.5 pointer-events-none z-10">
@@ -398,45 +461,85 @@ export default function Viewport3D({
         </span>
       </div>
 
-      {/* Top Right: View Angle Controls & Auto-Rotate Overlay */}
-      <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/85 backdrop-blur-md border border-slate-700/70 p-1 rounded-xl text-[11px] z-10 shadow-lg">
+      {/* Top Right: View Angle Controls, Zoom Controls, Touch Mode & Auto-Rotate */}
+      <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-700/70 p-1 rounded-xl text-[11px] z-10 shadow-lg flex-wrap justify-end">
+        {/* Presets */}
+        <div className="flex items-center gap-0.5 bg-slate-950/60 p-0.5 rounded-lg border border-slate-800">
+          <button
+            onClick={() => setViewPreset('iso')}
+            className={`px-2 py-0.5 rounded font-medium transition-all ${
+              activeView === 'iso' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+            title="Isometric View"
+          >
+            Iso
+          </button>
+          <button
+            onClick={() => setViewPreset('top')}
+            className={`px-2 py-0.5 rounded font-medium transition-all ${
+              activeView === 'top' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+            title="Top-Down View (XY Table Plane)"
+          >
+            Top
+          </button>
+          <button
+            onClick={() => setViewPreset('front')}
+            className={`px-2 py-0.5 rounded font-medium transition-all ${
+              activeView === 'front' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+            title="Front View"
+          >
+            Front
+          </button>
+          <button
+            onClick={() => setViewPreset('side')}
+            className={`px-2 py-0.5 rounded font-medium transition-all ${
+              activeView === 'side' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+            }`}
+            title="Side View"
+          >
+            Side
+          </button>
+        </div>
+
+        {/* Zoom Controls */}
+        <div className="flex items-center gap-0.5 bg-slate-950/60 p-0.5 rounded-lg border border-slate-800">
+          <button
+            onClick={handleZoomIn}
+            className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all active:scale-95"
+            title="Zoom In 3D Camera (+)"
+          >
+            <ZoomIn className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={handleZoomOut}
+            className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all active:scale-95"
+            title="Zoom Out 3D Camera (-)"
+          >
+            <ZoomOut className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        {/* Mobile Touch Mode Toggle (Orbit vs Scroll Page) */}
         <button
-          onClick={() => setViewPreset('iso')}
-          className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
-            activeView === 'iso' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+          onClick={() => setIsOrbitTouchEnabled(!isOrbitTouchEnabled)}
+          className={`px-2 py-1 rounded-lg transition-all flex items-center gap-1 text-[10px] font-medium border ${
+            isOrbitTouchEnabled
+              ? 'bg-indigo-600/30 text-indigo-200 border-indigo-500/40'
+              : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
           }`}
-          title="Isometric View"
+          title={
+            isOrbitTouchEnabled
+              ? "3D Orbit Mode: Drag rotates 3D scene (Click to switch to Page Scroll mode)"
+              : "Page Scroll Mode: Single finger drags scroll page (Click to enable 3D Orbit)"
+          }
         >
-          Iso
+          <Move3d className="w-3.5 h-3.5 text-indigo-400" />
+          <span>{isOrbitTouchEnabled ? 'Orbit 3D' : 'Scroll Page'}</span>
         </button>
-        <button
-          onClick={() => setViewPreset('top')}
-          className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
-            activeView === 'top' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-          }`}
-          title="Top-Down View (XY Table Plane)"
-        >
-          Top
-        </button>
-        <button
-          onClick={() => setViewPreset('front')}
-          className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
-            activeView === 'front' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-          }`}
-          title="Front View"
-        >
-          Front
-        </button>
-        <button
-          onClick={() => setViewPreset('side')}
-          className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
-            activeView === 'side' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-          }`}
-          title="Side View"
-        >
-          Side
-        </button>
-        <div className="w-[1px] h-4 bg-slate-700 mx-0.5" />
+
+        {/* Auto-Rotate Toggle */}
         <button
           onClick={() => setIsAutoRotate(!isAutoRotate)}
           className={`p-1.5 rounded-lg transition-all flex items-center gap-1 ${
@@ -449,9 +552,9 @@ export default function Viewport3D({
       </div>
 
       {/* Bottom Left: Interactive Control Hint */}
-      <div className="absolute bottom-3 left-3 bg-slate-900/75 backdrop-blur-sm border border-slate-800/80 px-2.5 py-1 rounded-lg text-[10px] text-slate-400 font-mono pointer-events-none z-10 flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
+      <div className="absolute bottom-3 left-3 bg-slate-900/80 backdrop-blur-sm border border-slate-800/80 px-2.5 py-1 rounded-lg text-[10px] text-slate-400 font-mono pointer-events-none z-10 flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
         <Compass className="w-3 h-3 text-indigo-400" />
-        <span>Drag: Rotate • Right-drag: Pan • Scroll: Zoom</span>
+        <span>Drag: Rotate • Scroll: Page • [+/-] / Ctrl+Scroll: Zoom</span>
       </div>
     </div>
   );

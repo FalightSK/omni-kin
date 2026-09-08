@@ -64,6 +64,8 @@ export default function Dashboard({
   const [isDragging, setIsDragging] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const splitContainerRef = useRef(null);
+  const devPanelRef = useRef(null);
+  const scrollContainerRef = useRef(null);
 
   const activeEp = episodes.find((e) => e.episode_index === selectedEpIdx) || episodes[0] || null;
   const poses = activeEp?.poses || [];
@@ -221,12 +223,15 @@ export default function Dashboard({
 
   return (
     <div
-      className={`flex-1 p-4 grid gap-4 overflow-hidden h-[calc(100vh-60px)] transition-all ${
+      className={`flex-1 p-4 grid gap-4 min-h-[calc(100dvh-60px)] lg:h-[calc(100dvh-60px)] lg:overflow-hidden transition-all ${
         isSidebarOpen ? 'grid-cols-1 lg:grid-cols-4' : 'grid-cols-1'
       } ${isDragging ? 'select-none' : ''}`}
     >
       {/* Main Center Area: Big 3D Preview with Inset Camera & Timeline */}
-      <div className={`${isSidebarOpen ? 'lg:col-span-3' : 'w-full'} flex flex-col gap-3 h-full min-h-0 overflow-y-auto overflow-x-hidden pr-2 pb-8 custom-scrollbar`}>
+      <div
+        ref={scrollContainerRef}
+        className={`${isSidebarOpen ? 'lg:col-span-3' : 'w-full'} flex flex-col gap-3 h-full min-h-0 overflow-y-auto overflow-x-hidden pr-2 pb-8 custom-scrollbar`}
+      >
         {/* Top Control Bar for Layout Modes */}
         <div className="flex items-center justify-between px-1 text-xs">
           <div className="flex items-center gap-2 flex-wrap">
@@ -319,6 +324,20 @@ export default function Dashboard({
               <Terminal className={`w-3.5 h-3.5 ${isDevView ? 'text-amber-400' : 'text-slate-400'}`} />
               <span>Dev View: {isDevView ? 'ON' : 'OFF'}</span>
             </button>
+
+            {/* Direct Jump to Dev View Panel */}
+            {isDevView && (
+              <button
+                onClick={() => {
+                  devPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }}
+                className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1.5 transition-all text-[11px] font-medium active:scale-95 shadow-sm"
+                title="Scroll directly down to OpenCV Scene Anchoring & Dev View"
+              >
+                <Anchor className="w-3.5 h-3.5 text-amber-400" />
+                <span>Jump to Dev View ↓</span>
+              </button>
+            )}
           </div>
 
           {/* Right: Sidebar Collapse/Expand Toggle */}
@@ -585,7 +604,7 @@ export default function Dashboard({
 
           {/* Intuitive OpenCV Scene Anchoring & ArUco Dev Diagnostic Panel */}
           {isDevView && (
-            <div className="bg-slate-950/95 p-4 rounded-2xl border border-amber-500/40 text-left text-xs flex flex-col gap-3 shadow-xl">
+            <div ref={devPanelRef} className="bg-slate-950/95 p-4 rounded-2xl border border-amber-500/40 text-left text-xs flex flex-col gap-3 shadow-xl">
               {/* Header: Title, Active Anchor Mode Pill, and Concept Guide Toggle */}
               <div className="flex items-center justify-between flex-wrap gap-2 border-b border-slate-800/80 pb-3">
                 <div className="flex items-center gap-2.5">
@@ -610,6 +629,21 @@ export default function Dashboard({
                 </div>
 
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      if (scrollContainerRef.current) {
+                        scrollContainerRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+                      } else {
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 transition-all flex items-center gap-1.5 active:scale-95"
+                    title="Scroll back up to 3D Viewport"
+                  >
+                    <ChevronUp className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Back to Top ↑</span>
+                  </button>
+
                   <button
                     onClick={() => setShowAnchoringGuide(!showAnchoringGuide)}
                     className="px-2.5 py-1 rounded-lg text-[11px] font-medium text-slate-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 transition-all flex items-center gap-1.5"
