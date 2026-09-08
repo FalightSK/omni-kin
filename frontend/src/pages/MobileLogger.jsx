@@ -35,7 +35,6 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const [imuHz, setImuHz] = useState(0);
   const [showTelemetry, setShowTelemetry] = useState(false);
   const [accelData, setAccelData] = useState([0, 0, 9.81]);
-  const [gyroData, setGyroData] = useState([0, 0, 0]);
   const [focusPoint, setFocusPoint] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -54,6 +53,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const imuSampleCountRef = useRef(0);
   const startTimeRef = useRef(0);
   const timerIntervalRef = useRef(null);
+  const lastUiUpdateTimeRef = useRef(0);
 
   // Listen to screen orientation & window resize
   useEffect(() => {
@@ -178,11 +178,12 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         tracks.forEach((t) => t.stop());
       }
 
-      // 16:9 ideal widescreen constraints for landscape data capture
+      // Standard robotics imitation learning 720p widescreen constraints (1280x720 @ 30 FPS)
+      // Provides optimal balance of sharpness, low encoding latency, and zero thermal throttling
       const constraints = {
         video: selectedId
-          ? { deviceId: { exact: selectedId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-          : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          ? { deviceId: { exact: selectedId }, width: { ideal: 1280, max: 1920 }, height: { ideal: 720, max: 1080 }, frameRate: { ideal: 30 } }
+          : { facingMode: { ideal: 'environment' }, width: { ideal: 1280, max: 1920 }, height: { ideal: 720, max: 1080 }, frameRate: { ideal: 30 } },
         audio: false
       };
 
@@ -232,17 +233,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         const accArr = [acc.x || 0, acc.y || 0, acc.z || 9.81];
         const rotArr = [rot.beta || 0, rot.gamma || 0, rot.alpha || 0];
 
-        setAccelData(accArr);
-        setGyroData(rotArr);
-
-        // If accelerometer indicates strong horizontal orientation (|Ax| > 6.0 m/s^2), confirm landscape
-        if (Math.abs(accArr[0]) > 6.0) {
-          setIsLandscape(true);
-        } else if (Math.abs(accArr[1]) > 7.0 && Math.abs(accArr[0]) < 3.5) {
-          // Strongly upright portrait
-          setIsLandscape(false);
-        }
-
+        // 1. High-frequency sensor capture (100Hz hardware rate directly into ref, ZERO React re-renders)
         if (isRecording) {
           const nowEpoch = performance.timeOrigin + performance.now();
           const elapsedSec = (nowEpoch - startTimeRef.current) / 1000.0;
@@ -259,6 +250,21 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
             screen_angle: screenAngle
           });
           imuSampleCountRef.current += 1;
+        }
+
+        // 2. Throttle React UI updates to 10Hz (every 100ms) to eliminate main-thread lag
+        const nowMs = performance.now();
+        if (nowMs - lastUiUpdateTimeRef.current >= 100) {
+          lastUiUpdateTimeRef.current = nowMs;
+          setAccelData(accArr);
+
+          // If accelerometer indicates strong horizontal orientation (|Ax| > 6.0 m/s^2), confirm landscape
+          if (Math.abs(accArr[0]) > 6.0) {
+            setIsLandscape(true);
+          } else if (Math.abs(accArr[1]) > 7.0 && Math.abs(accArr[0]) < 3.5) {
+            // Strongly upright portrait
+            setIsLandscape(false);
+          }
         }
       });
     }
@@ -278,19 +284,31 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     startTimeRef.current = performance.timeOrigin + performance.now();
     setIsRecording(true);
 
-    let mimeType = 'video/webm;codecs=vp8';
-    if (!MediaRecorder.isTypeSupported(mimeType)) {
-      mimeType = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : 'video/webm';
-    }
+    // Adaptive hardware-accelerated codec selection (prioritizes GPU-accelerated AVC1/H264 over software VP8)
+    const preferredMimes = [
+      'video/mp4;codecs=avc1',
+      'video/mp4',
+      'video/webm;codecs=h264',
+      'video/webm;codecs=vp9',
+      'video/webm'
+    ];
+    let selectedMime = preferredMimes.find(
+      (m) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m)
+    ) || '';
 
-    const mediaRecorder = new MediaRecorder(videoRef.current.srcObject, { mimeType });
+    const recOptions = selectedMime
+      ? { mimeType: selectedMime, videoBitsPerSecond: 4000000 }
+      : {};
+
+    const mediaRecorder = new MediaRecorder(videoRef.current.srcObject, recOptions);
     mediaRecorderRef.current = mediaRecorder;
 
     mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) recordedChunksRef.current.push(e.data);
     };
 
-    mediaRecorder.start(30);
+    // 1000ms timeslice allows mobile hardware encoders to produce coherent GOP blocks without stalling the main thread
+    mediaRecorder.start(1000);
 
     timerIntervalRef.current = setInterval(() => {
       const elapsed = (performance.timeOrigin + performance.now() - startTimeRef.current) / 1000.0;

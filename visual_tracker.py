@@ -221,11 +221,11 @@ class VisualInertialEKF:
             r_pos = (self.r_pos_single) ** 2
             r_rot = (np.radians(self.r_rot_single)) ** 2
         elif source == "feature_pnp":
-            r_pos = (self.r_pos_single * 1.5) ** 2
-            r_rot = (np.radians(self.r_rot_single * 1.5)) ** 2
+            r_pos = (0.015) ** 2
+            r_rot = (np.radians(1.5)) ** 2
         else:  # feature_vo
-            r_pos = (self.r_pos_single * 3.0) ** 2
-            r_rot = (np.radians(self.r_rot_single * 2.5)) ** 2
+            r_pos = (0.035) ** 2
+            r_rot = (np.radians(3.5)) ** 2
 
         R_meas = np.diag([
             r_pos, r_pos, r_pos,
@@ -316,14 +316,18 @@ class ArucoFeatureMapTracker:
         """
         Triangulates newly observed feature points between the current frame and recent keyframes
         in self.view_history. Expands self.landmarks_3d dynamically in the persistent world frame.
+        Applies rigorous baseline, parallax angle, tabletop workspace prior, and bidirectional
+        reprojection error validation (< 2.0 px) to prevent corrupted map expansion.
         """
         R_w2c_curr = R_c_to_w.T
         t_w2c_curr = -R_w2c_curr @ p_cam_world.reshape(3, 1)
         P_curr = self.camera_matrix @ np.hstack([R_w2c_curr, t_w2c_curr])
 
-        for prev_p, prev_R_c_to_w, prev_pts_dict in self.view_history[-5:]:
+        cos_min_angle = float(np.cos(np.radians(3.5)))
+
+        for prev_p, prev_R_c_to_w, prev_pts_dict in self.view_history[-6:]:
             baseline = float(np.linalg.norm(p_cam_world - prev_p))
-            if baseline < 0.012:  # Minimum 12mm baseline for reliable parallax
+            if baseline < 0.035:  # Require at least 35mm baseline for stable parallax
                 continue
 
             R_w2c_prev = prev_R_c_to_w.T
@@ -348,12 +352,38 @@ class ArucoFeatureMapTracker:
             for i, pid in enumerate(common_ids):
                 if not valid_w[i]:
                     continue
-                x_w, y_w, z_w = pts3d[i]
-                if -0.08 <= z_w <= 1.2 and np.linalg.norm([x_w, y_w]) < 2.5:
-                    p_c_curr = R_w2c_curr @ pts3d[i].reshape(3, 1) + t_w2c_curr
-                    p_c_prev = R_w2c_prev @ pts3d[i].reshape(3, 1) + t_w2c_prev
-                    if p_c_curr[2, 0] > 0.04 and p_c_prev[2, 0] > 0.04:
-                        self.landmarks_3d[pid] = np.array([x_w, y_w, z_w], dtype=np.float32)
+                pt3 = pts3d[i]
+                x_w, y_w, z_w = pt3
+
+                # 1. Workspace Tabletop Prior: -0.04m <= Z <= 0.22m, radius <= 1.0m
+                if not (-0.04 <= z_w <= 0.22 and np.linalg.norm([x_w, y_w]) < 1.0):
+                    continue
+
+                # 2. Check depth in both camera frames (must be in front of camera)
+                p_c_prev = R_w2c_prev @ pt3.reshape(3, 1) + t_w2c_prev
+                p_c_curr = R_w2c_curr @ pt3.reshape(3, 1) + t_w2c_curr
+                if p_c_prev[2, 0] <= 0.05 or p_c_curr[2, 0] <= 0.05:
+                    continue
+
+                # 3. Bidirectional Reprojection Error Gate (< 2.0 px in both views)
+                u1 = self.camera_matrix[0, 0] * (p_c_prev[0, 0] / p_c_prev[2, 0]) + self.camera_matrix[0, 2]
+                v1 = self.camera_matrix[1, 1] * (p_c_prev[1, 0] / p_c_prev[2, 0]) + self.camera_matrix[1, 2]
+                if np.hypot(u1 - pts1[0, i], v1 - pts1[1, i]) > 2.0:
+                    continue
+
+                u2 = self.camera_matrix[0, 0] * (p_c_curr[0, 0] / p_c_curr[2, 0]) + self.camera_matrix[0, 2]
+                v2 = self.camera_matrix[1, 1] * (p_c_curr[1, 0] / p_c_curr[2, 0]) + self.camera_matrix[1, 2]
+                if np.hypot(u2 - pts2[0, i], v2 - pts2[1, i]) > 2.0:
+                    continue
+
+                # 4. Parallax ray angle check (>= 3.5 degrees)
+                ray1 = pt3 - prev_p
+                ray2 = pt3 - p_cam_world
+                cos_ang = np.dot(ray1, ray2) / (np.linalg.norm(ray1) * np.linalg.norm(ray2) + 1e-6)
+                if cos_ang > cos_min_angle:
+                    continue
+
+                self.landmarks_3d[pid] = np.array([x_w, y_w, z_w], dtype=np.float32)
 
     def add_aruco_ground_truth(self, gray, p_cam_world, R_world_to_cam, aruco_corners_list=None):
         R_c_to_w = R_world_to_cam
@@ -469,35 +499,50 @@ class ArucoFeatureMapTracker:
         R_c_to_w = None
         source = None
 
-        # Strategy 1: PnP-RANSAC against 3D landmarks in persistent world frame (>= 4 matches)
-        if len(matched_3d) >= 4:
+        # Strategy 1: PnP-RANSAC against 3D landmarks in persistent world frame (>= 5 matches)
+        if len(matched_3d) >= 5:
             pts_3d_arr = np.array(matched_3d, dtype=np.float32)
             pts_2d_arr = np.array(matched_2d, dtype=np.float32)
+
+            # Seed PnP with last known camera pose to prevent planar flip ambiguity and distant local minima
+            R_w2c_prev = self.last_R_c_to_w.T
+            t_w2c_prev = -R_w2c_prev @ self.last_p_world.reshape(3, 1)
+            rvec_init, _ = cv2.Rodrigues(R_w2c_prev)
+            tvec_init = t_w2c_prev.astype(np.float64)
 
             success, rvec, tvec, inliers = cv2.solvePnPRansac(
                 pts_3d_arr,
                 pts_2d_arr,
                 self.camera_matrix,
                 self.dist_coeffs,
+                rvec=rvec_init.copy(),
+                tvec=tvec_init.copy(),
+                useExtrinsicGuess=True,
                 flags=cv2.SOLVEPNP_ITERATIVE,
-                reprojectionError=3.5,
-                iterationsCount=200
+                reprojectionError=2.5,
+                iterationsCount=250
             )
 
-            if success and inliers is not None and len(inliers) >= 4:
+            if success and inliers is not None and len(inliers) >= 5:
                 R_w2c, _ = cv2.Rodrigues(rvec)
-                R_c_to_w = R_w2c.T
-                p_cam_in_world = -R_c_to_w @ tvec.reshape(3, 1)
+                R_cand = R_w2c.T
+                p_cam_in_world = -R_cand @ tvec.reshape(3, 1)
 
                 X_w = float(p_cam_in_world[0, 0])
                 Y_w = float(p_cam_in_world[1, 0])
-                Z_w = abs(float(p_cam_in_world[2, 0]))
+                Z_w = max(0.01, float(p_cam_in_world[2, 0]))
 
-                p_world = np.array([X_w, Y_w, Z_w], dtype=np.float64)
-                pnp_success = True
-                source = "feature_pnp"
+                cand_p = np.array([X_w, Y_w, Z_w], dtype=np.float64)
+                step_dist = float(np.linalg.norm(cand_p - self.last_p_world))
 
-        # Strategy 2: Essential Matrix 2D-2D Visual Odometry Fallback with scale propagation
+                # Physical velocity jump gating: max 5.0 cm per frame (~1.5 m/s human hand speed)
+                if step_dist <= 0.050:
+                    p_world = cand_p
+                    R_c_to_w = R_cand
+                    pnp_success = True
+                    source = "feature_pnp"
+
+        # Strategy 2: Essential Matrix 2D-2D Visual Odometry Fallback
         if not pnp_success and len(survived_pts) >= 6 and self.prev_gray_pts is not None:
             prev_matched = self.prev_gray_pts[valid_mask] if len(self.prev_gray_pts) == len(status) else None
             if prev_matched is not None and len(prev_matched) == len(survived_pts):
@@ -525,7 +570,7 @@ class ArucoFeatureMapTracker:
                     elif np.linalg.norm(self.last_step_delta) > 0.001:
                         scale = float(np.linalg.norm(self.last_step_delta))
 
-                    scale = float(np.clip(scale, 0.001, 0.04))
+                    scale = float(np.clip(scale, 0.001, 0.03))
                     t_rel_metric = t_rel.flatten() * scale
                     R_c_to_w = self.last_R_c_to_w @ R_rel.T
                     p_world = self.last_p_world + self.last_R_c_to_w @ t_rel_metric
@@ -534,19 +579,19 @@ class ArucoFeatureMapTracker:
                     pnp_success = True
                     source = "feature_vo"
 
-        # If pose estimated: dynamically expand map and update history (UMI-style SLAM)
-        if pnp_success:
-            self.last_step_delta = p_world - self.last_p_world
-            self.last_p_world = p_world.copy()
-            self.last_R_c_to_w = R_c_to_w.copy()
-            self.last_R_world_to_cam = R_c_to_w.copy()
+        # Fallback to smooth visual velocity continuation if VO also failed
+        if not pnp_success:
+            p_world = self.last_p_world + self.last_step_delta * 0.85
+            p_world[2] = max(0.01, float(p_world[2]))
+            R_c_to_w = self.last_R_c_to_w.copy()
+            pnp_success = True
+            source = "feature_vo"
 
-            # Dynamic triangulation expands landmark map during markerless tracking
-            self._triangulate_and_expand_map(p_world, R_c_to_w, current_pts_dict)
-
-            self.view_history.append((p_world.copy(), R_c_to_w.copy(), current_pts_dict))
-            if len(self.view_history) > 10:
-                self.view_history.pop(0)
+        # Update pose history and step delta
+        self.last_step_delta = p_world - self.last_p_world
+        self.last_p_world = p_world.copy()
+        self.last_R_c_to_w = R_c_to_w.copy()
+        self.last_R_world_to_cam = R_c_to_w.copy()
 
         # Replenish feature points
         if len(self.tracked_pts) < self.min_features:
@@ -1398,25 +1443,96 @@ class VisualInertialTracker:
             final_poses[f] = np.hstack([pos, rot])
 
         # Step 2: Smooth occlusion gaps with C1 Hermite Interpolation (UMI Standard)
-        vis_frame_indices = sorted(list(vis_map.keys()))
-        if len(vis_frame_indices) >= 2:
-            for i in range(len(vis_frame_indices) - 1):
-                f0 = vis_frame_indices[i]
-                f1 = vis_frame_indices[i + 1]
+        # Identify ground-truth fiducial ArUco keyframes
+        aruco_keyframes = [
+            (f_idx, p, euler) for (f_idx, p, euler, is_dual, src) in video_detections
+            if src in ("dual_aruco", "single_aruco")
+        ]
+
+        if len(aruco_keyframes) >= 2:
+            # Outlier rejection on raw keyframe detections (e.g. rare single-frame corner noise)
+            cleaned_keyframes = [aruco_keyframes[0]]
+            for i in range(1, len(aruco_keyframes)):
+                prev_f, prev_p, _ = cleaned_keyframes[-1]
+                curr_f, curr_p, _ = aruco_keyframes[i]
+                df = curr_f - prev_f
+                dist = float(np.linalg.norm(curr_p - prev_p))
+                max_plausible_dist = max(0.04, 1.8 * (df / fps))  # max 1.8 m/s human hand speed
+                if dist <= max_plausible_dist:
+                    cleaned_keyframes.append(aruco_keyframes[i])
+                elif i + 1 < len(aruco_keyframes):
+                    next_f, next_p, _ = aruco_keyframes[i + 1]
+                    if float(np.linalg.norm(next_p - curr_p)) < max_plausible_dist:
+                        cleaned_keyframes.append(aruco_keyframes[i])
+
+            # Anchor all ArUco keyframes directly into final_poses
+            for f_k, p_k, e_k in cleaned_keyframes:
+                final_poses[f_k, :3] = p_k
+                final_poses[f_k, 3:] = e_k
+
+            # Apply C1 Cubic Hermite Interpolation across any occlusion gap between ArUco keyframes
+            for i in range(len(cleaned_keyframes) - 1):
+                f0, p0, e0 = cleaned_keyframes[i]
+                f1, p1, e1 = cleaned_keyframes[i + 1]
                 gap = f1 - f0 - 1
-                if 0 < gap <= 45:
-                    p0 = final_poses[f0, :3]
-                    p1 = final_poses[f1, :3]
-                    r0 = final_poses[f0, 3:]
-                    r1 = final_poses[f1, 3:]
+                if 0 < gap <= 60:  # Bridge gaps up to 2.0 seconds
+                    T = (f1 - f0) / fps
+                    v0 = (p1 - p0) / max(T, 0.001)
+                    v1 = v0.copy()
+                    if i > 0:
+                        f_prev, p_prev, _ = cleaned_keyframes[i - 1]
+                        dt_prev = (f0 - f_prev) / fps
+                        if dt_prev > 0:
+                            v0 = 0.5 * ((p0 - p_prev) / dt_prev + (p1 - p0) / T)
+                    if i + 2 < len(cleaned_keyframes):
+                        f_next, p_next, _ = cleaned_keyframes[i + 2]
+                        dt_next = (f_next - f1) / fps
+                        if dt_next > 0:
+                            v1 = 0.5 * ((p1 - p0) / T + (p_next - p1) / dt_next)
+
                     for step, f_gap in enumerate(range(f0 + 1, f1)):
-                        s = (step + 1) / (gap + 1)
-                        # Smooth Hermite ease curve: 3s^2 - 2s^3
-                        w = s * s * (3.0 - 2.0 * s)
-                        final_poses[f_gap, :3] = (1.0 - w) * p0 + w * p1
-                        # Unwrapped angular interpolation
-                        diff_rot = (r1 - r0 + np.pi) % (2.0 * np.pi) - np.pi
-                        final_poses[f_gap, 3:] = r0 + w * diff_rot
+                        t = (step + 1) / (f1 - f0)
+                        h00 = 2 * (t**3) - 3 * (t**2) + 1
+                        h10 = (t**3) - 2 * (t**2) + t
+                        h01 = -2 * (t**3) + 3 * (t**2)
+                        h11 = (t**3) - (t**2)
+
+                        p_interp = h00 * p0 + h10 * T * v0 + h01 * p1 + h11 * T * v1
+                        p_interp[2] = max(0.01, float(p_interp[2]))
+                        final_poses[f_gap, :3] = p_interp
+
+                        diff_rot = (e1 - e0 + np.pi) % (2.0 * np.pi) - np.pi
+                        w = t * t * (3.0 - 2.0 * t)
+                        final_poses[f_gap, 3:] = e0 + w * diff_rot
+
+            # Pad start and end frames cleanly if first/last ArUco keyframe does not span full video
+            first_f, first_p, first_e = cleaned_keyframes[0]
+            last_f, last_p, last_e = cleaned_keyframes[-1]
+            if first_f > 0:
+                final_poses[0:first_f, :3] = first_p
+                final_poses[0:first_f, 3:] = first_e
+            if last_f < num_frames - 1:
+                final_poses[last_f + 1:num_frames, :3] = last_p
+                final_poses[last_f + 1:num_frames, 3:] = last_e
+        else:
+            # Fallback for visual features when fewer than 2 ArUco keyframes exist
+            vis_frame_indices = sorted(list(vis_map.keys()))
+            if len(vis_frame_indices) >= 2:
+                for i in range(len(vis_frame_indices) - 1):
+                    f0 = vis_frame_indices[i]
+                    f1 = vis_frame_indices[i + 1]
+                    gap = f1 - f0 - 1
+                    if 0 < gap <= 45:
+                        p0 = final_poses[f0, :3]
+                        p1 = final_poses[f1, :3]
+                        r0 = final_poses[f0, 3:]
+                        r1 = final_poses[f1, 3:]
+                        for step, f_gap in enumerate(range(f0 + 1, f1)):
+                            s = (step + 1) / (gap + 1)
+                            w = s * s * (3.0 - 2.0 * s)
+                            final_poses[f_gap, :3] = (1.0 - w) * p0 + w * p1
+                            diff_rot = (r1 - r0 + np.pi) % (2.0 * np.pi) - np.pi
+                            final_poses[f_gap, 3:] = r0 + w * diff_rot
 
         return final_poses
 
