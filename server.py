@@ -1266,7 +1266,9 @@ async def auto_align_robot_endpoint(request: Request):
         poses_arr = np.asarray(poses, dtype=np.float64)
         r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so101"))
 
-        if mode == "optimal":
+        if mode == "recommended":
+            new_calib = workspace_calibrator.get_recommended_layout()
+        elif mode == "optimal":
             new_calib = workspace_calibrator.auto_align_to_trajectory(poses_arr, nominal_reach=0.24, default_yaw=90.0)
         else: # 'start'
             new_calib = workspace_calibrator.auto_align_base_to_start(poses_arr[0], nominal_reach=0.22, default_yaw=90.0)
