@@ -153,6 +153,8 @@ export default function Viewport3D({
   const controlsRef = useRef(null);
   const tubeMeshRef = useRef(null);
   const cursorMeshRef = useRef(null);
+  const startMarkerRef = useRef(null);
+  const goalMarkerRef = useRef(null);
   const robotGroupRef = useRef(null);
 
   // Dynamic Articulated Robot Arm Meshes
@@ -376,30 +378,106 @@ export default function Viewport3D({
 
     if (tubeMeshRef.current) {
       scene.remove(tubeMeshRef.current);
+      tubeMeshRef.current.geometry?.dispose();
+      tubeMeshRef.current.material?.dispose();
       tubeMeshRef.current = null;
+    }
+    if (startMarkerRef.current) {
+      scene.remove(startMarkerRef.current);
+      startMarkerRef.current.geometry?.dispose();
+      startMarkerRef.current.material?.dispose();
+      startMarkerRef.current = null;
+    }
+    if (goalMarkerRef.current) {
+      scene.remove(goalMarkerRef.current);
+      goalMarkerRef.current.geometry?.dispose();
+      goalMarkerRef.current.material?.dispose();
+      goalMarkerRef.current = null;
     }
 
     if (trajectoryPoses.length > 1) {
       const points = trajectoryPoses.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
       const curve = new THREE.CatmullRomCurve3(points);
+      const tubularSegments = Math.max(30, Math.min(200, trajectoryPoses.length));
+      const radialSegments = 8;
       const tubeGeo = new THREE.TubeGeometry(
         curve,
-        Math.max(20, trajectoryPoses.length),
+        tubularSegments,
         0.0035,
-        8,
+        radialSegments,
         false
       );
+
+      const {
+        offset_x = 0.20,
+        offset_y = 0.00,
+        offset_z = 0.00,
+        robot_type = 'so101'
+      } = robotConfig || {};
+      const is101 = (robot_type || 'so101').toLowerCase() === 'so101';
+      const maxNominalReach = is101 ? 0.35 : 0.34;
+      const maxHardReach = is101 ? 0.395 : 0.385;
+
+      const colors = [];
+      const cGreen = new THREE.Color(0x10b981); // Reachable
+      const cYellow = new THREE.Color(0xf59e0b); // Boundary / Adapted
+      const cRed = new THREE.Color(0xef4444); // Out of Reach / Table collision
+
+      for (let i = 0; i <= tubularSegments; i++) {
+        const u = i / tubularSegments;
+        const pt = curve.getPoint(u);
+        const dist = Math.hypot(pt.x - offset_x, pt.y - offset_y, pt.z - offset_z);
+        const isTableSafe = pt.z >= 0.012;
+
+        let col = cGreen;
+        if (!isTableSafe || dist > maxHardReach) {
+          col = cRed;
+        } else if (dist > maxNominalReach) {
+          col = cYellow;
+        }
+
+        for (let j = 0; j <= radialSegments; j++) {
+          colors.push(col.r, col.g, col.b);
+        }
+      }
+
+      tubeGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
       const tubeMat = new THREE.MeshStandardMaterial({
-        color: 0x6366f1,
-        emissive: 0x4f46e5,
-        emissiveIntensity: 0.35,
-        roughness: 0.3
+        vertexColors: true,
+        roughness: 0.3,
+        metalness: 0.2
       });
       const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat);
       tubeMeshRef.current = tubeMesh;
       scene.add(tubeMesh);
+
+      // 🟢 Start Waypoint Marker (Green Sphere)
+      const startGeo = new THREE.SphereGeometry(0.008, 20, 20);
+      const startMat = new THREE.MeshStandardMaterial({
+        color: 0x10b981,
+        emissive: 0x059669,
+        emissiveIntensity: 0.6,
+        roughness: 0.3
+      });
+      const startMesh = new THREE.Mesh(startGeo, startMat);
+      startMesh.position.copy(points[0]);
+      startMarkerRef.current = startMesh;
+      scene.add(startMesh);
+
+      // 🔴 Goal / End Waypoint Marker (Red Sphere)
+      const goalGeo = new THREE.SphereGeometry(0.008, 20, 20);
+      const goalMat = new THREE.MeshStandardMaterial({
+        color: 0xef4444,
+        emissive: 0xdc2626,
+        emissiveIntensity: 0.6,
+        roughness: 0.3
+      });
+      const goalMesh = new THREE.Mesh(goalGeo, goalMat);
+      goalMesh.position.copy(points[points.length - 1]);
+      goalMarkerRef.current = goalMesh;
+      scene.add(goalMesh);
     }
-  }, [trajectoryPoses]);
+  }, [trajectoryPoses, robotConfig]);
 
   useEffect(() => {
     const scene = sceneRef.current;
@@ -808,9 +886,32 @@ export default function Viewport3D({
         </button>
       </div>
 
-      <div className="absolute bottom-3 left-3 bg-slate-900/80 backdrop-blur-sm border border-slate-800/80 px-2.5 py-1 rounded-lg text-[10px] text-slate-400 font-mono pointer-events-none z-10 flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
-        <Compass className="w-3 h-3 text-indigo-400" />
-        <span>Scrub trajectory to articulate arm • Drag: Rotate • Ctrl+Scroll: Zoom</span>
+      {/* Bottom Left: Trajectory Color Legend & Interaction Guide */}
+      <div className="absolute bottom-3 left-3 flex flex-col gap-1.5 z-10 pointer-events-none">
+        <div className="bg-slate-950/90 backdrop-blur-md border border-slate-800/90 px-2.5 py-1.5 rounded-xl text-[10px] text-slate-300 shadow-xl flex items-center gap-2.5 flex-wrap">
+          <div className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" />
+            <span className="font-semibold text-emerald-300">Green:</span>
+            <span className="text-slate-400">Start / Reachable</span>
+          </div>
+          <span className="text-slate-700">|</span>
+          <div className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-amber-500 shadow-sm shadow-amber-500/50 animate-pulse" />
+            <span className="font-semibold text-amber-300">Yellow:</span>
+            <span className="text-slate-400">Current / Clamped</span>
+          </div>
+          <span className="text-slate-700">|</span>
+          <div className="flex items-center gap-1">
+            <span className="w-2 h-2 rounded-full bg-rose-500 shadow-sm shadow-rose-500/50" />
+            <span className="font-semibold text-rose-300">Red:</span>
+            <span className="text-slate-400">Goal / Out of Reach</span>
+          </div>
+        </div>
+
+        <div className="bg-slate-900/80 backdrop-blur-sm border border-slate-800/80 px-2.5 py-1 rounded-lg text-[9.5px] text-slate-400 font-mono flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
+          <Compass className="w-3 h-3 text-indigo-400" />
+          <span>Scrub timeline to articulate arm • Drag: Rotate • Scroll: Zoom</span>
+        </div>
       </div>
     </div>
   );
