@@ -96,9 +96,52 @@ def test_workspace_calibrator():
 
     print('[PASS] Workspace Calibrator verified!')
 
+def test_feasible_ik_and_auto_align():
+    print('\n=== Test 5: Feasible IK & Workspace Auto-Align ===')
+    solver = SO101Kinematics()
+    calib = WorkspaceCalibrator()
+
+    # Out-of-reach target: distance ~0.70m (well above 0.395m max reach)
+    out_reach_target = [0.60, 0.30, 0.20, 0.0, 0.0, 0.0]
+    res = solver.solve_feasible_ik(out_reach_target)
+    assert not res['is_feasible'], 'Target should be marked not feasible'
+    assert 'OUT_OF_REACH' in res['clamped_reasons']
+    assert res['error_distance_cm'] > 15.0
+    assert not any(np.isnan(res['joints'])), 'Joint angles must not contain NaN'
+    print(f"  Out-of-reach target clamped: dist error = {res['error_distance_cm']:.1f}cm (clamped: {res['clamped_reasons']}) [OK]")
+
+    # Table collision target: Z = -0.10m (below table surface)
+    table_target = [0.20, 0.05, -0.10, 0.0, 0.0, 0.0]
+    res_table = solver.solve_feasible_ik(table_target)
+    assert 'TABLE_COLLISION' in res_table['clamped_reasons']
+    assert not any(np.isnan(res_table['joints']))
+    print(f"  Table-penetrating target clamped: (clamped: {res_table['clamped_reasons']}) [OK]")
+
+    # Trajectory auto-align test
+    fake_trajectory = np.array([
+        [-0.05, -0.25, 0.15, 0, 0, 0],
+        [0.00, -0.22, 0.18, 0, 0, 0],
+        [0.10, -0.15, 0.20, 0, 0, 0],
+        [0.20, -0.10, 0.18, 0, 0, 0]
+    ])
+
+    # Align to start
+    start_calib = calib.auto_align_base_to_start(fake_trajectory[0], nominal_reach=0.22, default_yaw=90.0)
+    assert 'offset_x' in start_calib and 'offset_y' in start_calib
+    print(f"  Auto-align to start computed: base=({start_calib['offset_x']}, {start_calib['offset_y']}, yaw={start_calib['yaw_deg']}°) [OK]")
+
+    # Align to trajectory
+    traj_calib = calib.auto_align_to_trajectory(fake_trajectory, nominal_reach=0.24, default_yaw=90.0)
+    assert 'offset_x' in traj_calib and 'offset_y' in traj_calib
+    print(f"  Auto-align to trajectory computed: base=({traj_calib['offset_x']}, {traj_calib['offset_y']}, yaw={traj_calib['yaw_deg']}°) [OK]")
+
+    print('[PASS] Feasible IK and Auto-Align successfully verified!')
+
 if __name__ == '__main__':
     test_dh_tables_and_specs()
     test_so101_forward_inverse_consistency()
     test_so100_forward_inverse_consistency()
     test_workspace_calibrator()
+    test_feasible_ik_and_auto_align()
     print('\nALL ROBOT KINEMATICS & WORKSPACE CALIBRATION TESTS PASSED!')
+

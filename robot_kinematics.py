@@ -223,65 +223,166 @@ class DHKinematics:
 
         return T
 
-    def inverse_kinematics(self, target_pose, gripper_state=50.0, prev_joints=None, elbow_up=True):
+    def solve_feasible_ik(self, target_pose, gripper_state=50.0, prev_joints=None, allow_pitch_adaptation=True):
         """
-        Compute Inverse Kinematics for target_pose = [x, y, z, roll, pitch, yaw]
-        Returns joint array [q0, q1, q2, q3, q4, q5] in degrees (matching LeRobot convention).
+        Robust Inverse Kinematics solver designed to solve impossible or boundary kinematics
+        for serial 5-DOF arms (SO-100 / SO-101).
+        
+        Handles:
+          1. Target out-of-reach: Soft-damps wrist distance to maximum reachable boundary.
+          2. Inner singularity: Keeps wrist outside shoulder singularity cylinder.
+          3. Table collision: Enforces minimum physical clearance above table surface.
+          4. Joint mechanical limits: Explores alternative elbow configurations and performs
+             task-priority pitch adaptation (adjusting approach pitch to preserve exact (X, Y, Z)
+             Cartesian tip position).
+          5. Returns feasibility diagnostics, achieved forward kinematics pose, and error metrics.
         """
         x, y, z, roll, pitch, yaw = target_pose
+        clamped_reasons = []
 
-        # 1. Base yaw joint (q0)
+        # 1. Base yaw (q0) is determined by target direction in polar space
         q0 = np.arctan2(y, x)
+        r = float(np.hypot(x, y))
 
-        # Cylindrical radial reach
-        r = np.hypot(x, y)
+        # Table clearance constraint: cannot plunge below table surface
+        z_eff = max(0.012, float(z))
+        if z < 0.012:
+            clamped_reasons.append("TABLE_COLLISION")
 
-        # 2. Wrist position relative to shoulder (L1 height)
-        r_wrist = r - self.L4 * np.cos(pitch)
-        z_wrist = (z - self.L1) - self.L4 * np.sin(pitch)
+        # Maximum & minimum physical reach of arm links
+        max_reach_wrist = (self.L2 + self.L3) * 0.995
+        min_reach_wrist = max(0.020, abs(self.L2 - self.L3) + 0.010)
 
-        # Distance squared from shoulder to wrist (clamped to reachable limits)
-        max_reach_arm = (self.L2 + self.L3) * 0.999
-        d2 = r_wrist**2 + z_wrist**2
-        if d2 > max_reach_arm**2:
-            scale_reach = max_reach_arm / np.sqrt(d2)
-            r_wrist *= scale_reach
-            z_wrist *= scale_reach
-            d2 = max_reach_arm**2
+        best_q = None
+        best_err = 1e9
+        best_is_exact = False
 
-        # Law of Cosines for elbow angle q2
-        cos_q2 = (d2 - self.L2**2 - self.L3**2) / (2 * self.L2 * self.L3)
-        cos_q2 = np.clip(cos_q2, -1.0, 1.0)
-        
-        # Select elbow configuration (default elbow-up)
-        if elbow_up:
+        # Generate candidate approach pitch angles
+        # Nominal pitch first, followed by angular perturbations if limits are saturated
+        pitch_candidates = [pitch]
+        if allow_pitch_adaptation:
+            for delta_deg in range(5, 75, 5):
+                pitch_candidates.append(pitch - np.radians(delta_deg))
+                pitch_candidates.append(pitch + np.radians(delta_deg))
+
+        for p_cand in pitch_candidates:
+            p_clamped = np.clip(p_cand, -np.radians(85), np.radians(85))
+
+            r_w = r - self.L4 * np.cos(p_clamped)
+            z_w = (z_eff - self.L1) - self.L4 * np.sin(p_clamped)
+
+            d_w = np.hypot(r_w, z_w)
+            was_clamped = False
+
+            if d_w > max_reach_wrist:
+                scale_w = max_reach_wrist / max(1e-6, d_w)
+                r_w *= scale_w
+                z_w *= scale_w
+                d_w = max_reach_wrist
+                was_clamped = True
+                clamped_reasons.append("OUT_OF_REACH")
+
+            if d_w < min_reach_wrist:
+                scale_w = min_reach_wrist / max(1e-6, d_w)
+                r_w *= scale_w
+                z_w *= scale_w
+                d_w = min_reach_wrist
+                was_clamped = True
+
+            d2 = d_w**2
+            cos_q2 = (d2 - self.L2**2 - self.L3**2) / (2.0 * self.L2 * self.L3)
+            cos_q2 = np.clip(cos_q2, -1.0, 1.0)
+
+            configs_to_test = [True, False] if prev_joints is None else [True]
+
+            for elbow_up in configs_to_test:
+                q2 = -np.arccos(cos_q2) if elbow_up else np.arccos(cos_q2)
+                alpha = np.arctan2(z_w, r_w)
+                beta = np.arctan2(self.L3 * np.sin(q2), self.L2 + self.L3 * np.cos(q2))
+                q1 = alpha - beta
+                q3 = p_clamped - (q1 + q2)
+                q4 = roll
+
+                q_rad = [q0, q1, q2, q3, q4]
+                in_limits = True
+                for j in range(5):
+                    lo, hi = self.joint_limits[j]
+                    if q_rad[j] < lo - 1e-4 or q_rad[j] > hi + 1e-4:
+                        in_limits = False
+                        break
+
+                if in_limits:
+                    fk = self.forward_kinematics(q_rad)
+                    pos_err = float(np.linalg.norm(fk[:3] - np.array([x, y, z])))
+                    pitch_diff = abs(p_clamped - pitch)
+                    score = pos_err * 100.0 + pitch_diff * 0.1
+
+                    if score < best_err:
+                        best_err = score
+                        best_q = q_rad
+                        if pos_err < 0.005 and not was_clamped:
+                            best_is_exact = True
+                            break
+
+            if best_is_exact:
+                break
+
+        if best_q is None:
+            # Fallback: enforce limits by projection
+            r_w = r - self.L4 * np.cos(pitch)
+            z_w = (z_eff - self.L1) - self.L4 * np.sin(pitch)
+            d_w = np.hypot(r_w, z_w)
+            if d_w > max_reach_wrist:
+                clamped_reasons.append("OUT_OF_REACH")
+                r_w *= max_reach_wrist / d_w
+                z_w *= max_reach_wrist / d_w
+                d_w = max_reach_wrist
+
+            d2 = d_w**2
+            cos_q2 = np.clip((d2 - self.L2**2 - self.L3**2) / (2.0 * self.L2 * self.L3), -1.0, 1.0)
             q2 = -np.arccos(cos_q2)
-        else:
-            q2 = np.arccos(cos_q2)
+            alpha = np.arctan2(z_w, r_w)
+            beta = np.arctan2(self.L3 * np.sin(q2), self.L2 + self.L3 * np.cos(q2))
+            q1 = alpha - beta
+            q3 = pitch - (q1 + q2)
+            q4 = roll
+            best_q = [q0, q1, q2, q3, q4]
+            for j in range(5):
+                lo, hi = self.joint_limits[j]
+                if best_q[j] < lo or best_q[j] > hi:
+                    clamped_reasons.append(f"JOINT_LIMIT_Q{j}")
+                best_q[j] = float(np.clip(best_q[j], lo, hi))
 
-        # Shoulder pitch q1: alpha = angle to wrist, beta = angle between L2 and chord
-        alpha = np.arctan2(z_wrist, r_wrist)
-        beta = np.arctan2(self.L3 * np.sin(q2), self.L2 + self.L3 * np.cos(q2))
-        q1 = alpha - beta
-
-        # Wrist pitch q3
-        q3 = pitch - (q1 + q2)
-
-        # Wrist roll q4
-        q4 = roll
-
-        # Convert angles to degrees for LeRobot output
-        joints_rad = np.array([q0, q1, q2, q3, q4])
-
-        # Enforce joint limits
-        for i in range(5):
-            low, high = self.joint_limits[i]
-            joints_rad[i] = np.clip(joints_rad[i], low, high)
-
-        joints_deg = np.degrees(joints_rad)
+        # Convert to degrees
+        joints_deg = np.degrees(best_q)
         full_joints = np.append(joints_deg, float(gripper_state))
 
-        return full_joints
+        # Compute achieved forward kinematics pose
+        achieved_pose = self.forward_kinematics(best_q)
+        err_dist_cm = float(np.linalg.norm(achieved_pose[:3] - np.array([x, y, z])) * 100.0)
+        is_feasible = (err_dist_cm < 1.5) and (len(clamped_reasons) == 0)
+
+        return {
+            "joints": full_joints,
+            "achieved_pose": achieved_pose,
+            "is_feasible": is_feasible,
+            "error_distance_cm": round(err_dist_cm, 2),
+            "clamped_reasons": list(set(clamped_reasons))
+        }
+
+    def inverse_kinematics(self, target_pose, gripper_state=50.0, prev_joints=None, elbow_up=True, allow_pitch_adaptation=True):
+        """
+        Compute Inverse Kinematics for target_pose = [x, y, z, roll, pitch, yaw].
+        Uses the robust feasible IK solver to ensure zero NaNs, joint limit satisfaction,
+        and tabletop clearance. Returns joint array [q0, q1, q2, q3, q4, q5] in degrees.
+        """
+        res = self.solve_feasible_ik(
+            target_pose,
+            gripper_state=gripper_state,
+            prev_joints=prev_joints,
+            allow_pitch_adaptation=allow_pitch_adaptation
+        )
+        return res["joints"]
 
     def map_phone_to_workspace(self, phone_pose, workspace_center=[0.25, 0.0, 0.15], scale=0.8):
         """
@@ -896,6 +997,51 @@ class WorkspaceCalibrator:
         for i in range(len(traj)):
             res[i] = func(traj[i])
         return res
+
+    def auto_align_base_to_start(self, p0, nominal_reach=0.22, default_yaw=90.0):
+        """
+        Calculates and applies the optimal robot base position (offset_x, offset_y, offset_z, yaw_deg)
+        so that the robot's gripper starts directly at the trajectory's starting point p0
+        at a comfortable, nominal forward reach distance.
+        """
+        x0, y0, z0 = p0[:3]
+        yaw_rad = np.radians(default_yaw)
+
+        # Place base nominal_reach behind p0 along robot heading
+        base_x = x0 - nominal_reach * np.cos(yaw_rad)
+        base_y = y0 - nominal_reach * np.sin(yaw_rad)
+        base_z = 0.0
+
+        self.update_config(
+            offset_x=round(float(base_x), 3),
+            offset_y=round(float(base_y), 3),
+            offset_z=0.0,
+            yaw_deg=round(float(default_yaw), 1)
+        )
+        return self.get_config()
+
+    def auto_align_to_trajectory(self, trajectory, nominal_reach=0.24, default_yaw=90.0):
+        """
+        Calculates and applies the optimal robot base position centered around the entire trajectory,
+        maximizing overall episode reachability across the physical workspace.
+        """
+        traj = np.asarray(trajectory, dtype=np.float64)
+        if len(traj) == 0:
+            return self.get_config()
+
+        mean_p = np.mean(traj[:, :3], axis=0)
+        yaw_rad = np.radians(default_yaw)
+
+        base_x = mean_p[0] - nominal_reach * np.cos(yaw_rad)
+        base_y = mean_p[1] - nominal_reach * np.sin(yaw_rad)
+
+        self.update_config(
+            offset_x=round(float(base_x), 3),
+            offset_y=round(float(base_y), 3),
+            offset_z=0.0,
+            yaw_deg=round(float(default_yaw), 1)
+        )
+        return self.get_config()
 
 
 if __name__ == "__main__":
