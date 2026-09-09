@@ -607,6 +607,7 @@ async def print_dual_marker_page(
 
 @app.get("/api/episodes")
 async def get_episodes():
+    load_episodes_from_disk()
     return JSONResponse(EPISODES_DB)
 
 @app.delete("/api/episodes/{episode_index}")
