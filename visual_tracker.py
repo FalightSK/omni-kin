@@ -410,12 +410,13 @@ class ArucoFeatureMapTracker:
             )
             valid_mask = (status.flatten() == 1)
 
+            survived_pts_prev = self.tracked_pts[valid_mask]
             survived_pts = pts_curr[valid_mask]
             survived_ids = [self.tracked_ids[i] for i in range(len(self.tracked_ids)) if valid_mask[i]]
 
             # Kinematic independent motion filter: prune dynamic points moving independently
-            if len(survived_pts) >= 8 and self.prev_gray_pts is not None and len(self.prev_gray_pts) == len(status):
-                p_prev_v = self.prev_gray_pts[valid_mask].astype(np.float32)
+            if len(survived_pts) >= 8:
+                p_prev_v = survived_pts_prev.astype(np.float32)
                 p_curr_v = survived_pts.astype(np.float32)
                 F_mat, mask_f = cv2.findFundamentalMat(p_prev_v, p_curr_v, cv2.FM_RANSAC, ransacReprojThreshold=1.5, confidence=0.999)
                 if mask_f is not None and np.sum(mask_f) >= 8:
@@ -514,16 +515,18 @@ class ArucoFeatureMapTracker:
             temp_indices = np.where(valid_mask)[0]
             valid_mask[temp_indices[~fb_mask]] = False
 
+        survived_pts_prev = self.tracked_pts[valid_mask]
         survived_pts = pts_curr[valid_mask]
         survived_ids = [self.tracked_ids[i] for i in range(len(self.tracked_ids)) if valid_mask[i]]
 
         # Kinematic independent motion filter: prune dynamic points moving independently (moving object / gripper)
-        if len(survived_pts) >= 8 and self.prev_gray_pts is not None and len(self.prev_gray_pts) == len(status):
-            p_prev_v = self.prev_gray_pts[valid_mask].astype(np.float32)
+        if len(survived_pts) >= 8:
+            p_prev_v = survived_pts_prev.astype(np.float32)
             p_curr_v = survived_pts.astype(np.float32)
             F_mat, mask_f = cv2.findFundamentalMat(p_prev_v, p_curr_v, cv2.FM_RANSAC, ransacReprojThreshold=1.5, confidence=0.999)
             if mask_f is not None and np.sum(mask_f) >= 8:
                 static_inliers = (mask_f.flatten() == 1)
+                survived_pts_prev = survived_pts_prev[static_inliers]
                 survived_pts = survived_pts[static_inliers]
                 survived_ids = [survived_ids[k] for k in range(len(survived_ids)) if static_inliers[k]]
 
@@ -598,41 +601,41 @@ class ArucoFeatureMapTracker:
                     source = "feature_pnp"
 
         # Strategy 2: Essential Matrix 2D-2D Visual Odometry Fallback
-        if not pnp_success and len(survived_pts) >= 6 and self.prev_gray_pts is not None:
-            prev_matched = self.prev_gray_pts[valid_mask] if len(self.prev_gray_pts) == len(status) else None
-            if prev_matched is not None and len(prev_matched) == len(survived_pts):
-                E, mask_e = cv2.findEssentialMat(
+        if not pnp_success and len(survived_pts) >= 6 and len(survived_pts_prev) == len(survived_pts):
+            prev_matched = survived_pts_prev
+            E, mask_e = cv2.findEssentialMat(
+                prev_matched.astype(np.float32),
+                survived_pts.astype(np.float32),
+                self.camera_matrix,
+                method=cv2.RANSAC,
+                prob=0.999,
+                threshold=1.2
+            )
+            if E is not None and E.shape == (3, 3):
+                _, R_rel, t_rel, _ = cv2.recoverPose(
+                    E,
                     prev_matched.astype(np.float32),
                     survived_pts.astype(np.float32),
                     self.camera_matrix,
-                    method=cv2.RANSAC,
-                    prob=0.999,
-                    threshold=1.2
+                    mask=mask_e
                 )
-                if E is not None and E.shape == (3, 3):
-                    _, R_rel, t_rel, _ = cv2.recoverPose(
-                        E,
-                        prev_matched.astype(np.float32),
-                        survived_pts.astype(np.float32),
-                        self.camera_matrix,
-                        mask=mask_e
-                    )
-                    scale = 0.005
-                    if predicted_delta_p is not None:
-                        norm = np.linalg.norm(predicted_delta_p)
-                        if norm > 0.0005:
-                            scale = float(norm)
-                    elif np.linalg.norm(self.last_step_delta) > 0.001:
-                        scale = float(np.linalg.norm(self.last_step_delta))
+                scale = 0.005
+                if predicted_delta_p is not None:
+                    norm = np.linalg.norm(predicted_delta_p)
+                    if norm > 0.0005:
+                        scale = float(norm)
+                elif np.linalg.norm(self.last_step_delta) > 0.001:
+                    scale = float(np.linalg.norm(self.last_step_delta))
 
-                    scale = float(np.clip(scale, 0.001, 0.03))
-                    t_rel_metric = t_rel.flatten() * scale
-                    R_c_to_w = self.last_R_c_to_w @ R_rel.T
-                    p_world = self.last_p_world + self.last_R_c_to_w @ t_rel_metric
-                    p_world[2] = max(0.08, float(p_world[2]))
+                scale = float(np.clip(scale, 0.003, 0.03))
+                t_rel_metric = t_rel.flatten() * scale
+                R_c_to_w = self.last_R_c_to_w @ R_rel.T
+                delta_p_world = -self.last_R_c_to_w @ (R_rel.T @ t_rel_metric)
+                p_world = self.last_p_world + delta_p_world
+                p_world[2] = max(0.08, float(p_world[2]))
 
-                    pnp_success = True
-                    source = "feature_vo"
+                pnp_success = True
+                source = "feature_vo"
 
         # Fallback to smooth visual velocity continuation if VO also failed
         if not pnp_success:
@@ -1046,9 +1049,32 @@ class VisualInertialTracker:
             p1, e1 = det_dict[f1]
             dt = (f1 - f0) / max(5.0, float(fps))
 
-            # Calculate boundary velocities from confirmed trajectory keyframes
-            v0 = (bridged[f0, :3] - bridged[max(0, f0 - 2), :3]) / (max(1, f0 - max(0, f0 - 2)) / fps) if f0 > 0 else (p1 - p0) / dt
-            v1 = (bridged[min(n_frames - 1, f1 + 2), :3] - bridged[f1, :3]) / (max(1, min(n_frames - 1, f1 + 2) - f1) / fps) if f1 < n_frames - 1 else (p1 - p0) / dt
+            # Collect any VO detections in this occlusion gap
+            gap_vo = {}
+            for d in video_detections:
+                if f0 < d[0] < f1 and d[4] in ("feature_pnp", "feature_vo") and d[1] is not None:
+                    gap_vo[d[0]] = np.array(d[1], dtype=np.float64)
+
+            has_complete_vo = (len(gap_vo) == gap)
+
+            # Calculate boundary velocities safely from confirmed keyframes or leaving VO
+            if f0 >= 2 and np.linalg.norm(bridged[f0 - 2, :3]) > 0.01:
+                dt0 = (f0 - (f0 - 2)) / fps
+                v0 = (bridged[f0, :3] - bridged[f0 - 2, :3]) / dt0
+            elif (f0 + 1) in gap_vo:
+                dt0 = 1.0 / fps
+                v0 = (gap_vo[f0 + 1] - p0) / dt0
+            else:
+                v0 = (p1 - p0) / dt
+
+            if f1 < n_frames - 2 and np.linalg.norm(bridged[f1 + 2, :3]) > 0.01:
+                dt1 = ((f1 + 2) - f1) / fps
+                v1 = (bridged[f1 + 2, :3] - bridged[f1, :3]) / dt1
+            elif (f1 - 1) in gap_vo:
+                dt1 = 1.0 / fps
+                v1 = (p1 - gap_vo[f1 - 1]) / dt1
+            else:
+                v1 = (p1 - p0) / dt
 
             # Velocity clamping to physical human/gripper motion limits (0.8 m/s)
             v0 = v0 * min(1.0, 0.8 / (np.linalg.norm(v0) + 1e-6))
@@ -1058,45 +1084,118 @@ class VisualInertialTracker:
             e_unwrapped = np.unwrap(np.vstack([e0, e1]), axis=0)
             e0_u, e1_u = e_unwrapped[0], e_unwrapped[1]
 
-            # Collect any VO detections in this occlusion gap
-            gap_vo = {}
-            for d in video_detections:
-                if f0 < d[0] < f1 and d[4] in ("feature_pnp", "feature_vo") and d[1] is not None:
-                    gap_vo[d[0]] = np.array(d[1], dtype=np.float64)
+            # Generic Turnaround / Reach Apex Detection for Pick-and-Place Manipulation
+            is_turnaround = False
+            f_apex = None
+            p_apex = None
 
-            has_complete_vo = (len(gap_vo) == gap)
-            vo_drift = None
-            p_vo_start = None
-            if has_complete_vo:
+            if has_complete_vo and gap >= 30:
                 p_vo_start = gap_vo[f0 + 1]
+                n_reach = min(25, max(5, gap // 3))
+                if (f0 + n_reach) in gap_vo:
+                    v_reach = gap_vo[f0 + n_reach] - p_vo_start
+                    v_reach_norm = np.linalg.norm(v_reach)
+                    if v_reach_norm > 0.015:
+                        v_reach_dir = v_reach / v_reach_norm
+                        max_search_f = f0 + int(0.75 * gap)
+                        cand_frames = [f for f in gap_vo if f0 < f <= max_search_f]
+                        if cand_frames:
+                            f_max = max(cand_frames, key=lambda f: np.dot(gap_vo[f] - p_vo_start, v_reach_dir))
+                            max_proj = np.dot(gap_vo[f_max] - p_vo_start, v_reach_dir)
+                            goal_proj = np.dot(p1 - p0, v_reach_dir)
+
+                            if max_proj >= 0.04 and (max_proj - goal_proj) >= 0.05:
+                                is_turnaround = True
+                                f_apex = f_max
+                                reach_disp = gap_vo[f_apex] - p_vo_start
+                                p_apex = p0 + reach_disp
+                                p_apex[2] = max(0.08, float(p_apex[2]))
+
+            if is_turnaround:
+                # Segment 1: Reach phase (f0 -> f_apex)
+                dt1 = (f_apex - f0) / max(5.0, float(fps))
+                v_apex = np.zeros(3)
+                s_apex = (f_apex - f0) / gap
+                e_apex = (1 - s_apex) * e0_u + s_apex * e1_u
+                p_vo_start = gap_vo[f0 + 1]
+
+                for step, f_curr in enumerate(range(f0 + 1, f_apex)):
+                    s = (step + 1) / (f_apex - f0)
+                    h00 = 2*s**3 - 3*s**2 + 1
+                    h10 = s**3 - 2*s**2 + s
+                    h01 = -2*s**3 + 3*s**2
+                    h11 = s**3 - s**2
+                    p_spline = h00 * p0 + h10 * dt1 * v0 + h01 * p_apex + h11 * dt1 * v_apex
+                    p_vo = gap_vo[f_curr]
+                    p_vo_rel = p0 + (p_vo - p_vo_start)
+                    p_final = 0.8 * p_vo_rel + 0.2 * p_spline
+                    p_final[2] = max(0.08, float(p_final[2]))
+
+                    e_final = (1 - s) * e0_u + s * e_apex
+                    e_final = (e_final + np.pi) % (2 * np.pi) - np.pi
+                    bridged[f_curr, :3] = p_final
+                    bridged[f_curr, 3:] = e_final
+
+                bridged[f_apex, :3] = p_apex
+                bridged[f_apex, 3:] = (e_apex + np.pi) % (2 * np.pi) - np.pi
+
+                # Segment 2: Transfer phase (f_apex -> f1)
+                dt2 = (f1 - f_apex) / max(5.0, float(fps))
+                p_vo_apex = gap_vo[f_apex]
                 p_vo_end = gap_vo[f1 - 1]
-                vo_drift = (p1 - p0) - (p_vo_end - p_vo_start)
+                vo_drift2 = (p1 - p_apex) - (p_vo_end - p_vo_apex)
 
-            for step, f_curr in enumerate(range(f0 + 1, f1)):
-                s = (step + 1) / (gap + 1)
-                h00 = 2*s**3 - 3*s**2 + 1
-                h10 = s**3 - 2*s**2 + s
-                h01 = -2*s**3 + 3*s**2
-                h11 = s**3 - s**2
-                p_spline = h00 * p0 + h10 * dt * v0 + h01 * p1 + h11 * dt * v1
-
-                if has_complete_vo and f_curr in gap_vo:
+                for step, f_curr in enumerate(range(f_apex + 1, f1)):
+                    s = (step + 1) / (f1 - f_apex)
+                    h00 = 2*s**3 - 3*s**2 + 1
+                    h10 = s**3 - 2*s**2 + s
+                    h01 = -2*s**3 + 3*s**2
+                    h11 = s**3 - s**2
+                    p_spline = h00 * p_apex + h10 * dt2 * v_apex + h01 * p1 + h11 * dt2 * v1
                     p_vo = gap_vo[f_curr]
-                    vo_rel = p_vo - p_vo_start
-                    p_vo_blended = p0 + vo_rel + s * vo_drift
-                    p_final = 0.5 * p_spline + 0.5 * p_vo_blended
-                elif f_curr in gap_vo:
-                    p_vo = gap_vo[f_curr]
-                    p_final = 0.7 * p_spline + 0.3 * p_vo
-                else:
-                    p_final = p_spline
+                    p_vo_blended = p_apex + (p_vo - p_vo_apex) + s * vo_drift2
+                    p_final = 0.6 * p_spline + 0.4 * p_vo_blended
+                    p_final[2] = max(0.08, float(p_final[2]))
 
-                p_final[2] = max(0.08, float(p_final[2]))
-                e_final = (1 - s) * e0_u + s * e1_u
-                e_final = (e_final + np.pi) % (2 * np.pi) - np.pi
+                    e_final = (1 - s) * e_apex + s * e1_u
+                    e_final = (e_final + np.pi) % (2 * np.pi) - np.pi
+                    bridged[f_curr, :3] = p_final
+                    bridged[f_curr, 3:] = e_final
 
-                bridged[f_curr, :3] = p_final
-                bridged[f_curr, 3:] = e_final
+            else:
+                # Monotonic single chord bridging
+                vo_drift = None
+                p_vo_start = None
+                if has_complete_vo:
+                    p_vo_start = gap_vo[f0 + 1]
+                    p_vo_end = gap_vo[f1 - 1]
+                    vo_drift = (p1 - p0) - (p_vo_end - p_vo_start)
+
+                for step, f_curr in enumerate(range(f0 + 1, f1)):
+                    s = (step + 1) / (gap + 1)
+                    h00 = 2*s**3 - 3*s**2 + 1
+                    h10 = s**3 - 2*s**2 + s
+                    h01 = -2*s**3 + 3*s**2
+                    h11 = s**3 - s**2
+                    p_spline = h00 * p0 + h10 * dt * v0 + h01 * p1 + h11 * dt * v1
+
+                    if has_complete_vo and f_curr in gap_vo:
+                        p_vo = gap_vo[f_curr]
+                        vo_rel = p_vo - p_vo_start
+                        p_vo_blended = p0 + vo_rel + s * vo_drift
+                        p_final = 0.85 * p_vo_blended + 0.15 * p_spline
+                    elif f_curr in gap_vo:
+                        p_vo = gap_vo[f_curr]
+                        p_final = 0.7 * p_spline + 0.3 * p_vo
+                    else:
+                        p_final = p_spline
+
+                    p_final[2] = max(0.08, float(p_final[2]))
+                    e_final = (1 - s) * e0_u + s * e1_u
+                    e_final = (e_final + np.pi) % (2 * np.pi) - np.pi
+
+                    bridged[f_curr, :3] = p_final
+                    bridged[f_curr, 3:] = e_final
 
         # Ensure leading/trailing frames outside ArUco range are held or clamped
         f_first = det_indices[0]
@@ -1834,40 +1933,6 @@ class VisualInertialTracker:
                 final_poses[f_k, :3] = p_k
                 final_poses[f_k, 3:] = e_k
 
-            # Apply C1 Cubic Hermite Interpolation across any occlusion gap between ArUco keyframes
-            for i in range(len(cleaned_keyframes) - 1):
-                f0, p0, e0 = cleaned_keyframes[i]
-                f1, p1, e1 = cleaned_keyframes[i + 1]
-                gap = f1 - f0 - 1
-                if 0 < gap <= 60:  # Bridge gaps up to 2.0 seconds
-                    T = (f1 - f0) / fps
-                    v0 = (p1 - p0) / max(T, 0.001)
-                    v1 = v0.copy()
-                    if i > 0:
-                        f_prev, p_prev, _ = cleaned_keyframes[i - 1]
-                        dt_prev = (f0 - f_prev) / fps
-                        if dt_prev > 0:
-                            v0 = 0.5 * ((p0 - p_prev) / dt_prev + (p1 - p0) / T)
-                    if i + 2 < len(cleaned_keyframes):
-                        f_next, p_next, _ = cleaned_keyframes[i + 2]
-                        dt_next = (f_next - f1) / fps
-                        if dt_next > 0:
-                            v1 = 0.5 * ((p1 - p0) / T + (p_next - p1) / dt_next)
-
-                    for step, f_gap in enumerate(range(f0 + 1, f1)):
-                        t = (step + 1) / (f1 - f0)
-                        h00 = 2 * (t**3) - 3 * (t**2) + 1
-                        h10 = (t**3) - 2 * (t**2) + t
-                        h01 = -2 * (t**3) + 3 * (t**2)
-                        h11 = (t**3) - (t**2)
-
-                        p_interp = h00 * p0 + h10 * T * v0 + h01 * p1 + h11 * T * v1
-                        p_interp[2] = max(0.01, float(p_interp[2]))
-                        final_poses[f_gap, :3] = p_interp
-
-                        diff_rot = (e1 - e0 + np.pi) % (2.0 * np.pi) - np.pi
-                        w = t * t * (3.0 - 2.0 * t)
-                        final_poses[f_gap, 3:] = e0 + w * diff_rot
 
             # Pad start and end frames cleanly if first/last ArUco keyframe does not span full video
             first_f, first_p, first_e = cleaned_keyframes[0]
