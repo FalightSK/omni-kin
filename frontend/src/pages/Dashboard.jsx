@@ -46,6 +46,7 @@ export default function Dashboard({
   onReprocessActive,
   onUpdateEpisodePoses,
   robotConfig,
+  onUpdateRobotConfig,
   onOpenRobotModal
 }) {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -426,6 +427,8 @@ export default function Dashboard({
                 trajectoryPoses={poses}
                 currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}
+                onUpdateRobotConfig={onUpdateRobotConfig}
+                episodeId={activeEp?.episode_id}
               />
             </div>
 
@@ -520,6 +523,8 @@ export default function Dashboard({
                 trajectoryPoses={poses}
                 currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}
+                onUpdateRobotConfig={onUpdateRobotConfig}
+                episodeId={activeEp?.episode_id}
               />
             </div>
 

@@ -30,6 +30,7 @@ from lerobot_exporter import LeRobotExporter
 from robot_kinematics import (
     WorkspaceCalibrator,
     get_robot_specs,
+    get_robot_solver,
     get_robot_urdf,
     URDFParser,
     ROBOT_PRESETS
@@ -1232,6 +1233,126 @@ async def update_robot_config(request: Request):
             "status": "error",
             "message": f"Failed to update robot configuration: {str(err)}"
         }, status_code=400)
+
+@app.post("/api/robot/auto_align")
+async def auto_align_robot_endpoint(request: Request):
+    """
+    Automatically aligns the robot base position (offset_x, offset_y, yaw) relative to an episode's trajectory.
+    Modes:
+      - 'start': Places robot so the gripper begins directly at the first trajectory waypoint.
+      - 'optimal': Positions robot centered relative to the whole trajectory to maximize reachability.
+    """
+    global ROBOT_CONFIG
+    try:
+        payload = await request.json()
+        mode = str(payload.get("mode", "start")).lower()
+        ep_id = payload.get("episode_id")
+
+        target_ep = None
+        if ep_id:
+            target_ep = next((ep for ep in EPISODES_DB if ep.get("episode_id") == ep_id), None)
+        if not target_ep and EPISODES_DB:
+            target_ep = EPISODES_DB[-1]
+
+        if not target_ep:
+            return JSONResponse({"status": "error", "message": "No episodes available to align to."}, status_code=400)
+
+        poses = target_ep.get("poses") or target_ep.get("ee_poses")
+        if not poses or len(poses) == 0:
+            return JSONResponse({"status": "error", "message": "Selected episode has no poses."}, status_code=400)
+
+        poses_arr = np.asarray(poses, dtype=np.float64)
+        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so101"))
+
+        if mode == "optimal":
+            new_calib = workspace_calibrator.auto_align_to_trajectory(poses_arr, nominal_reach=0.24, default_yaw=90.0)
+        else: # 'start'
+            new_calib = workspace_calibrator.auto_align_base_to_start(poses_arr[0], nominal_reach=0.22, default_yaw=90.0)
+
+        ROBOT_CONFIG.update(new_calib)
+        save_robot_config(ROBOT_CONFIG)
+
+        lerobot_exporter.set_robot_config(
+            robot_type=ROBOT_CONFIG["robot_type"],
+            offset_x=ROBOT_CONFIG["offset_x"],
+            offset_y=ROBOT_CONFIG["offset_y"],
+            offset_z=ROBOT_CONFIG["offset_z"],
+            yaw_deg=ROBOT_CONFIG["yaw_deg"]
+        )
+
+        # Compute feasibility metrics across episode with this new base alignment
+        robot_poses = workspace_calibrator.transform_trajectory(poses_arr, to_robot=True)
+        feasible_count = 0
+        errors = []
+        for p in robot_poses:
+            res = r_solver.solve_feasible_ik(p)
+            if res["is_feasible"]:
+                feasible_count += 1
+            errors.append(res["error_distance_cm"])
+
+        feasibility_pct = round(feasible_count / len(robot_poses) * 100.0, 1)
+        avg_err_cm = round(float(np.mean(errors)), 2)
+
+        print(f"[{time.strftime('%H:%M:%S')}] 🎯 Auto-Aligned Robot Base ({mode}): Offset=({ROBOT_CONFIG['offset_x']:.3f}m, {ROBOT_CONFIG['offset_y']:.3f}m, Yaw={ROBOT_CONFIG['yaw_deg']}°) -> {feasibility_pct}% feasible, avg error={avg_err_cm}cm")
+
+        return JSONResponse({
+            "status": "success",
+            "message": f"Robot auto-aligned ({mode}) successfully",
+            "config": ROBOT_CONFIG,
+            "feasibility_percent": feasibility_pct,
+            "avg_error_cm": avg_err_cm
+        })
+    except Exception as err:
+        return JSONResponse({
+            "status": "error",
+            "message": f"Auto-align failed: {str(err)}"
+        }, status_code=400)
+
+@app.post("/api/robot/solve_ik")
+async def solve_ik_endpoint(request: Request):
+    """
+    Solves robust Inverse Kinematics for a 6-DoF target pose or batch trajectory.
+    Handles out-of-reach clamping, joint limits, and tabletop collision.
+    """
+    try:
+        payload = await request.json()
+        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so101"))
+        in_robot_frame = payload.get("in_robot_frame", False)
+
+        if "pose" in payload:
+            pose = np.asarray(payload["pose"], dtype=np.float64)
+            if not in_robot_frame:
+                pose = workspace_calibrator.aruco_to_robot(pose)
+            res = r_solver.solve_feasible_ik(pose)
+            achieved_aruco = workspace_calibrator.robot_to_aruco(res["achieved_pose"])
+            return JSONResponse({
+                "status": "success",
+                "joints": [round(float(q), 2) for q in res["joints"]],
+                "achieved_pose": [round(float(v), 4) for v in res["achieved_pose"]],
+                "achieved_aruco": [round(float(v), 4) for v in achieved_aruco],
+                "is_feasible": res["is_feasible"],
+                "error_distance_cm": res["error_distance_cm"],
+                "clamped_reasons": res["clamped_reasons"]
+            })
+        elif "trajectory" in payload:
+            traj = np.asarray(payload["trajectory"], dtype=np.float64)
+            if not in_robot_frame:
+                traj = workspace_calibrator.transform_trajectory(traj, to_robot=True)
+            results = [r_solver.solve_feasible_ik(p) for p in traj]
+            return JSONResponse({
+                "status": "success",
+                "results": [
+                    {
+                        "joints": [round(float(q), 2) for q in r["joints"]],
+                        "is_feasible": r["is_feasible"],
+                        "error_distance_cm": r["error_distance_cm"],
+                        "clamped_reasons": r["clamped_reasons"]
+                    } for r in results
+                ]
+            })
+        return JSONResponse({"status": "error", "message": "No pose or trajectory provided."}, status_code=400)
+    except Exception as err:
+        return JSONResponse({"status": "error", "message": f"IK solving failed: {str(err)}"}, status_code=400)
 
 @app.get("/api/robot/urdf")
 async def get_robot_urdf_endpoint(robot_type: str = None):

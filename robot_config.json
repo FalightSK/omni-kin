@@ -1,7 +1,7 @@
 {
   "robot_type": "so101",
-  "offset_x": 0.2,
-  "offset_y": -0.3,
+  "offset_x": 0.038,
+  "offset_y": -0.406,
   "offset_z": 0.0,
   "yaw_deg": 90.0
 }

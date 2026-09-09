@@ -182,6 +182,7 @@ export default function App() {
               onClearAllEpisodes={handleClearAllEpisodes}
               onUpdateEpisodePoses={handleReprocessComplete}
               robotConfig={robotConfig}
+              onUpdateRobotConfig={(newCfg) => setRobotConfig(newCfg)}
               onOpenRobotModal={() => setIsRobotModalOpen(true)}
             />
           </main>
