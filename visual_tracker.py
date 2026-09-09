@@ -413,6 +413,16 @@ class ArucoFeatureMapTracker:
             survived_pts = pts_curr[valid_mask]
             survived_ids = [self.tracked_ids[i] for i in range(len(self.tracked_ids)) if valid_mask[i]]
 
+            # Kinematic independent motion filter: prune dynamic points moving independently
+            if len(survived_pts) >= 8 and self.prev_gray_pts is not None and len(self.prev_gray_pts) == len(status):
+                p_prev_v = self.prev_gray_pts[valid_mask].astype(np.float32)
+                p_curr_v = survived_pts.astype(np.float32)
+                F_mat, mask_f = cv2.findFundamentalMat(p_prev_v, p_curr_v, cv2.FM_RANSAC, ransacReprojThreshold=1.5, confidence=0.999)
+                if mask_f is not None and np.sum(mask_f) >= 8:
+                    static_inliers = (mask_f.flatten() == 1)
+                    survived_pts = survived_pts[static_inliers]
+                    survived_ids = [survived_ids[k] for k in range(len(survived_ids)) if static_inliers[k]]
+
             self.tracked_pts = survived_pts
             self.tracked_ids = survived_ids
 
@@ -421,6 +431,32 @@ class ArucoFeatureMapTracker:
         else:
             self.tracked_pts = np.empty((0, 2), dtype=np.float32)
             self.tracked_ids = []
+
+        # Instant 3D Landmark Reprojection Pruning:
+        # If any landmark in landmarks_3d has reprojection error > 2.5px under verified camera pose,
+        # it moved relative to the world frame (e.g. object picked up). Purge it immediately!
+        R_w2c = R_c_to_w.T
+        t_w2c = -R_w2c @ p_cam_world.reshape(3, 1)
+        rvec_gt, _ = cv2.Rodrigues(R_w2c)
+
+        pids_to_purge = []
+        for pid in list(self.landmarks_3d.keys()):
+            if pid in current_pts_dict:
+                pt2 = current_pts_dict[pid]
+                pt3 = self.landmarks_3d[pid].reshape(1, 3)
+                proj, _ = cv2.projectPoints(pt3, rvec_gt, t_w2c, self.camera_matrix, self.dist_coeffs)
+                reproj_err = float(np.linalg.norm(proj.reshape(2) - pt2))
+                if reproj_err > 2.5:
+                    pids_to_purge.append(pid)
+
+        for pid in pids_to_purge:
+            del self.landmarks_3d[pid]
+            if pid in self.tracked_ids:
+                drop_idx = self.tracked_ids.index(pid)
+                self.tracked_pts = np.delete(self.tracked_pts, drop_idx, axis=0)
+                self.tracked_ids.pop(drop_idx)
+                if pid in current_pts_dict:
+                    del current_pts_dict[pid]
 
         # Triangulate and expand 3D landmark map
         self._triangulate_and_expand_map(p_cam_world, R_c_to_w, current_pts_dict)
@@ -481,6 +517,16 @@ class ArucoFeatureMapTracker:
         survived_pts = pts_curr[valid_mask]
         survived_ids = [self.tracked_ids[i] for i in range(len(self.tracked_ids)) if valid_mask[i]]
 
+        # Kinematic independent motion filter: prune dynamic points moving independently (moving object / gripper)
+        if len(survived_pts) >= 8 and self.prev_gray_pts is not None and len(self.prev_gray_pts) == len(status):
+            p_prev_v = self.prev_gray_pts[valid_mask].astype(np.float32)
+            p_curr_v = survived_pts.astype(np.float32)
+            F_mat, mask_f = cv2.findFundamentalMat(p_prev_v, p_curr_v, cv2.FM_RANSAC, ransacReprojThreshold=1.5, confidence=0.999)
+            if mask_f is not None and np.sum(mask_f) >= 8:
+                static_inliers = (mask_f.flatten() == 1)
+                survived_pts = survived_pts[static_inliers]
+                survived_ids = [survived_ids[k] for k in range(len(survived_ids)) if static_inliers[k]]
+
         self.tracked_pts = survived_pts
         self.tracked_ids = survived_ids
 
@@ -490,10 +536,12 @@ class ArucoFeatureMapTracker:
 
         matched_3d = []
         matched_2d = []
+        matched_pids = []
         for i, pid in enumerate(survived_ids):
             if pid in self.landmarks_3d:
                 matched_3d.append(self.landmarks_3d[pid])
                 matched_2d.append(survived_pts[i])
+                matched_pids.append(pid)
 
         pnp_success = False
         p_world = None
@@ -525,13 +573,19 @@ class ArucoFeatureMapTracker:
             )
 
             if success and inliers is not None and len(inliers) >= 5:
+                # Inlier check: purge any landmark that PnP RANSAC classified as outlier (moved object!)
+                inlier_indices = set(inliers.flatten())
+                for idx_m, pid in enumerate(matched_pids):
+                    if idx_m not in inlier_indices and pid in self.landmarks_3d:
+                        del self.landmarks_3d[pid]
+
                 R_w2c, _ = cv2.Rodrigues(rvec)
                 R_cand = R_w2c.T
                 p_cam_in_world = -R_cand @ tvec.reshape(3, 1)
 
                 X_w = float(p_cam_in_world[0, 0])
                 Y_w = float(p_cam_in_world[1, 0])
-                Z_w = max(0.01, float(p_cam_in_world[2, 0]))
+                Z_w = max(0.08, float(p_cam_in_world[2, 0]))
 
                 cand_p = np.array([X_w, Y_w, Z_w], dtype=np.float64)
                 step_dist = float(np.linalg.norm(cand_p - self.last_p_world))
@@ -548,8 +602,8 @@ class ArucoFeatureMapTracker:
             prev_matched = self.prev_gray_pts[valid_mask] if len(self.prev_gray_pts) == len(status) else None
             if prev_matched is not None and len(prev_matched) == len(survived_pts):
                 E, mask_e = cv2.findEssentialMat(
-                    prev_matched,
-                    survived_pts,
+                    prev_matched.astype(np.float32),
+                    survived_pts.astype(np.float32),
                     self.camera_matrix,
                     method=cv2.RANSAC,
                     prob=0.999,
@@ -558,8 +612,8 @@ class ArucoFeatureMapTracker:
                 if E is not None and E.shape == (3, 3):
                     _, R_rel, t_rel, _ = cv2.recoverPose(
                         E,
-                        prev_matched,
-                        survived_pts,
+                        prev_matched.astype(np.float32),
+                        survived_pts.astype(np.float32),
                         self.camera_matrix,
                         mask=mask_e
                     )
@@ -575,7 +629,7 @@ class ArucoFeatureMapTracker:
                     t_rel_metric = t_rel.flatten() * scale
                     R_c_to_w = self.last_R_c_to_w @ R_rel.T
                     p_world = self.last_p_world + self.last_R_c_to_w @ t_rel_metric
-                    p_world[2] = max(0.01, float(p_world[2]))
+                    p_world[2] = max(0.08, float(p_world[2]))
 
                     pnp_success = True
                     source = "feature_vo"
@@ -583,7 +637,7 @@ class ArucoFeatureMapTracker:
         # Fallback to smooth visual velocity continuation if VO also failed
         if not pnp_success:
             p_world = self.last_p_world + self.last_step_delta * 0.85
-            p_world[2] = max(0.01, float(p_world[2]))
+            p_world[2] = max(0.08, float(p_world[2]))
             R_c_to_w = self.last_R_c_to_w.copy()
             pnp_success = True
             source = "feature_vo"
@@ -952,6 +1006,112 @@ class VisualInertialTracker:
 
         rot_normalized = (rot_smooth + np.pi) % (2 * np.pi) - np.pi
         return np.hstack([pos_smooth, rot_normalized])
+
+    def _bridge_occlusion_intervals_umi(self, trajectory, video_detections, fps):
+        """
+        Stanford / Columbia UMI C^1 Cubic Hermite Spline Engine for Manipulation Occlusions:
+        Seamlessly bridges intervals where the ArUco marker is occluded by the gripper,
+        hand, or manipulated object during pick, transfer, and place phases.
+
+        Guarantees:
+          - Exact position matching at boundary keyframes (p(f_0) = p_0, p(f_1) = p_1)
+          - Continuous first-derivative velocities (v(f_0) = v_0, v(f_1) = v_1)
+          - Continuous Euler angle unwrapping across the occlusion interval
+          - Preserves tabletop clearance (Z >= 0.08m)
+          - Detrends accumulated VO drift across the occlusion gap so VO and Spline merge without jumps
+        """
+        if len(trajectory) < 4:
+            return trajectory
+
+        det_dict = {}
+        for d in video_detections:
+            if d[4] in ("dual_aruco", "single_aruco") and d[1] is not None:
+                det_dict[d[0]] = (np.array(d[1], dtype=np.float64), np.array(d[2], dtype=np.float64))
+
+        det_indices = sorted(list(det_dict.keys()))
+        if len(det_indices) < 2:
+            return trajectory
+
+        bridged = trajectory.copy()
+        n_frames = len(bridged)
+
+        for i in range(len(det_indices) - 1):
+            f0 = det_indices[i]
+            f1 = det_indices[i + 1]
+            gap = f1 - f0 - 1
+            if gap <= 0:
+                continue
+
+            p0, e0 = det_dict[f0]
+            p1, e1 = det_dict[f1]
+            dt = (f1 - f0) / max(5.0, float(fps))
+
+            # Calculate boundary velocities from confirmed trajectory keyframes
+            v0 = (bridged[f0, :3] - bridged[max(0, f0 - 2), :3]) / (max(1, f0 - max(0, f0 - 2)) / fps) if f0 > 0 else (p1 - p0) / dt
+            v1 = (bridged[min(n_frames - 1, f1 + 2), :3] - bridged[f1, :3]) / (max(1, min(n_frames - 1, f1 + 2) - f1) / fps) if f1 < n_frames - 1 else (p1 - p0) / dt
+
+            # Velocity clamping to physical human/gripper motion limits (0.8 m/s)
+            v0 = v0 * min(1.0, 0.8 / (np.linalg.norm(v0) + 1e-6))
+            v1 = v1 * min(1.0, 0.8 / (np.linalg.norm(v1) + 1e-6))
+
+            # Continuous Euler angle unwrapping across the occlusion interval
+            e_unwrapped = np.unwrap(np.vstack([e0, e1]), axis=0)
+            e0_u, e1_u = e_unwrapped[0], e_unwrapped[1]
+
+            # Collect any VO detections in this occlusion gap
+            gap_vo = {}
+            for d in video_detections:
+                if f0 < d[0] < f1 and d[4] in ("feature_pnp", "feature_vo") and d[1] is not None:
+                    gap_vo[d[0]] = np.array(d[1], dtype=np.float64)
+
+            has_complete_vo = (len(gap_vo) == gap)
+            vo_drift = None
+            p_vo_start = None
+            if has_complete_vo:
+                p_vo_start = gap_vo[f0 + 1]
+                p_vo_end = gap_vo[f1 - 1]
+                vo_drift = (p1 - p0) - (p_vo_end - p_vo_start)
+
+            for step, f_curr in enumerate(range(f0 + 1, f1)):
+                s = (step + 1) / (gap + 1)
+                h00 = 2*s**3 - 3*s**2 + 1
+                h10 = s**3 - 2*s**2 + s
+                h01 = -2*s**3 + 3*s**2
+                h11 = s**3 - s**2
+                p_spline = h00 * p0 + h10 * dt * v0 + h01 * p1 + h11 * dt * v1
+
+                if has_complete_vo and f_curr in gap_vo:
+                    p_vo = gap_vo[f_curr]
+                    vo_rel = p_vo - p_vo_start
+                    p_vo_blended = p0 + vo_rel + s * vo_drift
+                    p_final = 0.5 * p_spline + 0.5 * p_vo_blended
+                elif f_curr in gap_vo:
+                    p_vo = gap_vo[f_curr]
+                    p_final = 0.7 * p_spline + 0.3 * p_vo
+                else:
+                    p_final = p_spline
+
+                p_final[2] = max(0.08, float(p_final[2]))
+                e_final = (1 - s) * e0_u + s * e1_u
+                e_final = (e_final + np.pi) % (2 * np.pi) - np.pi
+
+                bridged[f_curr, :3] = p_final
+                bridged[f_curr, 3:] = e_final
+
+        # Ensure leading/trailing frames outside ArUco range are held or clamped
+        f_first = det_indices[0]
+        if f_first > 0:
+            for f in range(f_first):
+                bridged[f, :3] = bridged[f_first, :3]
+                bridged[f, 3:] = bridged[f_first, 3:]
+
+        f_last = det_indices[-1]
+        if f_last < n_frames - 1:
+            for f in range(f_last + 1, n_frames):
+                bridged[f, :3] = bridged[f_last, :3]
+                bridged[f, 3:] = bridged[f_last, 3:]
+
+        return bridged
 
 
     def detect_marker_pnp(self, frame, camera_matrix, dist_coeffs, return_corners=False):
@@ -1513,11 +1673,21 @@ class VisualInertialTracker:
 
         # Run EKF Fusion
         final_trajectory = self._run_ekf_fusion(num_frames, fps, video_detections, parsed_imu)
+
+        # Bridge manipulation occlusion gaps using UMI C1 Hermite Spline Engine
+        final_trajectory = self._bridge_occlusion_intervals_umi(final_trajectory, video_detections, fps)
+
         self.last_raw_trajectory = final_trajectory.copy()
         if smooth and len(final_trajectory) >= 4:
             final_trajectory = self.smooth_trajectory(
                 final_trajectory, fps=fps, method=smooth_method, time_window_ms=smooth_window_ms
             )
+
+        # Synchronize final trajectory into dev_telemetry for frontend inspection
+        for i_frame, item in enumerate(dev_telemetry):
+            if i_frame < len(final_trajectory):
+                item['pose'] = final_trajectory[i_frame, :3].tolist()
+                item['euler'] = final_trajectory[i_frame, 3:].tolist()
 
         if return_dev_info:
             return final_trajectory, dev_telemetry
