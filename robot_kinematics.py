@@ -143,7 +143,7 @@ SO101_OMNIKIN_DH_TABLE = [
         "d": 0.000,
         "a": 0.140,  # Upper arm length (meters)
         "alpha_deg": 0.0,
-        "limits_deg": [-185.0, 15.0]
+        "limits_deg": [-100.0, 100.0]
     },
     {
         "joint_idx": 2,
@@ -153,7 +153,7 @@ SO101_OMNIKIN_DH_TABLE = [
         "d": 0.000,
         "a": 0.135,  # Lower arm length (meters)
         "alpha_deg": 0.0,
-        "limits_deg": [0.0, 190.0]
+        "limits_deg": [-150.0, 150.0]
     },
     {
         "joint_idx": 3,
@@ -799,7 +799,8 @@ class URDFParser:
         j2 = arm_joints[2] if len(arm_joints) > 2 else None
         if j2:
             norm2 = float(np.linalg.norm(j2["xyz"]))
-            L2 = norm2 if norm2 > 0.05 else 0.140
+            # Nominal SO-101 upper arm is 140mm; in OMNI-KIN URDF, CAD joint offset is along Y and offset by shoulder joint Y
+            L2 = 0.140 if (0.110 <= norm2 <= 0.145 and "omni" in robot_name.lower()) else (norm2 if norm2 > 0.05 else 0.140)
         else:
             L2 = 0.140
 
@@ -815,8 +816,33 @@ class URDFParser:
         L4 = 0.110
         if gripper_joint:
             norm_grip = float(np.linalg.norm(gripper_joint["xyz"]))
-            if norm_grip > 0.03:
+            if norm_grip > 0.09:
                 L4 = norm_grip
+            elif norm_grip > 0.03:
+                L4 = 0.110
+
+        # Joint limits normalization:
+        # Mechanical CAD assemblies (SolidWorks, Onshape, Fusion 360) frequently define
+        # zero at parking/folded position and axes inverted (e.g. elbow lower=0.0, upper=3.316;
+        # shoulder lower=-3.229, upper=0.262).
+        # Serial planar DH kinematics defines zero outstretched forward, where elbow flexion is
+        # negative (-150 to 0 deg) and shoulder pitch reaches upward (+80 deg).
+        # If naive limits are kept, elbow (q2 <= 0) and shoulder (q1 > 15 deg) lock permanently.
+        # We normalize CAD offsets based on total angular range (span):
+        def normalize_joint_limits(j_idx, raw_limits):
+            if not raw_limits or len(raw_limits) != 2:
+                return [-180.0, 180.0]
+            low, high = float(raw_limits[0]), float(raw_limits[1])
+            span = high - low
+            if j_idx == 1:  # Shoulder pitch
+                if high < 45.0:  # Shifted CAD rest limit (e.g. [-185, 15])
+                    half_span = min(100.0, round(span / 2.0, 1))
+                    return [-half_span, half_span]
+            elif j_idx == 2:  # Elbow pitch
+                if low >= -10.0:  # One-sided folded CAD limit (e.g. [0, 190])
+                    half_span = min(150.0, round(span, 1))
+                    return [-half_span, half_span]
+            return [round(low, 1), round(high, 1)]
 
         # Construct DH Table
         dh_table = [
@@ -828,7 +854,7 @@ class URDFParser:
                 "d": round(float(L1), 4),
                 "a": 0.0,
                 "alpha_deg": 90.0,
-                "limits_deg": arm_joints[0]["limits_deg"] if len(arm_joints) > 0 else [-180.0, 180.0]
+                "limits_deg": normalize_joint_limits(0, arm_joints[0]["limits_deg"]) if len(arm_joints) > 0 else [-180.0, 180.0]
             },
             {
                 "joint_idx": 1,
@@ -838,7 +864,7 @@ class URDFParser:
                 "d": 0.0,
                 "a": round(float(L2), 4),
                 "alpha_deg": 0.0,
-                "limits_deg": arm_joints[1]["limits_deg"] if len(arm_joints) > 1 else [-100.0, 100.0]
+                "limits_deg": normalize_joint_limits(1, arm_joints[1]["limits_deg"]) if len(arm_joints) > 1 else [-100.0, 100.0]
             },
             {
                 "joint_idx": 2,
@@ -848,7 +874,7 @@ class URDFParser:
                 "d": 0.0,
                 "a": round(float(L3), 4),
                 "alpha_deg": 0.0,
-                "limits_deg": arm_joints[2]["limits_deg"] if len(arm_joints) > 2 else [-150.0, 150.0]
+                "limits_deg": normalize_joint_limits(2, arm_joints[2]["limits_deg"]) if len(arm_joints) > 2 else [-150.0, 150.0]
             },
             {
                 "joint_idx": 3,
@@ -858,7 +884,7 @@ class URDFParser:
                 "d": 0.0,
                 "a": 0.0,
                 "alpha_deg": 90.0,
-                "limits_deg": arm_joints[3]["limits_deg"] if len(arm_joints) > 3 else [-100.0, 100.0]
+                "limits_deg": normalize_joint_limits(3, arm_joints[3]["limits_deg"]) if len(arm_joints) > 3 else [-100.0, 100.0]
             },
             {
                 "joint_idx": 4,
@@ -868,7 +894,7 @@ class URDFParser:
                 "d": round(float(L4), 4),
                 "a": 0.0,
                 "alpha_deg": 0.0,
-                "limits_deg": arm_joints[4]["limits_deg"] if len(arm_joints) > 4 else [-180.0, 180.0]
+                "limits_deg": normalize_joint_limits(4, arm_joints[4]["limits_deg"]) if len(arm_joints) > 4 else [-180.0, 180.0]
             }
         ]
 

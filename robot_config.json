@@ -10,7 +10,7 @@
       "name": "base_yaw_joint",
       "type": "revolute",
       "theta_offset_deg": 0.0,
-      "d": 0.0604,
+      "d": 0.119,
       "a": 0.0,
       "alpha_deg": 90.0,
       "limits_deg": [
@@ -24,11 +24,11 @@
       "type": "revolute",
       "theta_offset_deg": 0.0,
       "d": 0.0,
-      "a": 0.0197,
+      "a": 0.14,
       "alpha_deg": 0.0,
       "limits_deg": [
-        -185.0,
-        15.0
+        -100.0,
+        100.0
       ]
     },
     {
@@ -37,11 +37,11 @@
       "type": "revolute",
       "theta_offset_deg": 0.0,
       "d": 0.0,
-      "a": 0.145,
+      "a": 0.135,
       "alpha_deg": 0.0,
       "limits_deg": [
-        0.0,
-        190.0
+        -150.0,
+        150.0
       ]
     },
     {
@@ -62,7 +62,7 @@
       "name": "wrist_roll_joint",
       "type": "revolute",
       "theta_offset_deg": 0.0,
-      "d": 0.06,
+      "d": 0.11,
       "a": 0.0,
       "alpha_deg": 0.0,
       "limits_deg": [
@@ -75,7 +75,7 @@
     "robot_name": "SO-ARM101-OMNI-KIN",
     "total_joints_parsed": 6,
     "revolute_joints": 5,
-    "reach_meters": 0.225,
+    "reach_meters": 0.385,
     "payload_kg": 0.5,
     "dh_table": [
       {
@@ -83,7 +83,7 @@
         "name": "base_yaw_joint",
         "type": "revolute",
         "theta_offset_deg": 0.0,
-        "d": 0.0604,
+        "d": 0.119,
         "a": 0.0,
         "alpha_deg": 90.0,
         "limits_deg": [
@@ -97,11 +97,11 @@
         "type": "revolute",
         "theta_offset_deg": 0.0,
         "d": 0.0,
-        "a": 0.0197,
+        "a": 0.14,
         "alpha_deg": 0.0,
         "limits_deg": [
-          -185.0,
-          15.0
+          -100.0,
+          100.0
         ]
       },
       {
@@ -110,11 +110,11 @@
         "type": "revolute",
         "theta_offset_deg": 0.0,
         "d": 0.0,
-        "a": 0.145,
+        "a": 0.135,
         "alpha_deg": 0.0,
         "limits_deg": [
-          0.0,
-          190.0
+          -150.0,
+          150.0
         ]
       },
       {
@@ -135,7 +135,7 @@
         "name": "wrist_roll_joint",
         "type": "revolute",
         "theta_offset_deg": 0.0,
-        "d": 0.06,
+        "d": 0.11,
         "a": 0.0,
         "alpha_deg": 0.0,
         "limits_deg": [

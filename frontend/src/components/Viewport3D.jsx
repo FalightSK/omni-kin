@@ -631,8 +631,8 @@ export default function Viewport3D({
 
     const jointLimits = isOmni ? [
       [-1.833, 1.833],
-      [-3.229, 0.262],
-      [0.0, 3.316],
+      [-1.745, 1.745],
+      [-2.618, 2.618],
       [-1.745, 1.745],
       [-Math.PI, Math.PI]
     ] : [

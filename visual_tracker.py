@@ -326,9 +326,9 @@ class ArucoFeatureMapTracker:
 
         cos_min_angle = float(np.cos(np.radians(3.5)))
 
-        for prev_p, prev_R_c_to_w, prev_pts_dict in self.view_history[-6:]:
+        for prev_p, prev_R_c_to_w, prev_pts_dict in self.view_history[-8:]:
             baseline = float(np.linalg.norm(p_cam_world - prev_p))
-            if baseline < 0.035:  # Require at least 35mm baseline for stable parallax
+            if baseline < 0.020:  # Require at least 20mm baseline for stable parallax
                 continue
 
             R_w2c_prev = prev_R_c_to_w.T
@@ -447,7 +447,7 @@ class ArucoFeatureMapTracker:
                 pt3 = self.landmarks_3d[pid].reshape(1, 3)
                 proj, _ = cv2.projectPoints(pt3, rvec_gt, t_w2c, self.camera_matrix, self.dist_coeffs)
                 reproj_err = float(np.linalg.norm(proj.reshape(2) - pt2))
-                if reproj_err > 2.5:
+                if reproj_err > 5.0:
                     pids_to_purge.append(pid)
 
         for pid in pids_to_purge:
@@ -1301,13 +1301,49 @@ class VisualInertialTracker:
                 success = False
 
         if not success:
-            success, rvec, tvec = cv2.solvePnP(
-                matched_3d,
-                matched_2d,
-                camera_matrix,
-                dist_coeffs,
-                flags=flags
-            )
+            if flags == cv2.SOLVEPNP_IPPE_SQUARE:
+                # Anti-flip solver: IPPE produces up to 2 planar solutions.
+                # Choose the solution that avoids planar ambiguity flip and is consistent with previous pose.
+                try:
+                    ret_g, rvecs_g, tvecs_g, _ = cv2.solvePnPGeneric(
+                        matched_3d,
+                        matched_2d,
+                        camera_matrix,
+                        dist_coeffs,
+                        flags=cv2.SOLVEPNP_IPPE_SQUARE
+                    )
+                    if ret_g and len(rvecs_g) > 0:
+                        best_idx = 0
+                        if len(rvecs_g) > 1 and has_prev_guess:
+                            R_prev, _ = cv2.Rodrigues(self.last_rvec)
+                            min_ang = 1e9
+                            for sol_idx, cand_rvec in enumerate(rvecs_g):
+                                R_cand, _ = cv2.Rodrigues(cand_rvec)
+                                R_diff = R_cand @ R_prev.T
+                                tr = float(np.clip((np.trace(R_diff) - 1.0) / 2.0, -1.0, 1.0))
+                                ang = np.arccos(tr)
+                                if ang < min_ang:
+                                    min_ang = ang
+                                    best_idx = sol_idx
+                        elif len(rvecs_g) > 1:
+                            R_0, _ = cv2.Rodrigues(rvecs_g[0])
+                            R_1, _ = cv2.Rodrigues(rvecs_g[1])
+                            if R_1[2, 2] < R_0[2, 2]:
+                                best_idx = 1
+                        rvec = rvecs_g[best_idx]
+                        tvec = tvecs_g[best_idx]
+                        success = True
+                except Exception:
+                    success = False
+
+            if not success:
+                success, rvec, tvec = cv2.solvePnP(
+                    matched_3d,
+                    matched_2d,
+                    camera_matrix,
+                    dist_coeffs,
+                    flags=flags
+                )
 
         if not success and flags != cv2.SOLVEPNP_ITERATIVE:
             success, rvec, tvec = cv2.solvePnP(
@@ -1341,6 +1377,103 @@ class VisualInertialTracker:
         if return_corners:
             return True, p_world, R_c_to_w, rvec, tvec, is_dual, refined_corners
         return True, p_world, R_c_to_w, rvec, tvec, is_dual
+    def safe_draw_3d_axes(
+        self,
+        annotated,
+        camera_matrix,
+        dist_coeffs,
+        rvec,
+        tvec,
+        origin_3d=np.array([0.0, 0.0, 0.0]),
+        axis_len=0.08,
+        thickness=3,
+        label="Origin [0,0,0]",
+        label_color=(0, 255, 128)
+    ):
+        """
+        Safely draws a 3D Cartesian coordinate frame (+X Red, +Y Green, +Z Blue) on the image
+        with strict camera frustum clipping and near-plane depth gating.
+        Prevents degenerate projection artifacts (e.g. giant diagonal laser lines or
+        exploding pixel coordinates when origin is behind the camera).
+        Returns True if axes were successfully drawn, False if clipped.
+        """
+        if rvec is None or tvec is None or camera_matrix is None:
+            return False
+
+        R, _ = cv2.Rodrigues(rvec)
+        orig_arr = np.array(origin_3d, dtype=np.float64).reshape(3, 1)
+        t_arr = np.array(tvec, dtype=np.float64).reshape(3, 1)
+
+        # 1. Transform origin to camera coordinate space: P_c = R * P_w + t
+        p_c_orig = R @ orig_arr + t_arr
+
+        # Near-plane clipping: must be at least 7cm in front of camera
+        if p_c_orig[2, 0] <= 0.07:
+            return False
+
+        # Transform 3 axis endpoints to camera space to verify they are all in front of camera
+        p_c_x = p_c_orig + R @ np.array([[axis_len], [0.0], [0.0]])
+        p_c_y = p_c_orig + R @ np.array([[0.0], [axis_len], [0.0]])
+        p_c_z = p_c_orig + R @ np.array([[0.0], [0.0], [axis_len]])
+
+        if p_c_x[2, 0] <= 0.03 or p_c_y[2, 0] <= 0.03 or p_c_z[2, 0] <= 0.03:
+            return False
+
+        # 2. Project 3D points to 2D screen coordinates
+        pts_3d = np.vstack([
+            origin_3d,
+            origin_3d + [axis_len, 0.0, 0.0],
+            origin_3d + [0.0, axis_len, 0.0],
+            origin_3d + [0.0, 0.0, axis_len]
+        ]).astype(np.float32)
+
+        try:
+            proj, _ = cv2.projectPoints(pts_3d, rvec, tvec, camera_matrix, dist_coeffs)
+            proj = proj.reshape(-1, 2)
+        except Exception:
+            return False
+
+        o = proj[0]
+        px = proj[1]
+        py = proj[2]
+        pz = proj[3]
+
+        height, width = annotated.shape[:2]
+
+        # 3. Frustum bounds check: origin must be near visible screen area
+        margin = 100
+        if not (-margin <= o[0] <= width + margin and -margin <= o[1] <= height + margin):
+            return False
+
+        # 4. Maximum span sanity check (prevent degenerate distortion streaks)
+        max_span = min(width, height) * 0.45
+        for pt in [px, py, pz]:
+            if np.hypot(pt[0] - o[0], pt[1] - o[1]) > max_span:
+                return False
+
+        # 5. Render anti-aliased coordinate frame axes
+        o_int = (int(round(o[0])), int(round(o[1])))
+        px_int = (int(round(px[0])), int(round(px[1])))
+        py_int = (int(round(py[0])), int(round(py[1])))
+        pz_int = (int(round(pz[0])), int(round(pz[1])))
+
+        # Draw thick arrows: +X Red, +Y Green, +Z Blue
+        cv2.arrowedLine(annotated, o_int, px_int, (0, 0, 255), thickness, tipLength=0.15, line_type=cv2.LINE_AA)
+        cv2.arrowedLine(annotated, o_int, py_int, (0, 255, 0), thickness, tipLength=0.15, line_type=cv2.LINE_AA)
+        cv2.arrowedLine(annotated, o_int, pz_int, (255, 120, 0), thickness, tipLength=0.15, line_type=cv2.LINE_AA)
+
+        # Label axis tips
+        cv2.putText(annotated, "+X", (px_int[0] + 4, px_int[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 255), 1, cv2.LINE_AA)
+        cv2.putText(annotated, "+Y", (py_int[0] + 4, py_int[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 0), 1, cv2.LINE_AA)
+        cv2.putText(annotated, "+Z", (pz_int[0] + 4, pz_int[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 160, 0), 1, cv2.LINE_AA)
+
+        # Origin badge/label
+        if label:
+            lx, ly = o_int[0] + 6, max(20, o_int[1] - 8)
+            cv2.putText(annotated, label, (lx + 1, ly + 1), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(annotated, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.42, label_color, 1, cv2.LINE_AA)
+
+        return True
 
     def render_dev_frame(
         self,
@@ -1435,34 +1568,36 @@ class VisualInertialTracker:
                 label_pos = (pts[0][0], max(20, pts[0][1] - 8))
                 cv2.putText(annotated, tag_name, label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, pill_color, 1, cv2.LINE_AA)
 
-        # 5. Draw 3D Physical Coordinate Frame Axes Anchored to Table Origin [0, 0, 0]
+        # 5. Draw 3D Physical Coordinate Frame Axes Anchored to Table
+        axes_drawn = False
+        tag_a_visible = ids_list is not None and self.tag_a_id in ids_list
+        tag_b_visible = ids_list is not None and self.tag_b_id in ids_list
+
         if rvec is not None and tvec is not None:
-            try:
-                axis_len = 0.08  # 8 cm axes
-                axes_3d = np.array([
-                    [0.0, 0.0, 0.0],       # Origin
-                    [axis_len, 0.0, 0.0],  # +X (Red)
-                    [0.0, axis_len, 0.0],  # +Y (Green)
-                    [0.0, 0.0, axis_len],  # +Z (Blue, normal to table)
-                ], dtype=np.float32)
+            # Draw Tag A Origin [0, 0, 0]
+            drawn_a = self.safe_draw_3d_axes(
+                annotated, camera_matrix, dist_coeffs, rvec, tvec,
+                origin_3d=np.array([0.0, 0.0, 0.0]),
+                axis_len=0.08,
+                thickness=3,
+                label="Tag A Origin [0,0,0]" if tag_a_visible else "Table Origin [0,0,0]",
+                label_color=(0, 255, 128)
+            )
+            if drawn_a:
+                axes_drawn = True
 
-                img_pts, _ = cv2.projectPoints(axes_3d, rvec, tvec, camera_matrix, dist_coeffs)
-                img_pts = img_pts.reshape(-1, 2)
-                o = (int(round(img_pts[0][0])), int(round(img_pts[0][1])))
-                px = (int(round(img_pts[1][0])), int(round(img_pts[1][1])))
-                py = (int(round(img_pts[2][0])), int(round(img_pts[2][1])))
-                pz = (int(round(img_pts[3][0])), int(round(img_pts[3][1])))
-
-                if -150 <= o[0] < width + 150 and -150 <= o[1] < height + 150:
-                    cv2.arrowedLine(annotated, o, px, (0, 0, 255), 3, tipLength=0.15, line_type=cv2.LINE_AA)    # +X Red
-                    cv2.arrowedLine(annotated, o, py, (0, 255, 0), 3, tipLength=0.15, line_type=cv2.LINE_AA)    # +Y Green
-                    cv2.arrowedLine(annotated, o, pz, (255, 120, 0), 3, tipLength=0.15, line_type=cv2.LINE_AA)  # +Z Blue (Height)
-
-                    cv2.putText(annotated, "+X", (px[0] + 4, px[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
-                    cv2.putText(annotated, "+Y", (py[0] + 4, py[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
-                    cv2.putText(annotated, "+Z (Normal)", (pz[0] + 4, pz[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 160, 0), 1, cv2.LINE_AA)
-            except Exception:
-                pass
+            # If Tag B is visible, also draw Tag B anchor (especially helpful when Tag A is occluded)
+            if tag_b_visible:
+                drawn_b = self.safe_draw_3d_axes(
+                    annotated, camera_matrix, dist_coeffs, rvec, tvec,
+                    origin_3d=self.tag_b_offset,
+                    axis_len=0.05,
+                    thickness=2,
+                    label="Tag B (+15cm)",
+                    label_color=(255, 220, 0)
+                )
+                if drawn_b:
+                    axes_drawn = True
 
         # 6. Draw HUD Telemetry Banner across top
         hud_h = 72
@@ -1478,7 +1613,11 @@ class VisualInertialTracker:
             'feature_vo': ('ANCHOR: OPTICAL FLOW VO', (0, 140, 255)),
             'imu': ('CONTINUITY: IMU DEAD-RECKON', (80, 80, 255))
         }
-        src_label, src_color = source_cfg.get(source, ('INITIALIZING', (180, 180, 180)))
+        if not axes_drawn and not tag_a_visible and not tag_b_visible:
+            src_label = "ANCHOR: OFF-SCREEN / OUT OF VIEW"
+            src_color = (140, 140, 160)
+        else:
+            src_label, src_color = source_cfg.get(source, ('INITIALIZING', (180, 180, 180)))
 
         cv2.circle(annotated, (18, 22), 5, src_color, -1, cv2.LINE_AA)
         cv2.putText(annotated, f"[{src_label}]", (30, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, src_color, 2, cv2.LINE_AA)
@@ -1572,12 +1711,34 @@ class VisualInertialTracker:
                 cv2.rectangle(annotated, (bx - 2, by - box_h), (bx + box_w, by), (0, 255, 0), 1)
                 cv2.putText(annotated, label, (bx + 3, by - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 255, 0), 1, cv2.LINE_AA)
 
-        # 5. Draw 3D coordinate axes if pose is available
+        # 5. Draw 3D coordinate axes safely anchored to the table
+        axes_drawn = False
+        tag_a_visible = ids_list is not None and self.tag_a_id in ids_list
+        tag_b_visible = ids_list is not None and self.tag_b_id in ids_list
+
         if rvec is not None and tvec is not None and camera_matrix is not None:
-            try:
-                cv2.drawFrameAxes(annotated, camera_matrix, dist_coeffs, rvec, tvec, 0.08, 2)
-            except Exception:
-                pass
+            drawn_a = self.safe_draw_3d_axes(
+                annotated, camera_matrix, dist_coeffs, rvec, tvec,
+                origin_3d=np.array([0.0, 0.0, 0.0]),
+                axis_len=0.08,
+                thickness=2,
+                label="Tag A [0,0,0]" if tag_a_visible else "Table [0,0,0]",
+                label_color=(0, 255, 0)
+            )
+            if drawn_a:
+                axes_drawn = True
+
+            if not drawn_a and tag_b_visible:
+                drawn_b = self.safe_draw_3d_axes(
+                    annotated, camera_matrix, dist_coeffs, rvec, tvec,
+                    origin_3d=self.tag_b_offset,
+                    axis_len=0.05,
+                    thickness=2,
+                    label="Tag B (+15cm)",
+                    label_color=(0, 230, 255)
+                )
+                if drawn_b:
+                    axes_drawn = True
 
         # 6. Top Canny Diagnostic HUD
         hud_h = 44
@@ -1589,8 +1750,9 @@ class VisualInertialTracker:
         cv2.circle(annotated, (18, 22), 5, (0, 230, 255), -1, cv2.LINE_AA)
         cv2.putText(annotated, "OPENCV CANNY EDGE DETECTION & ARUCO BOUNDING BOXES", (30, 27), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 230, 255), 2, cv2.LINE_AA)
 
-        f_text = f"Frame {frame_idx + 1}/{max(1, total_frames)}  |  Canny T1=50, T2=150"
-        cv2.putText(annotated, f_text, (max(width - 340, 300), 27), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (200, 220, 240), 1, cv2.LINE_AA)
+        anchor_status = "Anchor: Locked" if axes_drawn else ("Anchor: Tag B" if tag_b_visible else "Anchor: Off-Screen")
+        f_text = f"Frame {frame_idx + 1}/{max(1, total_frames)}  |  {anchor_status}  |  Canny T1=50, T2=150"
+        cv2.putText(annotated, f_text, (max(width - 390, 300), 27), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (200, 220, 240), 1, cv2.LINE_AA)
 
         return annotated
 
@@ -1637,6 +1799,8 @@ class VisualInertialTracker:
         video_detections = []  # (frame_idx, p_world, euler, is_dual, source)
         dev_telemetry = []
         frame_idx = 0
+        tracker_rvec_viz = None
+        tracker_tvec_viz = None
 
         while True:
             ret, frame = cap.read()
@@ -1711,6 +1875,32 @@ class VisualInertialTracker:
                 'euler': euler_curr.tolist() if euler_curr is not None else [0.0, 0.0, 0.0]
             })
 
+            # Visual pose temporal smoothing for rock-solid rendered 3D axes
+            rvec_to_render = None
+            tvec_to_render = None
+            if rvec_curr is not None and tvec_curr is not None:
+                if tracker_rvec_viz is None:
+                    tracker_rvec_viz = rvec_curr.copy()
+                    tracker_tvec_viz = tvec_curr.copy()
+                else:
+                    alpha = 0.75
+                    tracker_tvec_viz = alpha * tvec_curr + (1.0 - alpha) * tracker_tvec_viz
+                    R_c_now, _ = cv2.Rodrigues(rvec_curr)
+                    R_c_old, _ = cv2.Rodrigues(tracker_rvec_viz)
+                    R_rel = R_c_now @ R_c_old.T
+                    rot_v, _ = cv2.Rodrigues(R_rel)
+                    if np.linalg.norm(rot_v) > 0.35:  # Fast camera movement: don't lag
+                        tracker_rvec_viz = rvec_curr.copy()
+                        tracker_tvec_viz = tvec_curr.copy()
+                    else:
+                        R_smooth, _ = cv2.Rodrigues(rot_v * alpha)
+                        tracker_rvec_viz, _ = cv2.Rodrigues(R_smooth @ R_c_old)
+                rvec_to_render = tracker_rvec_viz
+                tvec_to_render = tracker_tvec_viz
+            else:
+                tracker_rvec_viz = None
+                tracker_tvec_viz = None
+
             # Render dev visualization frame
             if dev_writer is not None:
                 dev_frame = self.render_dev_frame(
@@ -1722,8 +1912,8 @@ class VisualInertialTracker:
                     fps=fps,
                     p_world=p_curr,
                     euler=euler_curr,
-                    rvec=rvec_curr,
-                    tvec=tvec_curr,
+                    rvec=rvec_to_render,
+                    tvec=tvec_to_render,
                     source=src,
                     corners=corners if det else None,
                     ids_list=self.last_detected_ids if det else None,
@@ -1744,8 +1934,8 @@ class VisualInertialTracker:
                     fps=fps,
                     p_world=p_curr,
                     euler=euler_curr,
-                    rvec=rvec_curr,
-                    tvec=tvec_curr,
+                    rvec=rvec_to_render,
+                    tvec=tvec_to_render,
                     corners=corners if det else None,
                     ids_list=self.last_detected_ids if det else None,
                     tracked_pts=feature_tracker.tracked_pts
