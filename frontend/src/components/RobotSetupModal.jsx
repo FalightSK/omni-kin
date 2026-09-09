@@ -449,6 +449,14 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                 <span className="text-[11px] font-semibold text-slate-400 self-center mr-1">Presets:</span>
                 <button
                   type="button"
+                  onClick={() => applyPresetPosition(0.038, -0.406, 90)}
+                  className="px-2.5 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 text-[11px] font-mono border border-indigo-500/60 flex items-center gap-1 font-semibold shadow-sm"
+                >
+                  <Sparkles className="w-3 h-3 text-indigo-400" />
+                  <span>⭐ Recommended (Front Y=-41cm, 90°)</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => applyPresetPosition(0.20, 0.00, 0)}
                   className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-mono border border-slate-700/60"
                 >

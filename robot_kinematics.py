@@ -1163,6 +1163,22 @@ class WorkspaceCalibrator:
         )
         return self.get_config()
 
+    def get_recommended_layout(self):
+        """
+        Returns and applies standard recommended tabletop workspace layout:
+        - ArUco Tag A (10cm) at Origin (0,0,0)
+        - ArUco Tag B (5cm) at (+15cm, 0, 0)
+        - Robot Base at (X=+0.038m, Y=-0.406m, Z=0.0m, Yaw=90.0 deg)
+          facing forward toward the tags, placed just beyond reach radius (40.8cm > 38.5cm max reach).
+        """
+        self.update_config(
+            offset_x=0.038,
+            offset_y=-0.406,
+            offset_z=0.00,
+            yaw_deg=90.0
+        )
+        return self.get_config()
+
 
 if __name__ == "__main__":
     solver = SO101Kinematics()

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d, Crosshair, Sparkles, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d, Crosshair, Sparkles, CheckCircle2, AlertTriangle, Layers, Bot } from 'lucide-react';
 
 // ==============================================================================
 // 5-DOF Robot Inverse Kinematics Engine (with Impossible Kinematics Handling)
@@ -140,6 +140,120 @@ function orientCylinder(mesh, pA, pB, radius) {
   mesh.quaternion.copy(_quat);
 }
 
+// Helper: Generates realistic ArUco Marker Canvas Texture with Origin Dot
+function createArucoCanvasTexture(markerId) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+
+  // Crisp white outer border margin
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, 256, 256);
+
+  // Black marker frame
+  ctx.fillStyle = '#090d16';
+  ctx.fillRect(24, 24, 208, 208);
+
+  // Inner simulated bit pattern
+  ctx.fillStyle = '#ffffff';
+  if (markerId === 0) {
+    ctx.fillRect(64, 64, 44, 44);
+    ctx.fillRect(148, 64, 44, 44);
+    ctx.fillRect(64, 148, 44, 44);
+    ctx.fillRect(106, 106, 44, 44);
+  } else {
+    ctx.fillRect(64, 106, 44, 44);
+    ctx.fillRect(148, 106, 44, 44);
+    ctx.fillRect(106, 64, 44, 44);
+    ctx.fillRect(106, 148, 44, 44);
+  }
+
+  // Red origin corner dot at Corner 0 (bottom-left)
+  ctx.fillStyle = '#ef4444';
+  ctx.beginPath();
+  ctx.arc(28, 228, 9, 0, Math.PI * 2);
+  ctx.fill();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.generateMipmaps = true;
+
+  // Load genuine high-res marker PNG from backend asynchronously
+  if (typeof Image !== 'undefined') {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, 256, 256);
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(28, 228, 9, 0, Math.PI * 2);
+      ctx.fill();
+      texture.needsUpdate = true;
+    };
+    img.src = `/api/marker/image?marker_id=${markerId}&size=256`;
+  }
+
+  return texture;
+}
+
+// Helper: Generates high-res Text Sprite for Tabletop Labels
+function createTextSprite(text, bgColor = '#0f172a', textColor = '#94a3b8', borderColor = '#334155') {
+  const canvas = document.createElement('canvas');
+  canvas.width = 440;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = bgColor;
+  ctx.strokeStyle = borderColor;
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.roundRect(4, 4, 432, 56, 14);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.font = 'bold 20px "JetBrains Mono", Menlo, Consolas, monospace';
+  ctx.fillStyle = textColor;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 220, 32);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(0.18, 0.026, 1);
+  return sprite;
+}
+
+// Helper: Generates smooth Floor Reach Rings
+function createCircleRing(radius, colorHex, dashed = true) {
+  const segments = 96;
+  const pts = [];
+  for (let i = 0; i <= segments; i++) {
+    const theta = (i / segments) * Math.PI * 2;
+    pts.push(new THREE.Vector3(Math.cos(theta) * radius, Math.sin(theta) * radius, 0.002));
+  }
+  const geo = new THREE.BufferGeometry().setFromPoints(pts);
+  if (dashed) {
+    const mat = new THREE.LineDashedMaterial({
+      color: colorHex,
+      dashSize: 0.020,
+      gapSize: 0.015,
+      transparent: true,
+      opacity: 0.85
+    });
+    const line = new THREE.Line(geo, mat);
+    line.computeLineDistances();
+    return line;
+  } else {
+    const mat = new THREE.LineBasicMaterial({
+      color: colorHex,
+      transparent: true,
+      opacity: 0.75
+    });
+    return new THREE.Line(geo, mat);
+  }
+}
+
 export default function Viewport3D({
   trajectoryPoses = [],
   currentFrameIndex = 0,
@@ -156,6 +270,7 @@ export default function Viewport3D({
   const startMarkerRef = useRef(null);
   const goalMarkerRef = useRef(null);
   const robotGroupRef = useRef(null);
+  const zonesGroupRef = useRef(null);
 
   // Dynamic Articulated Robot Arm Meshes
   const turretMeshRef = useRef(null);
@@ -173,6 +288,7 @@ export default function Viewport3D({
   const [activeView, setActiveView] = useState('iso');
   const [isOrbitTouchEnabled, setIsOrbitTouchEnabled] = useState(true);
   const [isAligning, setIsAligning] = useState(false);
+  const [showZones, setShowZones] = useState(true);
 
   const [ikStatus, setIkStatus] = useState({
     isFeasible: true,
@@ -192,9 +308,10 @@ export default function Viewport3D({
     const width = container.clientWidth || 400;
     const height = container.clientHeight || 300;
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 50);
-    camera.position.set(0.42, -0.48, 0.42);
+    // Centered on the Recommended Tabletop Workspace (centroid: X=0.08m, Y=-0.20m, Z=0.08m)
+    camera.position.set(0.48, -0.74, 0.48);
     camera.up.set(0, 0, 1);
-    camera.lookAt(0.15, 0.05, 0.08);
+    camera.lookAt(0.08, -0.20, 0.08);
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -204,7 +321,7 @@ export default function Viewport3D({
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.target.set(0.15, 0.05, 0.08);
+    controls.target.set(0.08, -0.20, 0.08);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
     controls.minDistance = 0.08;
@@ -228,35 +345,165 @@ export default function Viewport3D({
     };
     container.addEventListener('wheel', handleWheel, { passive: false });
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.80);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
     scene.add(ambientLight);
 
     const dirLight = new THREE.DirectionalLight(0xffffff, 1.4);
     dirLight.position.set(1.0, -1.0, 2.0);
     scene.add(dirLight);
 
-    const tableGeo = new THREE.BoxGeometry(0.90, 0.70, 0.02);
-    const tableMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.45 });
+    // =========================================================================
+    // Tabletop Physical Surface (Width=0.88m, Depth=0.72m, centered at Y=-0.20m)
+    // Encompasses Tag Anchors at Y=0 down to Robot Base at Y=-0.41m cleanly
+    // =========================================================================
+    const tableGeo = new THREE.BoxGeometry(0.88, 0.72, 0.02);
+    const tableMat = new THREE.MeshStandardMaterial({
+      color: 0x0f172a,
+      roughness: 0.60,
+      metalness: 0.30
+    });
     const tableMesh = new THREE.Mesh(tableGeo, tableMat);
-    tableMesh.position.set(0.18, 0.12, -0.01);
+    tableMesh.position.set(0.08, -0.20, -0.01);
     scene.add(tableMesh);
 
-    const gridHelper = new THREE.GridHelper(0.90, 18, 0x475569, 0x334155);
+    // Table Chamfer Border Trim
+    const borderGeo = new THREE.BoxGeometry(0.89, 0.73, 0.018);
+    const borderMat = new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      roughness: 0.85
+    });
+    const borderMesh = new THREE.Mesh(borderGeo, borderMat);
+    borderMesh.position.set(0.08, -0.20, -0.011);
+    scene.add(borderMesh);
+
+    // Metric Tabletop Grid Helper (5cm spacing)
+    const gridHelper = new THREE.GridHelper(0.88, 22, 0x334155, 0x1e293b);
     gridHelper.rotation.x = Math.PI / 2;
-    gridHelper.position.set(0.18, 0.12, 0.001);
+    gridHelper.position.set(0.08, -0.20, 0.001);
     scene.add(gridHelper);
 
+    // =========================================================================
+    // Authentic Dual ArUco Markers (Tag A: 10cm at Origin, Tag B: 5cm at +15cm)
+    // =========================================================================
     const tagAGeo = new THREE.PlaneGeometry(0.10, 0.10);
-    const tagAMat = new THREE.MeshBasicMaterial({ color: 0x10b981, side: THREE.DoubleSide });
+    const tagAMat = new THREE.MeshBasicMaterial({
+      map: createArucoCanvasTexture(0),
+      side: THREE.DoubleSide
+    });
     const tagAMesh = new THREE.Mesh(tagAGeo, tagAMat);
     tagAMesh.position.set(0.05, 0.05, 0.002);
     scene.add(tagAMesh);
 
     const tagBGeo = new THREE.PlaneGeometry(0.05, 0.05);
-    const tagBMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, side: THREE.DoubleSide });
+    const tagBMat = new THREE.MeshBasicMaterial({
+      map: createArucoCanvasTexture(1),
+      side: THREE.DoubleSide
+    });
     const tagBMesh = new THREE.Mesh(tagBGeo, tagBMat);
     tagBMesh.position.set(0.175, 0.025, 0.002);
     scene.add(tagBMesh);
+
+    // =========================================================================
+    // Functional Workspace Layout Zones Overlay Group
+    // =========================================================================
+    const zonesGroup = new THREE.Group();
+    zonesGroupRef.current = zonesGroup;
+    scene.add(zonesGroup);
+
+    // --- 1. REFERENCE ZONE (ArUco Anchors • Beyond Reach) ---
+    const refZoneGeo = new THREE.PlaneGeometry(0.32, 0.16);
+    const refZoneMat = new THREE.MeshBasicMaterial({
+      color: 0x06b6d4,
+      transparent: true,
+      opacity: 0.08,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    });
+    const refZoneMesh = new THREE.Mesh(refZoneGeo, refZoneMat);
+    refZoneMesh.position.set(0.095, 0.04, 0.0015);
+    zonesGroup.add(refZoneMesh);
+
+    const refBorderPts = [
+      new THREE.Vector3(-0.16, -0.08, 0),
+      new THREE.Vector3(0.16, -0.08, 0),
+      new THREE.Vector3(0.16, 0.08, 0),
+      new THREE.Vector3(-0.16, 0.08, 0),
+      new THREE.Vector3(-0.16, -0.08, 0)
+    ];
+    const refBorderGeo = new THREE.BufferGeometry().setFromPoints(refBorderPts);
+    const refBorderMat = new THREE.LineBasicMaterial({ color: 0x06b6d4, transparent: true, opacity: 0.7 });
+    const refBorderLine = new THREE.Line(refBorderGeo, refBorderMat);
+    refBorderLine.position.copy(refZoneMesh.position);
+    zonesGroup.add(refBorderLine);
+
+    const refLabel = createTextSprite("REFERENCE ZONE (Anchors • Out of Reach)", "#083344", "#38bdf8", "#0e7490");
+    refLabel.position.set(0.095, 0.130, 0.003);
+    refLabel.scale.set(0.24, 0.034, 1);
+    zonesGroup.add(refLabel);
+
+    // --- 2. MANIPULATION WORKSPACE (Pick & Place Target Zone) ---
+    const manipZoneGeo = new THREE.PlaneGeometry(0.52, 0.22);
+    const manipZoneMat = new THREE.MeshBasicMaterial({
+      color: 0x8b5cf6,
+      transparent: true,
+      opacity: 0.07,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    });
+    const manipZoneMesh = new THREE.Mesh(manipZoneGeo, manipZoneMat);
+    manipZoneMesh.position.set(0.07, -0.20, 0.0015);
+    zonesGroup.add(manipZoneMesh);
+
+    const manipBorderPts = [
+      new THREE.Vector3(-0.26, -0.11, 0),
+      new THREE.Vector3(0.26, -0.11, 0),
+      new THREE.Vector3(0.26, 0.11, 0),
+      new THREE.Vector3(-0.26, 0.11, 0),
+      new THREE.Vector3(-0.26, -0.11, 0)
+    ];
+    const manipBorderGeo = new THREE.BufferGeometry().setFromPoints(manipBorderPts);
+    const manipBorderMat = new THREE.LineDashedMaterial({
+      color: 0xa855f7,
+      dashSize: 0.02,
+      gapSize: 0.015,
+      transparent: true,
+      opacity: 0.8
+    });
+    const manipBorderLine = new THREE.Line(manipBorderGeo, manipBorderMat);
+    manipBorderLine.computeLineDistances();
+    manipBorderLine.position.copy(manipZoneMesh.position);
+    zonesGroup.add(manipBorderLine);
+
+    const manipLabel = createTextSprite("MANIPULATION WORKSPACE (Pick & Place Demo)", "#2e1065", "#c084fc", "#7c3aed");
+    manipLabel.position.set(0.07, -0.078, 0.003);
+    manipLabel.scale.set(0.28, 0.034, 1);
+    zonesGroup.add(manipLabel);
+
+    // --- 3. 5.0 cm Metric Gap Bracket Between Tags ---
+    const gapPts = [
+      new THREE.Vector3(0.10, 0.025, 0.003),
+      new THREE.Vector3(0.15, 0.025, 0.003)
+    ];
+    const gapGeo = new THREE.BufferGeometry().setFromPoints(gapPts);
+    const gapMat = new THREE.LineBasicMaterial({ color: 0x64748b });
+    const gapLine = new THREE.Line(gapGeo, gapMat);
+    zonesGroup.add(gapLine);
+
+    const gapLabel = createTextSprite("5cm Gap", "#0f172a", "#94a3b8", "#334155");
+    gapLabel.position.set(0.125, 0.038, 0.004);
+    gapLabel.scale.set(0.065, 0.016, 1);
+    zonesGroup.add(gapLabel);
+
+    // --- 4. Tag Identifier Labels ---
+    const tagALabel = createTextSprite("Tag A [Origin (0,0)]", "#022c22", "#34d399", "#059669");
+    tagALabel.position.set(0.05, -0.018, 0.004);
+    tagALabel.scale.set(0.14, 0.022, 1);
+    zonesGroup.add(tagALabel);
+
+    const tagBLabel = createTextSprite("Tag B [+15cm]", "#082f49", "#38bdf8", "#0284c7");
+    tagBLabel.position.set(0.175, -0.012, 0.004);
+    tagBLabel.scale.set(0.10, 0.020, 1);
+    zonesGroup.add(tagBLabel);
 
     const axesGizmo = new THREE.AxesHelper(0.09);
     axesGizmo.position.set(0, 0, 0.005);
@@ -357,17 +604,17 @@ export default function Viewport3D({
     setIsAutoRotate(false);
 
     if (view === 'iso') {
-      camera.position.set(0.42, -0.48, 0.42);
-      controls.target.set(0.15, 0.05, 0.08);
+      camera.position.set(0.48, -0.74, 0.48);
+      controls.target.set(0.08, -0.20, 0.08);
     } else if (view === 'top') {
-      camera.position.set(0.15, 0.05, 0.85);
-      controls.target.set(0.15, 0.05, 0.0);
+      camera.position.set(0.08, -0.20, 1.05);
+      controls.target.set(0.08, -0.20, 0.0);
     } else if (view === 'front') {
-      camera.position.set(0.15, -0.70, 0.15);
-      controls.target.set(0.15, 0.05, 0.08);
+      camera.position.set(0.08, -0.86, 0.22);
+      controls.target.set(0.08, -0.20, 0.08);
     } else if (view === 'side') {
-      camera.position.set(0.85, 0.05, 0.15);
-      controls.target.set(0.15, 0.05, 0.08);
+      camera.position.set(0.82, -0.20, 0.22);
+      controls.target.set(0.08, -0.20, 0.08);
     }
     controls.update();
   };
@@ -409,14 +656,14 @@ export default function Viewport3D({
       );
 
       const {
-        offset_x = 0.20,
-        offset_y = 0.00,
+        offset_x = 0.038,
+        offset_y = -0.406,
         offset_z = 0.00,
-        robot_type = 'so101'
+        robot_type = 'so_arm101_omni_kin'
       } = robotConfig || {};
-      const is101 = (robot_type || 'so101').toLowerCase() === 'so101';
+      const is101 = (robot_type || 'so_arm101_omni_kin').toLowerCase().includes('101');
       const maxNominalReach = is101 ? 0.35 : 0.34;
-      const maxHardReach = is101 ? 0.395 : 0.385;
+      const maxHardReach = is101 ? 0.385 : 0.375;
 
       const colors = [];
       const cGreen = new THREE.Color(0x10b981); // Reachable
@@ -607,7 +854,58 @@ export default function Viewport3D({
     reachLineRef.current = reachLine;
     robotGroup.add(reachLine);
 
+    // =========================================================================
+    // Robot Physical Reach Boundary Envelopes on Table Floor
+    // =========================================================================
+    // 1. Inner / Nominal Reach Ring (R = 0.22m, Emerald) - optimal dexterity envelope
+    const nominalRing = createCircleRing(0.22, 0x10b981, true);
+    nominalRing.name = 'nominalRing';
+    nominalRing.visible = showZones;
+    robotGroup.add(nominalRing);
+
+    // 2. Outer / Maximum Physical Reach Limit (R = 0.385m, Amber) - absolute reach boundary
+    const maxReachRadius = is101 ? 0.385 : 0.375;
+    const maxRing = createCircleRing(maxReachRadius, 0xf59e0b, true);
+    maxRing.name = 'maxRing';
+    maxRing.visible = showZones;
+    robotGroup.add(maxRing);
+
+    // 3. Base Mounting Plate Floor Perimeter (R = 0.065m, Slate/Indigo)
+    const baseMountRing = createCircleRing(0.065, 0x6366f1, false);
+    baseMountRing.name = 'baseMountRing';
+    baseMountRing.visible = showZones;
+    robotGroup.add(baseMountRing);
+
+    // 4. Reach Ring Diagnostic Labels
+    const nominalLabel = createTextSprite("Nominal Reach (22cm)", "#064e3b", "#34d399", "#059669");
+    nominalLabel.position.set(0, 0.22, 0.003);
+    nominalLabel.scale.set(0.14, 0.022, 1);
+    nominalLabel.name = 'nominalLabel';
+    nominalLabel.visible = showZones;
+    robotGroup.add(nominalLabel);
+
+    const maxLabel = createTextSprite(`Max Reach (${(maxReachRadius * 100).toFixed(1)}cm)`, "#78350f", "#fcd34d", "#d97706");
+    maxLabel.position.set(0, maxReachRadius, 0.003);
+    maxLabel.scale.set(0.15, 0.022, 1);
+    maxLabel.name = 'maxLabel';
+    maxLabel.visible = showZones;
+    robotGroup.add(maxLabel);
+
   }, [robotConfig]);
+
+  // Sync workspace layout zones and reach ring visibility when user toggles 'showZones'
+  useEffect(() => {
+    if (zonesGroupRef.current) {
+      zonesGroupRef.current.visible = showZones;
+    }
+    if (robotGroupRef.current) {
+      const ringNames = ['nominalRing', 'maxRing', 'baseMountRing', 'nominalLabel', 'maxLabel'];
+      ringNames.forEach((n) => {
+        const obj = robotGroupRef.current.getObjectByName(n);
+        if (obj) obj.visible = showZones;
+      });
+    }
+  }, [showZones]);
 
   useEffect(() => {
     if (!robotGroupRef.current) return;
@@ -764,6 +1062,9 @@ export default function Viewport3D({
         if (onUpdateRobotConfig) {
           onUpdateRobotConfig(data.config);
         }
+        if (mode === 'recommended') {
+          setViewPreset('iso');
+        }
       }
     } catch (e) {
       console.error('Auto-align failed:', e);
@@ -822,13 +1123,22 @@ export default function Viewport3D({
       <div className="absolute top-3 right-3 flex items-center gap-1.5 bg-slate-900/90 backdrop-blur-md border border-slate-700/70 p-1 rounded-xl text-[11px] z-10 shadow-lg flex-wrap justify-end">
         <div className="flex items-center gap-1 pr-1 border-r border-slate-700/80">
           <button
+            onClick={() => handleAutoAlign('recommended')}
+            disabled={isAligning}
+            className="px-2 py-1 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 font-semibold text-[10px] flex items-center gap-1 border border-indigo-500/50 transition-all active:scale-95 disabled:opacity-50 shadow-sm"
+            title="Set Recommended Workspace Layout: Base at Y=-40.6cm, Yaw=90°, facing tags beyond reach"
+          >
+            <Sparkles className="w-3 h-3 text-indigo-400" />
+            <span>Recommended</span>
+          </button>
+          <button
             onClick={() => handleAutoAlign('start')}
             disabled={isAligning || trajectoryPoses.length === 0}
-            className="px-2.5 py-1 rounded-lg bg-indigo-600/90 hover:bg-indigo-500 text-white font-medium text-[10px] flex items-center gap-1 shadow-sm transition-all active:scale-95 disabled:opacity-50"
+            className="px-2 py-1 rounded-lg bg-indigo-600/90 hover:bg-indigo-500 text-white font-medium text-[10px] flex items-center gap-1 shadow-sm transition-all active:scale-95 disabled:opacity-50"
             title="Set Robot Base so the gripper starts directly at the first point of the trajectory"
           >
             <Crosshair className="w-3 h-3 text-indigo-200" />
-            <span>Align to Start</span>
+            <span>To Start</span>
           </button>
           <button
             onClick={() => handleAutoAlign('optimal')}
@@ -836,8 +1146,7 @@ export default function Viewport3D({
             className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-[10px] flex items-center gap-1 border border-slate-700 transition-all active:scale-95 disabled:opacity-50"
             title="Optimize Robot Base position for maximum reach across the entire demonstration"
           >
-            <Sparkles className="w-3 h-3 text-purple-400" />
-            <span>Optimal Fit</span>
+            <span>Optimal</span>
           </button>
         </div>
 
@@ -854,6 +1163,19 @@ export default function Viewport3D({
             </button>
           ))}
         </div>
+
+        <button
+          onClick={() => setShowZones(!showZones)}
+          className={`px-2 py-1 rounded-lg transition-all flex items-center gap-1 text-[10px] font-medium border ${
+            showZones
+              ? 'bg-cyan-600/30 text-cyan-200 border-cyan-500/50 shadow-sm'
+              : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
+          }`}
+          title={showZones ? 'Hide Workspace Layout Zones' : 'Show Workspace Layout Zones (Reference, Manipulation, Reach)'}
+        >
+          <Layers className="w-3 h-3 text-cyan-400" />
+          <span>Zones</span>
+        </button>
 
         <div className="flex items-center gap-0.5 bg-slate-950/60 p-0.5 rounded-lg border border-slate-800">
           <button
