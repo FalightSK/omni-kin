@@ -55,11 +55,11 @@ export default function App() {
   const [isRobotModalOpen, setIsRobotModalOpen] = useState(false);
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [robotConfig, setRobotConfig] = useState({
-    robot_type: 'so101',
-    offset_x: 0.20,
-    offset_y: 0.00,
+    robot_type: 'so_arm101_omni_kin',
+    offset_x: 0.038,
+    offset_y: -0.406,
     offset_z: 0.00,
-    yaw_deg: 0.0
+    yaw_deg: 90.0
   });
 
   const fetchEpisodes = async (preferredIndex = null) => {

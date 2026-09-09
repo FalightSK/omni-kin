@@ -4,6 +4,7 @@ Denavit-Hartenberg (DH) Kinematics Engine for SO-100 and SO-101 Robot Arms
 Includes WorkspaceCalibrator for ArUco Table-Plane-to-Robot-Base Coordinate Transformations
 """
 
+import os
 import numpy as np
 import xml.etree.ElementTree as ET
 
@@ -117,6 +118,59 @@ SO101_DH_TABLE = [
         "type": "revolute",
         "theta_offset_deg": 0.0,
         "d": 0.110,  # Wrist to gripper tip (meters)
+        "a": 0.000,
+        "alpha_deg": 0.0,
+        "limits_deg": [-180.0, 180.0]
+    }
+]
+
+SO101_OMNIKIN_DH_TABLE = [
+    {
+        "joint_idx": 0,
+        "name": "base_yaw_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.119,  # Combined base (6.04cm) + shoulder (5.87cm) height
+        "a": 0.000,
+        "alpha_deg": 90.0,
+        "limits_deg": [-105.0, 105.0]
+    },
+    {
+        "joint_idx": 1,
+        "name": "shoulder_pitch_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.000,
+        "a": 0.140,  # Upper arm length (meters)
+        "alpha_deg": 0.0,
+        "limits_deg": [-185.0, 15.0]
+    },
+    {
+        "joint_idx": 2,
+        "name": "elbow_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.000,
+        "a": 0.135,  # Lower arm length (meters)
+        "alpha_deg": 0.0,
+        "limits_deg": [0.0, 190.0]
+    },
+    {
+        "joint_idx": 3,
+        "name": "wrist_pitch_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.000,
+        "a": 0.000,
+        "alpha_deg": 90.0,
+        "limits_deg": [-100.0, 100.0]
+    },
+    {
+        "joint_idx": 4,
+        "name": "wrist_roll_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.110,  # Wrist to gripper tip (5.85cm + 5.15cm)
         "a": 0.000,
         "alpha_deg": 0.0,
         "limits_deg": [-180.0, 180.0]
@@ -412,6 +466,12 @@ class SO100Kinematics(DHKinematics):
         super().__init__(SO100_DH_TABLE, model_name="SO-100")
 
 
+class SO101OmniKinKinematics(DHKinematics):
+    """SO-ARM101-OMNI-KIN 5-DOF Robot Arm Kinematics (Default Project Setup)."""
+    def __init__(self):
+        super().__init__(SO101_OMNIKIN_DH_TABLE, model_name="SO-ARM101-OMNI-KIN")
+
+
 class SO101Kinematics(DHKinematics):
     """SO-101 5-DOF Robot Arm Kinematics (Refined Open Hardware Preset)."""
     def __init__(self):
@@ -419,6 +479,14 @@ class SO101Kinematics(DHKinematics):
 
 
 ROBOT_PRESETS = {
+    "so_arm101_omni_kin": {
+        "name": "SO-ARM101-OMNI-KIN (Default)",
+        "description": "Custom OMNI-KIN 5-DOF Manipulator with URDF-matched kinematic parameters, reinforced brackets, and Feetech STS3215 servos.",
+        "class": SO101OmniKinKinematics,
+        "dh_table": SO101_OMNIKIN_DH_TABLE,
+        "reach_meters": 0.385,
+        "payload_kg": 0.50
+    },
     "so101": {
         "name": "SO-101 (Refined)",
         "description": "5-DOF Open Manipulator with reinforced structural brackets and Feetech STS3215 servos.",
@@ -438,29 +506,41 @@ ROBOT_PRESETS = {
 }
 
 
-def get_robot_solver(robot_type="so101"):
+def normalize_robot_type(robot_type):
+    """Normalizes robot type string and resolves aliases."""
+    if not robot_type:
+        return "so_arm101_omni_kin"
+    r = str(robot_type).lower().strip().replace("-", "_")
+    if "omni" in r or "arm101" in r:
+        return "so_arm101_omni_kin"
+    if "100" in r:
+        return "so100"
+    if "101" in r:
+        return "so101"
+    return r if r in ROBOT_PRESETS else "so_arm101_omni_kin"
+
+
+def get_robot_solver(robot_type="so_arm101_omni_kin"):
     """Factory helper to obtain the kinematic solver instance."""
-    r_type = robot_type.lower()
+    r_type = normalize_robot_type(robot_type)
     if r_type in ROBOT_PRESETS:
         return ROBOT_PRESETS[r_type]["class"]()
-    return SO101Kinematics()
+    return SO101OmniKinKinematics()
 
 
-def get_robot_specs(robot_type="so101"):
+def get_robot_specs(robot_type="so_arm101_omni_kin"):
     """Returns metadata and DH table for the specified robot preset."""
-    r_type = robot_type.lower()
-    if r_type in ROBOT_PRESETS:
-        preset = ROBOT_PRESETS[r_type]
-        return {
-            "robot_type": r_type,
-            "name": preset["name"],
-            "description": preset["description"],
-            "reach_meters": preset["reach_meters"],
-            "payload_kg": preset["payload_kg"],
-            "dh_table": preset["dh_table"],
-            "urdf": get_robot_urdf(r_type)
-        }
-    return get_robot_specs("so101")
+    r_type = normalize_robot_type(robot_type)
+    preset = ROBOT_PRESETS.get(r_type, ROBOT_PRESETS["so_arm101_omni_kin"])
+    return {
+        "robot_type": r_type,
+        "name": preset["name"],
+        "description": preset["description"],
+        "reach_meters": preset["reach_meters"],
+        "payload_kg": preset["payload_kg"],
+        "dh_table": preset["dh_table"],
+        "urdf": get_robot_urdf(r_type)
+    }
 
 
 # ==============================================================================
@@ -705,32 +785,38 @@ class URDFParser:
         # Extract link lengths
         # L1: Base to shoulder height
         j0 = arm_joints[0] if len(arm_joints) > 0 else None
-        L1 = abs(j0["xyz"][2]) if j0 and abs(j0["xyz"][2]) > 0.01 else 0.118
-        if L1 < 0.01 and j0:
-            L1 = float(np.linalg.norm(j0["xyz"]))
+        j1 = arm_joints[1] if len(arm_joints) > 1 else None
+        z0 = abs(j0["xyz"][2]) if j0 else 0.0
+        z1 = abs(j1["xyz"][2]) if j1 else 0.0
+        if z0 + z1 > 0.08:
+            L1 = z0 + z1
+        else:
+            L1 = abs(j0["xyz"][2]) if j0 and abs(j0["xyz"][2]) > 0.01 else 0.119
+            if L1 < 0.01 and j0:
+                L1 = float(np.linalg.norm(j0["xyz"]))
 
         # L2: Upper arm length
         j2 = arm_joints[2] if len(arm_joints) > 2 else None
-        L2 = abs(j2["xyz"][0]) if j2 and abs(j2["xyz"][0]) > 0.01 else 0.140
-        if L2 < 0.01 and j2:
-            L2 = float(np.linalg.norm(j2["xyz"]))
+        if j2:
+            norm2 = float(np.linalg.norm(j2["xyz"]))
+            L2 = norm2 if norm2 > 0.05 else 0.140
+        else:
+            L2 = 0.140
 
         # L3: Forearm length
         j3 = arm_joints[3] if len(arm_joints) > 3 else None
-        L3 = abs(j3["xyz"][0]) if j3 and abs(j3["xyz"][0]) > 0.01 else 0.145
-        if L3 < 0.01 and j3:
-            L3 = float(np.linalg.norm(j3["xyz"]))
+        if j3:
+            norm3 = float(np.linalg.norm(j3["xyz"]))
+            L3 = norm3 if norm3 > 0.05 else 0.135
+        else:
+            L3 = 0.135
 
         # L4: Wrist to gripper tip
         L4 = 0.110
         if gripper_joint:
-            L4_cand = abs(gripper_joint["xyz"][0]) or abs(gripper_joint["xyz"][2])
-            if L4_cand > 0.01:
-                L4 = L4_cand
-            else:
-                norm_val = float(np.linalg.norm(gripper_joint["xyz"]))
-                if norm_val > 0.01:
-                    L4 = norm_val
+            norm_grip = float(np.linalg.norm(gripper_joint["xyz"]))
+            if norm_grip > 0.03:
+                L4 = norm_grip
 
         # Construct DH Table
         dh_table = [
@@ -881,10 +967,18 @@ class URDFParser:
         return urdf
 
 
-def get_robot_urdf(robot_type="so101"):
+def get_robot_urdf(robot_type="so_arm101_omni_kin"):
     """Returns the URDF XML template for the requested robot preset."""
-    r_type = robot_type.lower()
-    if r_type == "so100":
+    r_type = normalize_robot_type(robot_type)
+    if r_type == "so_arm101_omni_kin":
+        omnikin_path = os.path.join(os.path.dirname(__file__), "SO-ARM101-OMNI-KIN.urdf")
+        if os.path.exists(omnikin_path):
+            try:
+                with open(omnikin_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+    elif r_type == "so100":
         return SO100_URDF_TEMPLATE
     return SO101_URDF_TEMPLATE
 

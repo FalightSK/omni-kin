@@ -1,7 +1,148 @@
 {
-  "robot_type": "so101",
+  "robot_type": "so_arm101_omni_kin",
   "offset_x": 0.038,
   "offset_y": -0.406,
   "offset_z": 0.0,
-  "yaw_deg": 90.0
+  "yaw_deg": 90.0,
+  "custom_dh_table": [
+    {
+      "joint_idx": 0,
+      "name": "base_yaw_joint",
+      "type": "revolute",
+      "theta_offset_deg": 0.0,
+      "d": 0.0604,
+      "a": 0.0,
+      "alpha_deg": 90.0,
+      "limits_deg": [
+        -105.0,
+        105.0
+      ]
+    },
+    {
+      "joint_idx": 1,
+      "name": "shoulder_pitch_joint",
+      "type": "revolute",
+      "theta_offset_deg": 0.0,
+      "d": 0.0,
+      "a": 0.0197,
+      "alpha_deg": 0.0,
+      "limits_deg": [
+        -185.0,
+        15.0
+      ]
+    },
+    {
+      "joint_idx": 2,
+      "name": "elbow_joint",
+      "type": "revolute",
+      "theta_offset_deg": 0.0,
+      "d": 0.0,
+      "a": 0.145,
+      "alpha_deg": 0.0,
+      "limits_deg": [
+        0.0,
+        190.0
+      ]
+    },
+    {
+      "joint_idx": 3,
+      "name": "wrist_pitch_joint",
+      "type": "revolute",
+      "theta_offset_deg": 0.0,
+      "d": 0.0,
+      "a": 0.0,
+      "alpha_deg": 90.0,
+      "limits_deg": [
+        -100.0,
+        100.0
+      ]
+    },
+    {
+      "joint_idx": 4,
+      "name": "wrist_roll_joint",
+      "type": "revolute",
+      "theta_offset_deg": 0.0,
+      "d": 0.06,
+      "a": 0.0,
+      "alpha_deg": 0.0,
+      "limits_deg": [
+        -180.0,
+        180.0
+      ]
+    }
+  ],
+  "custom_specs": {
+    "robot_name": "SO-ARM101-OMNI-KIN",
+    "total_joints_parsed": 6,
+    "revolute_joints": 5,
+    "reach_meters": 0.225,
+    "payload_kg": 0.5,
+    "dh_table": [
+      {
+        "joint_idx": 0,
+        "name": "base_yaw_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.0604,
+        "a": 0.0,
+        "alpha_deg": 90.0,
+        "limits_deg": [
+          -105.0,
+          105.0
+        ]
+      },
+      {
+        "joint_idx": 1,
+        "name": "shoulder_pitch_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.0,
+        "a": 0.0197,
+        "alpha_deg": 0.0,
+        "limits_deg": [
+          -185.0,
+          15.0
+        ]
+      },
+      {
+        "joint_idx": 2,
+        "name": "elbow_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.0,
+        "a": 0.145,
+        "alpha_deg": 0.0,
+        "limits_deg": [
+          0.0,
+          190.0
+        ]
+      },
+      {
+        "joint_idx": 3,
+        "name": "wrist_pitch_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.0,
+        "a": 0.0,
+        "alpha_deg": 90.0,
+        "limits_deg": [
+          -100.0,
+          100.0
+        ]
+      },
+      {
+        "joint_idx": 4,
+        "name": "wrist_roll_joint",
+        "type": "revolute",
+        "theta_offset_deg": 0.0,
+        "d": 0.06,
+        "a": 0.0,
+        "alpha_deg": 0.0,
+        "limits_deg": [
+          -180.0,
+          180.0
+        ]
+      }
+    ]
+  }
 }
