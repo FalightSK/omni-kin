@@ -49,11 +49,11 @@ os.makedirs(EXPORT_DIR, exist_ok=True)
 
 def load_robot_config():
     default_cfg = {
-        "robot_type": "so101",
-        "offset_x": 0.20,
-        "offset_y": 0.00,
+        "robot_type": "so_arm101_omni_kin",
+        "offset_x": 0.038,
+        "offset_y": -0.406,
         "offset_z": 0.00,
-        "yaw_deg": 0.0
+        "yaw_deg": 90.0
     }
     if os.path.exists(ROBOT_CONFIG_FILE):
         try:
@@ -1173,6 +1173,7 @@ async def get_robot_config():
     and Denavit-Hartenberg (DH) parameter specifications for all available presets.
     """
     presets = [
+        get_robot_specs("so_arm101_omni_kin"),
         get_robot_specs("so101"),
         get_robot_specs("so100")
     ]
@@ -1192,7 +1193,8 @@ async def update_robot_config(request: Request):
     try:
         payload = await request.json()
         if "robot_type" in payload:
-            r_type = str(payload["robot_type"]).lower()
+            from robot_kinematics import normalize_robot_type
+            r_type = normalize_robot_type(payload["robot_type"])
             if r_type in ROBOT_PRESETS:
                 ROBOT_CONFIG["robot_type"] = r_type
         if "offset_x" in payload:

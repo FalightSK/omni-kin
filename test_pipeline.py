@@ -90,7 +90,7 @@ def test_lerobot_export():
 
     with open(info_path, "r", encoding="utf-8") as f:
         info_json = json.load(f)
-    assert info_json['robot_type'] in ['so100', 'so101']
+    assert info_json['robot_type'] in ['so_arm101_omni_kin', 'so100', 'so101']
     assert 'workspace_calibration' in info_json
     assert 'dh_table' in info_json
     assert info_json['total_episodes'] == 2

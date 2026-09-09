@@ -143,7 +143,7 @@ function orientCylinder(mesh, pA, pB, radius) {
 export default function Viewport3D({
   trajectoryPoses = [],
   currentFrameIndex = 0,
-  robotConfig = { robot_type: 'so101', offset_x: 0.20, offset_y: 0.00, offset_z: 0.00, yaw_deg: 0.0 },
+  robotConfig = { robot_type: 'so_arm101_omni_kin', offset_x: 0.038, offset_y: -0.406, offset_z: 0.00, yaw_deg: 90.0 },
   onUpdateRobotConfig = null,
   episodeId = null
 }) {
@@ -489,16 +489,18 @@ export default function Viewport3D({
     }
 
     const {
-      offset_x = 0.20,
-      offset_y = 0.00,
+      offset_x = 0.038,
+      offset_y = -0.406,
       offset_z = 0.00,
-      yaw_deg = 0.0,
-      robot_type = 'so101'
+      yaw_deg = 90.0,
+      robot_type = 'so_arm101_omni_kin'
     } = robotConfig || {};
     const yawRad = THREE.MathUtils.degToRad(yaw_deg);
-    const is101 = robot_type.toLowerCase() === 'so101';
+    const rType = (robot_type || 'so_arm101_omni_kin').toLowerCase();
+    const is100 = rType.includes('100') && !rType.includes('101');
+    const is101 = !is100;
 
-    const L1 = is101 ? 0.118 : 0.115;
+    const L1 = is100 ? 0.115 : 0.119;
 
     const robotGroup = new THREE.Group();
     robotGroup.position.set(offset_x, offset_y, offset_z + 0.001);
@@ -611,21 +613,29 @@ export default function Viewport3D({
     if (!robotGroupRef.current) return;
 
     const {
-      offset_x = 0.20,
-      offset_y = 0.00,
+      offset_x = 0.038,
+      offset_y = -0.406,
       offset_z = 0.00,
-      yaw_deg = 0.0,
-      robot_type = 'so101'
+      yaw_deg = 90.0,
+      robot_type = 'so_arm101_omni_kin'
     } = robotConfig || {};
     const yawRad = THREE.MathUtils.degToRad(yaw_deg);
-    const is101 = robot_type.toLowerCase() === 'so101';
+    const rType = (robot_type || 'so_arm101_omni_kin').toLowerCase();
+    const is100 = rType.includes('100') && !rType.includes('101');
+    const isOmni = rType.includes('omni');
 
-    const L1 = is101 ? 0.118 : 0.115;
-    const L2 = is101 ? 0.140 : 0.135;
-    const L3 = is101 ? 0.145 : 0.140;
-    const L4 = is101 ? 0.110 : 0.105;
+    const L1 = is100 ? 0.115 : 0.119;
+    const L2 = is100 ? 0.135 : 0.140;
+    const L3 = isOmni ? 0.135 : (is100 ? 0.140 : 0.145);
+    const L4 = is100 ? 0.105 : 0.110;
 
-    const jointLimits = [
+    const jointLimits = isOmni ? [
+      [-1.833, 1.833],
+      [-3.229, 0.262],
+      [0.0, 3.316],
+      [-1.745, 1.745],
+      [-Math.PI, Math.PI]
+    ] : [
       [-Math.PI, Math.PI],
       [-1.745, 1.745],
       [-2.618, 2.618],
@@ -762,7 +772,7 @@ export default function Viewport3D({
     }
   };
 
-  const { offset_x = 0.20, offset_y = 0.00, yaw_deg = 0.0, robot_type = 'so101' } = robotConfig || {};
+  const { offset_x = 0.038, offset_y = -0.406, yaw_deg = 90.0, robot_type = 'so_arm101_omni_kin' } = robotConfig || {};
 
   return (
     <div className="w-full h-full relative select-none overflow-hidden group">
@@ -779,7 +789,7 @@ export default function Viewport3D({
           <span>ArUco (0,0)</span>
           <span className="text-slate-600">|</span>
           <span className="font-semibold text-indigo-300">
-            🤖 {robot_type.toUpperCase()} Base: ({(offset_x * 100).toFixed(0)}cm, {(offset_y * 100).toFixed(0)}cm, {yaw_deg.toFixed(0)}°)
+            🤖 {robot_type.toUpperCase().replace(/_/g, '-')} Base: ({(offset_x * 100).toFixed(0)}cm, {(offset_y * 100).toFixed(0)}cm, {yaw_deg.toFixed(0)}°)
           </span>
         </div>
 

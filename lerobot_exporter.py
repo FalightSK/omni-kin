@@ -28,14 +28,14 @@ class LeRobotExporter:
     Exports episode datasets into the standard Hugging Face LeRobot directory schema.
     """
 
-    def __init__(self, output_dir="lerobot_dataset", fps=30, robot_type="so101", workspace_calibrator=None):
+    def __init__(self, output_dir="lerobot_dataset", fps=30, robot_type="so_arm101_omni_kin", workspace_calibrator=None):
         self.output_dir = output_dir
         self.fps = fps
         self.robot_type = robot_type
         self.ik_solver = get_robot_solver(robot_type)
         self.workspace_calibrator = workspace_calibrator or WorkspaceCalibrator()
 
-    def set_robot_config(self, robot_type="so101", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0):
+    def set_robot_config(self, robot_type="so_arm101_omni_kin", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0):
         """
         Updates the active robot model preset and ArUco table-plane workspace offset.
         """

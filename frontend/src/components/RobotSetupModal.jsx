@@ -19,11 +19,11 @@ import {
 
 export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfigSaved }) {
   const [config, setConfig] = useState({
-    robot_type: 'so101',
-    offset_x: 0.20,
-    offset_y: 0.00,
+    robot_type: 'so_arm101_omni_kin',
+    offset_x: 0.038,
+    offset_y: -0.406,
     offset_z: 0.00,
-    yaw_deg: 0.0
+    yaw_deg: 90.0
   });
   const [presets, setPresets] = useState([]);
   const [activeTab, setActiveTab] = useState('offset'); // 'offset' | 'dh_table' | 'urdf'
@@ -249,7 +249,7 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
             <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider block mb-2">
               Robot Embodiment Model Preset
             </label>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               {presets.map((p) => {
                 const isSelected = p.robot_type === config.robot_type && !customDhTable;
                 return (
