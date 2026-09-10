@@ -1,72 +1,112 @@
-# Continuity Plan & Roadmap - Mobile Trajectory Collector
+﻿# CONTINUITY.md — Mobile Dataset Collector
+**Last updated**: 2026-09-10
 
-This document outlines the continuity plan, architectural decisions, and future extension milestones for scaling the **Mobile Smartphone Trajectory Collector & LeRobot Exporter**.
-
----
-
-## 📌 Current Accomplishments (Phase 1)
-
-*   [x] **Mobile Capture Interface**: HTML5/FastAPI web interface capturing camera video stream + high-frequency IMU sensor events (`DeviceMotionEvent`) over local Wi-Fi.
-*   [x] **Target Robot Embodiment**: Kinematics solver for **SO-100** (5-DoF + Gripper arm) with forward/inverse kinematics and workspace mapping (`robot_kinematics.py`).
-*   [x] **Trajectory Processing**: IMU sensor fusion, orientation smoothing, gravity removal, and trajectory interpolation (`trajectory_estimator.py`).
-*   [x] **LeRobot Dataset Standard Exporter**: Writes Parquet files, `info.json`, `stats.json`, episode lookup tables, and MP4 video streams matching Hugging Face LeRobot v3.0 schema (`lerobot_exporter.py`).
-*   [x] **Desktop Dashboard**: Three.js 3D trajectory visualizer and episode manager (`templates/index.html`).
-*   [x] **Simulation Replay**: NVIDIA Isaac Lab 3D physics simulation replay bridge (`isaac_lab_replay.py`).
+This document records the current system state, architectural decisions, and next steps for contributors or future sessions.
 
 ---
 
-## 🛣️ Development Roadmap (Phase 2 & Beyond)
+## Current State
 
-### Phase 2: Hardware Extensions & Precise Scale Calibration
-1. **GoPro Wide-Angle / Fisheye Support**:
-   - Integrate GoPro Hero video + 200 Hz IMU telemetry logging (via `gpmf-parser` or `telemetry-parser`).
-   - Run Visual-Inertial SLAM (ORB-SLAM3 VI-SLAM) to recover exact metric scale (meters) for rapid dynamic human demonstrations.
-2. **Gripper Jaw & Finger Width Tracking**:
-   - Integrate side-view mirror optical tracking or ArUco/AprilTag markers on physical handheld gripper jaws to measure continuous finger aperture $w_t \in [0, 1]$.
-   - Support optional Bluetooth rotary potentiometer / linear encoder logging for analog gripper feedback.
+All core phases are implemented and verified. The system is production-ready for data collection and LeRobot export.
 
-### Phase 3: Multi-Embodiment Kinematics Adapters
-1. **Modular Embodiment Architecture**:
-   - Refactor `robot_kinematics.py` into abstract `BaseKinematics` class.
-   - Implement plugins for additional robot arms:
-     - **Koch v1.1** (5-DoF / 6-DoF arm)
-     - **Franka Emika Panda** (7-DoF arm)
-     - **UR5e / UR10e** (6-DoF industrial arm)
-     - **Kuka LBR iiwa**
+### Implemented
 
-### Phase 4: Policy Training & Deployment (LeRobot Integration)
-1. **Direct Imitation Learning Policy Training**:
-   - Train **Diffusion Policy** or **Action Chunking Transformer (ACT)** using the exported LeRobot dataset:
-     ```bash
-     python lerobot/scripts/train.py \
-         --dataset_path lerobot_exports/mobile_so100_demo \
-         --policy diffusion \
-         --env so100
-     ```
-2. **Inference-Time Latency Matching**:
-   - Implement timestamp-querying at $t + \delta t_{\text{latency}}$ during real-world robot execution to match control loop latencies.
+| Phase | Status | Description |
+|-------|--------|-------------|
+| ArUco tracking + EKF | Done | Dual-tag 8-point PnP, 12-state EKF, UMI occlusion spline |
+| Mobile capture UI | Done | 720p 30fps, 100Hz IMU, adaptive codec (H.264 priority) |
+| Robot IK engine | Done | DH chain, 5-DOF solver, workspace + camera calibration |
+| Universal generalization | Done | Dynamic wrist pitch index, 3D Euclidean clearance, auto collision sign |
+| Camera crash prevention | Done | `q3_safe_max_deg` limits + asymmetric penalty + 3D clearance penalty |
+| Two trajectory modes | Done | `free_form` (pretraining) and `initial_aware` (fine-tuning, approach spline) |
+| 3D visualization | Done | Three.js arm preview, no box meshes, focal sphere camera node |
+| LeRobot export | Done | Audited and fixed: dynamic joint names, float32 precision, all invariants verified |
+| URDF parsing | Done | Any 5-6 DOF URDF -> DH table + joint names auto-extracted |
 
 ---
 
-## 🔧 Environment Maintenance & Dependencies
+## Architecture Summary
 
-*   **Main Collector Environment**:
-    *   Miniconda path: `C:\Users\SK\miniconda3\envs\lerobot_collector`
-    *   Python Version: `3.10`
-    *   Key packages: `fastapi`, `uvicorn`, `numpy`, `scipy`, `pandas`, `pyarrow`, `opencv-python`, `jinja2`.
-*   **Isaac Lab Environment**:
-    *   Miniconda path: `C:\Users\SK\miniconda3\envs\isaac_lab`
-    *   Package: `isaaclab` (Omniverse app launcher + physics simulation).
+```
+Phone (browser)
+  MobileLogger.jsx  --(WebSocket/HTTP)-->  server.py (FastAPI :8000)
+                                           |-- VisualInertialTracker  (visual_tracker.py)
+                                           |-- WorkspaceCalibrator    (robot_kinematics.py)
+                                           |-- CameraGripperCalibrator
+                                           |-- TrajectoryPlanner
+                                           |-- LeRobotExporter        (lerobot_exporter.py)
+                                           `-- EPISODES_DB
+
+Desktop (browser)
+  Dashboard.jsx      -- episode manager, export controls
+  Viewport3D.jsx     -- Three.js 3D preview, JS IK solver
+  RobotSetupModal    -- URDF upload, workspace offsets, wrist safety, initial position
+```
+
+Config is persisted in `robot_config.json` and reloaded on server restart.
 
 ---
 
-## 🤝 Handover & Continuity Notes
+## Key Invariants (Verified)
 
-1. **Running the System**:
-   - Activate `lerobot_collector` and run `python server.py`.
-   - Access `http://localhost:8000` on desktop or `http://<IP>:8000/mobile` on phone.
-2. **Replaying Data in Isaac Lab**:
-   - Trigger from dashboard button **"🎮 Replay in Isaac Lab"** or execute:
-     `C:\Users\SK\miniconda3\envs\isaac_lab\python.exe isaac_lab_replay.py`
-3. **Repository Control**:
-   - All source code and test files are committed to Git version control.
+- `action[i] == joint_states[i+1]` for all frames except last
+- `action[-1] == joint_states[-1]` (terminal copy)
+- `next.done=True` exactly once per episode (last frame only)
+- `episode_index` sequential 0-based; `frame_index` resets per episode
+- `index` globally monotonic across all episodes
+- Joint feature names in `info.json` derived from DH table (not hardcoded)
+- Wrist pitch clamping uses dynamic `wrist_pitch_idx` (not hardcoded column 3)
+- Camera crash prevention correct for both standard (+1) and inverted (-1) axis arms
+
+---
+
+## Open Items
+
+| Item | Priority | Notes |
+|------|----------|-------|
+| H.264 video re-encode | Medium | Exported MP4 uses `mp4v`; re-encode with `ffmpeg -vcodec libx264` for browser playback |
+| 6-DOF URDF support | Low | Currently maps 6-DOF to 5-DOF DH; last DOF is discarded |
+| LeRobot policy training integration | Future | Pass exported dataset to ACT/Diffusion Policy trainer |
+
+---
+
+## Environment
+
+| Env | Path | Python | Use |
+|-----|------|--------|-----|
+| `lerobot_collector` | `C:\Users\SK\miniconda3\envs\lerobot_collector` | 3.10 | Server + exporter |
+
+Key packages: `fastapi`, `uvicorn`, `numpy`, `scipy`, `pandas`, `pyarrow`, `opencv-python`, `jinja2`
+
+Frontend: Node 18+, React 18, Three.js 0.160, Vite 5, Tailwind CSS 3
+
+---
+
+## Running the System
+
+```bash
+# Backend (always required)
+C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe server.py
+
+# Frontend dev server (optional, for development only)
+cd frontend && npm run dev
+
+# Rebuild frontend for production
+cd frontend && npm run build
+```
+
+URLs:
+- Dashboard: `http://localhost:8000` (prod) or `http://localhost:3000` (dev)
+- Phone logger: `http://<LAN_IP>:8000/mobile`
+- ArUco print sheet: `http://localhost:8000/api/marker/print_dual`
+
+---
+
+## Test Suite
+
+```bash
+C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_aruco_pipeline.py
+C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_robot_kinematics.py
+C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_pipeline.py
+C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_urdf_converter.py
+```
