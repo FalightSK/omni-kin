@@ -280,13 +280,13 @@ class LeRobotExporter:
                     'index': global_frame_idx,
                     'episode_index': ep_idx,
                     'frame_index': f_idx,
-                    'timestamp': float(timestamps[f_idx]),
+                    'timestamp': float(np.float32(timestamps[f_idx])),
                     'next.done': is_done,
                     'task_index': task_idx,
                     'task': str(task),
-                    'observation.state': joint_states[f_idx].tolist(),
-                    'observation.ee_pose': ee_poses[f_idx].tolist(),
-                    'action': actions[f_idx].tolist()
+                    'observation.state': joint_states[f_idx].astype(np.float32).tolist(),
+                    'observation.ee_pose': ee_poses[f_idx].astype(np.float32).tolist(),
+                    'action': actions[f_idx].astype(np.float32).tolist()
                 }
                 all_rows.append(row)
                 global_frame_idx += 1
@@ -348,6 +348,10 @@ class LeRobotExporter:
 
         # 5. Save Info Configuration (meta/info.json)
         robot_specs = get_robot_specs(self.robot_type)
+        # Derive joint names from DH table (generalized for any embodiment), append "gripper"
+        dh_joint_names = [row.get("name", f"q{i}") for i, row in enumerate(robot_specs["dh_table"])]
+        joint_feature_names = dh_joint_names + ["gripper"]
+        num_joints = len(joint_feature_names)
         info = {
             "codebase_version": "v2.0",
             "robot_type": self.robot_type,
@@ -370,8 +374,8 @@ class LeRobotExporter:
                 },
                 "observation.state": {
                     "dtype": "float32",
-                    "shape": [6],
-                    "names": ["q0_base_yaw", "q1_shoulder_pitch", "q2_elbow_pitch", "q3_wrist_pitch", "q4_wrist_roll", "gripper"]
+                    "shape": [num_joints],
+                    "names": joint_feature_names
                 },
                 "observation.ee_pose": {
                     "dtype": "float32",
@@ -380,8 +384,8 @@ class LeRobotExporter:
                 },
                 "action": {
                     "dtype": "float32",
-                    "shape": [6],
-                    "names": ["q0_base_yaw", "q1_shoulder_pitch", "q2_elbow_pitch", "q3_wrist_pitch", "q4_wrist_roll", "gripper"]
+                    "shape": [num_joints],
+                    "names": joint_feature_names
                 },
                 "next.done": {"dtype": "bool", "shape": [1]},
                 "episode_index": {"dtype": "int64", "shape": [1]},
@@ -394,6 +398,7 @@ class LeRobotExporter:
         }
         with open(os.path.join(meta_dir, "info.json"), "w") as f:
             json.dump(info, f, indent=2)
+
 
         print(f"[OK] Successfully exported LeRobot dataset ({len(episodes_data)} episodes, {global_frame_idx} frames) to: {export_path}")
         return export_path
