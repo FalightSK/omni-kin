@@ -20,7 +20,13 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-from robot_kinematics import get_robot_solver, get_robot_specs, WorkspaceCalibrator
+from robot_kinematics import (
+    get_robot_solver,
+    get_robot_specs,
+    WorkspaceCalibrator,
+    TrajectoryPlanner,
+    DEFAULT_INITIAL_POSITION
+)
 
 
 class LeRobotExporter:
@@ -28,27 +34,32 @@ class LeRobotExporter:
     Exports episode datasets into the standard Hugging Face LeRobot directory schema.
     """
 
-    def __init__(self, output_dir="lerobot_dataset", fps=30, robot_type="so_arm101_omni_kin", workspace_calibrator=None):
+    def __init__(self, output_dir="lerobot_dataset", fps=30, robot_type="so_arm101_omni_kin", workspace_calibrator=None, q3_safe_max_deg=0.0):
         self.output_dir = output_dir
         self.fps = fps
         self.robot_type = robot_type
-        self.ik_solver = get_robot_solver(robot_type)
+        self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
+        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg)
         self.workspace_calibrator = workspace_calibrator or WorkspaceCalibrator()
 
-    def set_robot_config(self, robot_type="so_arm101_omni_kin", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0):
+    def set_robot_config(self, robot_type="so_arm101_omni_kin", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0, q3_safe_max_deg=None):
         """
-        Updates the active robot model preset and ArUco table-plane workspace offset.
+        Updates the active robot model preset, workspace offset, and camera safe wrist limits.
         """
         self.robot_type = robot_type
-        self.ik_solver = get_robot_solver(robot_type)
+        if q3_safe_max_deg is not None:
+            self.q3_safe_max_deg = float(q3_safe_max_deg)
+        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg)
         self.workspace_calibrator.update_config(offset_x, offset_y, offset_z, yaw_deg)
 
-    def _ensure_joint_states_and_poses(self, ep):
+    def _ensure_joint_states_and_poses(self, ep, trajectory_mode="free_form", initial_position=None):
         """
         Extracts or computes both joint states [q0, q1, q2, q3, q4, gripper]
         and Cartesian EE poses [x, y, z, roll, pitch, yaw] with gripper.
+        When trajectory_mode == 'initial_aware', prepends a smooth quintic minimum-jerk
+        approach trajectory from the canonical Initial Position (Home) to the start waypoint.
         """
-        raw_poses = ep.get('poses') or ep.get('ee_poses')
+        raw_poses = ep.get('ee_poses') or ep.get('poses')
         gripper_states = ep.get('gripper_states')
         raw_joints = ep.get('joint_states')
 
@@ -81,7 +92,7 @@ class LeRobotExporter:
         if raw_joints is not None and len(raw_joints) == num_frames:
             joint_states = np.asarray(raw_joints, dtype=np.float32)
         else:
-            # Compute Inverse Kinematics for SO-100 arm from Cartesian EE Poses
+            # Compute Inverse Kinematics for arm from Cartesian EE Poses
             computed_joints = []
             for i in range(num_frames):
                 pose_i = ee_poses[i]
@@ -101,12 +112,72 @@ class LeRobotExporter:
             actions = np.roll(joint_states, -1, axis=0)
             actions[-1] = joint_states[-1]
 
+        # 4b. Enforce Universal Camera Safe Ceiling on Wrist Pitch Joint
+        wrist_idx = getattr(self.ik_solver, "wrist_pitch_idx", 3)
+        collision_sign = getattr(self.ik_solver, "wrist_collision_sign", 1)
+        if len(joint_states) > 0 and joint_states.shape[1] > wrist_idx:
+            if collision_sign > 0:
+                wrist_violations = np.sum(joint_states[:, wrist_idx] > self.q3_safe_max_deg + 1e-2)
+                if wrist_violations > 0:
+                    print(f"[LeRobot Exporter] 🛡️ Clamping {wrist_violations}/{num_frames} frames on joint {wrist_idx} to <= {self.q3_safe_max_deg}° (Camera crash prevention)")
+                    joint_states[:, wrist_idx] = np.minimum(joint_states[:, wrist_idx], float(self.q3_safe_max_deg))
+                    actions[:, wrist_idx] = np.minimum(actions[:, wrist_idx], float(self.q3_safe_max_deg))
+            else:
+                wrist_violations = np.sum(joint_states[:, wrist_idx] < -self.q3_safe_max_deg - 1e-2)
+                if wrist_violations > 0:
+                    print(f"[LeRobot Exporter] 🛡️ Clamping {wrist_violations}/{num_frames} frames on joint {wrist_idx} to >= {-self.q3_safe_max_deg}° (Camera crash prevention)")
+                    joint_states[:, wrist_idx] = np.maximum(joint_states[:, wrist_idx], -float(self.q3_safe_max_deg))
+                    actions[:, wrist_idx] = np.maximum(actions[:, wrist_idx], -float(self.q3_safe_max_deg))
+
         # 5. Resolve Timestamps
         raw_times = ep.get('timestamps')
         if raw_times is not None and len(raw_times) == num_frames:
             timestamps = np.asarray(raw_times, dtype=np.float32)
         else:
             timestamps = np.linspace(0, num_frames / self.fps, num_frames, dtype=np.float32)
+
+        # 6. Prepend Auto Approach Path if Initial-Position Aware Mode is active
+        if str(trajectory_mode).lower() == "initial_aware" and len(ee_poses) > 0:
+            try:
+                planner = TrajectoryPlanner(solver=self.ik_solver, workspace_calibrator=self.workspace_calibrator)
+                p_start_robot = ee_poses[0]
+                start_grip = float(grippers[0]) if len(grippers) > 0 else 100.0
+
+                init_cfg = dict(DEFAULT_INITIAL_POSITION)
+                if initial_position and isinstance(initial_position, dict):
+                    init_cfg.update(initial_position)
+
+                p_home_robot = np.array([
+                    float(init_cfg.get("x", 0.15)),
+                    float(init_cfg.get("y", 0.00)),
+                    float(init_cfg.get("z", 0.20)),
+                    np.radians(float(init_cfg.get("roll_deg", 0.0))),
+                    np.radians(float(init_cfg.get("pitch_deg", 0.0))),
+                    np.radians(float(init_cfg.get("yaw_deg", 0.0)))
+                ], dtype=np.float64)
+
+                approach_res = planner.plan_approach_path(
+                    p_start=p_start_robot,
+                    p_home=p_home_robot,
+                    duration_s=1.5,
+                    fps=self.fps,
+                    lift_clearance_m=0.06,
+                    home_gripper=float(init_cfg.get("gripper", 100.0)),
+                    start_gripper=start_grip,
+                    start_in_robot_frame=True
+                )
+
+                app_ee = np.asarray(approach_res['robot_ee_poses'], dtype=np.float32)
+                app_joints = np.asarray(approach_res['joint_states'], dtype=np.float32)
+                app_actions = np.asarray(approach_res['actions'], dtype=np.float32)
+
+                ee_poses = np.vstack([app_ee, ee_poses])
+                joint_states = np.vstack([app_joints, joint_states])
+                actions = np.vstack([app_actions, actions])
+                num_frames = len(ee_poses)
+                timestamps = np.linspace(0, num_frames / self.fps, num_frames, dtype=np.float32)
+            except Exception as e:
+                print(f"Warning: Failed to prepend approach path in export: {e}")
 
         return joint_states, ee_poses, actions, timestamps, num_frames
 
@@ -151,9 +222,10 @@ class LeRobotExporter:
         writer.release()
         return True
 
-    def export_dataset(self, episodes_data, dataset_name="mobile_aruco_3d_trajectories"):
+    def export_dataset(self, episodes_data, dataset_name="mobile_aruco_3d_trajectories", trajectory_mode="free_form", initial_position=None):
         """
         Exports episodes_data into the official Hugging Face LeRobot dataset schema.
+        Supports both 'free_form' (pretraining) and 'initial_aware' (fine-tuning) modes.
         """
         if not episodes_data:
             raise ValueError("No episodes provided for LeRobot export.")
@@ -187,7 +259,11 @@ class LeRobotExporter:
             task_idx = task_to_idx[task]
 
             # Robust data extraction & IK resolution
-            joint_states, ee_poses, actions, timestamps, num_frames = self._ensure_joint_states_and_poses(ep)
+            joint_states, ee_poses, actions, timestamps, num_frames = self._ensure_joint_states_and_poses(
+                ep,
+                trajectory_mode=trajectory_mode,
+                initial_position=initial_position
+            )
 
             all_states.append(joint_states)
             all_ee_poses.append(ee_poses)
@@ -276,6 +352,7 @@ class LeRobotExporter:
             "codebase_version": "v2.0",
             "robot_type": self.robot_type,
             "robot_name": robot_specs["name"],
+            "trajectory_mode": str(trajectory_mode).lower(),
             "workspace_calibration": self.workspace_calibrator.get_config(),
             "dh_table": robot_specs["dh_table"],
             "fps": self.fps,

@@ -1,16 +1,36 @@
 {
   "robot_type": "so_arm101_omni_kin",
-  "offset_x": 0.038,
-  "offset_y": -0.406,
+  "offset_x": 0.091,
+  "offset_y": -0.41,
   "offset_z": 0.0,
   "yaw_deg": 90.0,
+  "q3_safe_max_deg": 5.0,
+  "gripper_offset": {
+    "forward_cm": 12.8,
+    "height_cm": 10.9,
+    "lateral_cm": 0,
+    "pitch_deg": 40.4,
+    "roll_deg": 0,
+    "yaw_deg": 0,
+    "enabled": true
+  },
+  "initial_position": {
+    "x": 0.15,
+    "y": 0.0,
+    "z": 0.2,
+    "pitch_deg": 0.0,
+    "roll_deg": 0.0,
+    "yaw_deg": 0.0,
+    "gripper": 100.0,
+    "enabled": true
+  },
   "custom_dh_table": [
     {
       "joint_idx": 0,
       "name": "base_yaw_joint",
       "type": "revolute",
       "theta_offset_deg": 0.0,
-      "d": 0.119,
+      "d": 0.1191,
       "a": 0.0,
       "alpha_deg": 90.0,
       "limits_deg": [
@@ -54,7 +74,7 @@
       "alpha_deg": 90.0,
       "limits_deg": [
         -100.0,
-        100.0
+        0.0
       ]
     },
     {
@@ -73,7 +93,7 @@
   ],
   "custom_specs": {
     "robot_name": "SO-ARM101-OMNI-KIN",
-    "total_joints_parsed": 6,
+    "total_joints_parsed": 8,
     "revolute_joints": 5,
     "reach_meters": 0.385,
     "payload_kg": 0.5,
@@ -83,7 +103,7 @@
         "name": "base_yaw_joint",
         "type": "revolute",
         "theta_offset_deg": 0.0,
-        "d": 0.119,
+        "d": 0.1191,
         "a": 0.0,
         "alpha_deg": 90.0,
         "limits_deg": [
@@ -127,7 +147,7 @@
         "alpha_deg": 90.0,
         "limits_deg": [
           -100.0,
-          100.0
+          0.0
         ]
       },
       {
@@ -143,6 +163,176 @@
           180.0
         ]
       }
-    ]
+    ],
+    "components": {
+      "arm_body": {
+        "name": "Arm Body (5-DOF Serial Chain)",
+        "root_link": "base",
+        "links": [
+          {
+            "name": "base",
+            "mesh": "meshes/base.stl"
+          },
+          {
+            "name": "shoulder",
+            "mesh": "meshes/shoulder.stl"
+          },
+          {
+            "name": "upper_arm",
+            "mesh": "meshes/upper_arm.stl"
+          },
+          {
+            "name": "lower_arm",
+            "mesh": "meshes/lower_arm.stl"
+          },
+          {
+            "name": "wrist",
+            "mesh": "meshes/wrist.stl"
+          }
+        ],
+        "joints": [
+          {
+            "name": "base_yaw_joint",
+            "type": "revolute",
+            "parent": "base",
+            "child": "shoulder",
+            "axis": [
+              1.7955375789489858e-07,
+              1.814237100949273e-07,
+              0.9999999424949658
+            ],
+            "limits_deg": [
+              -105.0,
+              105.0
+            ]
+          },
+          {
+            "name": "shoulder_pitch_joint",
+            "type": "revolute",
+            "parent": "shoulder",
+            "child": "upper_arm",
+            "axis": [
+              0.7071757004026039,
+              3.342221645903988e-18,
+              -0.7070378552525224
+            ],
+            "limits_deg": [
+              -185.0,
+              15.0
+            ]
+          },
+          {
+            "name": "elbow_joint",
+            "type": "revolute",
+            "parent": "upper_arm",
+            "child": "lower_arm",
+            "axis": [
+              4.930380657631324e-32,
+              5.634381774423745e-15,
+              1.0
+            ],
+            "limits_deg": [
+              0.0,
+              190.0
+            ]
+          },
+          {
+            "name": "wrist_pitch_joint",
+            "type": "revolute",
+            "parent": "lower_arm",
+            "child": "wrist",
+            "axis": [
+              -1.9721522630525295e-31,
+              -5.303053163518466e-15,
+              1.0
+            ],
+            "limits_deg": [
+              -100.0,
+              100.0
+            ]
+          },
+          {
+            "name": "wrist_roll_joint",
+            "type": "revolute",
+            "parent": "wrist",
+            "child": "gripper_base",
+            "axis": [
+              1.9718524959085454e-31,
+              0.707105755494762,
+              0.7071082278931436
+            ],
+            "limits_deg": [
+              -180.0,
+              180.0
+            ]
+          }
+        ],
+        "link_lengths_cm": {
+          "L1_base_height": 11.9,
+          "L2_upper_arm": 14.0,
+          "L3_forearm": 13.5
+        },
+        "reach_cm": 27.5
+      },
+      "end_effector": {
+        "name": "End-Effector (Gripper Assembly & TCP)",
+        "mount_link": "wrist",
+        "flange_joint": "wrist_roll_joint",
+        "palm_link": "gripper_base",
+        "palm_mesh": "meshes/gripper_base.stl",
+        "links": [
+          {
+            "name": "gripper_base",
+            "mesh": "meshes/gripper_base.stl"
+          },
+          {
+            "name": "gripper_gear",
+            "mesh": "meshes/gripper_gear.stl"
+          },
+          {
+            "name": "arm_r",
+            "mesh": "meshes/arm_r.stl"
+          },
+          {
+            "name": "arm_l",
+            "mesh": "meshes/arm_l.stl"
+          }
+        ],
+        "actuator_joints": [
+          {
+            "name": "gripper_jaw_joint",
+            "type": "continuous",
+            "parent": "gripper_base",
+            "child": "gripper_gear",
+            "limits_deg": [
+              -180.0,
+              180.0
+            ]
+          }
+        ],
+        "fingers": [
+          {
+            "name": "gripper_right_joint",
+            "link": "arm_r",
+            "type": "prismatic",
+            "stroke_cm": 4.4,
+            "mimic": null
+          },
+          {
+            "name": "gripper_left_joint",
+            "link": "arm_l",
+            "type": "prismatic",
+            "stroke_cm": 4.4,
+            "mimic": {
+              "joint": "gripper_right_joint",
+              "multiplier": 1.0,
+              "offset": 0.0
+            }
+          }
+        ],
+        "tcp_offset_cm": 11.0,
+        "total_length_cm": 11.0
+      }
+    }
   }
 }

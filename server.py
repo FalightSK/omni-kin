@@ -29,6 +29,9 @@ from visual_tracker import VisualInertialTracker
 from lerobot_exporter import LeRobotExporter
 from robot_kinematics import (
     WorkspaceCalibrator,
+    CameraGripperCalibrator,
+    TrajectoryPlanner,
+    DEFAULT_INITIAL_POSITION,
     get_robot_specs,
     get_robot_solver,
     get_robot_urdf,
@@ -45,6 +48,7 @@ EXPORT_DIR = os.path.join(BASE_DIR, "lerobot_exports")
 ROBOT_CONFIG_FILE = os.path.join(BASE_DIR, "robot_config.json")
 
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
+EXPORT_DIR = os.path.join(BASE_DIR, "lerobot_exports")
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 def load_robot_config():
@@ -53,13 +57,34 @@ def load_robot_config():
         "offset_x": 0.038,
         "offset_y": -0.406,
         "offset_z": 0.00,
-        "yaw_deg": 90.0
+        "yaw_deg": 90.0,
+        "q3_safe_max_deg": 0.0,
+        "gripper_offset": {
+            "forward_cm": 12.8,
+            "height_cm": 10.9,
+            "lateral_cm": 0.0,
+            "pitch_deg": 40.4,
+            "roll_deg": 0.0,
+            "yaw_deg": 0.0,
+            "enabled": True
+        },
+        "initial_position": dict(DEFAULT_INITIAL_POSITION)
     }
     if os.path.exists(ROBOT_CONFIG_FILE):
         try:
             with open(ROBOT_CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
                 default_cfg.update(saved)
+                # Ensure gripper_offset subkeys exist
+                if "gripper_offset" not in saved:
+                    saved["gripper_offset"] = default_cfg["gripper_offset"]
+                else:
+                    default_cfg["gripper_offset"].update(saved["gripper_offset"])
+                # Ensure initial_position subkeys exist
+                if "initial_position" not in saved:
+                    saved["initial_position"] = default_cfg["initial_position"]
+                else:
+                    default_cfg["initial_position"].update(saved["initial_position"])
         except Exception as e:
             print(f"Warning loading {ROBOT_CONFIG_FILE}: {e}")
     return default_cfg
@@ -77,6 +102,23 @@ workspace_calibrator = WorkspaceCalibrator(
     offset_y=ROBOT_CONFIG["offset_y"],
     offset_z=ROBOT_CONFIG["offset_z"],
     yaw_deg=ROBOT_CONFIG["yaw_deg"]
+)
+
+gripper_cfg = ROBOT_CONFIG.get("gripper_offset", {})
+camera_gripper_calibrator = CameraGripperCalibrator(
+    forward_cm=gripper_cfg.get("forward_cm", 12.8),
+    height_cm=gripper_cfg.get("height_cm", 10.9),
+    lateral_cm=gripper_cfg.get("lateral_cm", 0.0),
+    pitch_deg=gripper_cfg.get("pitch_deg", 40.4),
+    roll_deg=gripper_cfg.get("roll_deg", 0.0),
+    yaw_deg=gripper_cfg.get("yaw_deg", 0.0),
+    enabled=gripper_cfg.get("enabled", True)
+)
+
+trajectory_planner = TrajectoryPlanner(
+    solver=get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)),
+    workspace_calibrator=workspace_calibrator,
+    camera_gripper_calibrator=camera_gripper_calibrator
 )
 
 FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
@@ -132,6 +174,13 @@ def load_episodes_from_disk():
                         ep_data['dev_video_url'] = f"/recordings/{item}/dev_visualization.mp4"
                     if 'canny_video_url' not in ep_data and os.path.exists(os.path.join(item_path, "canny_visualization.mp4")):
                         ep_data['canny_video_url'] = f"/recordings/{item}/canny_visualization.mp4"
+                    if ('ee_poses' not in ep_data or not ep_data['ee_poses'] or 'gripper_offset_applied' not in ep_data) and 'poses' in ep_data:
+                        ee_p = camera_gripper_calibrator.transform_trajectory(ep_data['poses'], to_gripper=True)
+                        ep_data['ee_poses'] = ee_p.tolist()
+                        act = np.roll(ee_p, -1, axis=0)
+                        act[-1] = ee_p[-1]
+                        ep_data['actions'] = act.tolist()
+                        ep_data['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
                     loaded.append(ep_data)
             except Exception as e:
                 print(f"Error reading {meta_path}: {e}")
@@ -216,6 +265,13 @@ async def mobile_page(request: Request):
     if os.path.exists(index_dist):
         return FileResponse(index_dist)
     return templates.TemplateResponse(request=request, name="mobile.html")
+
+@app.get("/manifest.json")
+async def manifest_file():
+    manifest_path = os.path.join(FRONTEND_DIST_DIR, "manifest.json")
+    if os.path.exists(manifest_path):
+        return FileResponse(manifest_path, media_type="application/json")
+    return JSONResponse({"name": "OmniKin 3D Trajectory Manager"}, status_code=200)
 
 @app.get("/api/marker/raw")
 async def get_raw_marker(marker_id: int = 0, size: int = 800, dict_name: str = "DICT_6X6_250"):
@@ -757,8 +813,10 @@ async def save_recording(
             gripper_states.append(g)
 
         anchored_poses = np.array(anchored_poses)
-        actions = np.roll(anchored_poses, -1, axis=0)
-        actions[-1] = anchored_poses[-1]
+        # Apply 6-DoF Camera-to-Gripper Extrinsic Calibration to compute true gripper TCP poses
+        ee_poses = camera_gripper_calibrator.transform_trajectory(anchored_poses, to_gripper=True)
+        actions = np.roll(ee_poses, -1, axis=0)
+        actions[-1] = ee_poses[-1]
         timestamps = np.linspace(0, len(anchored_poses) / fps, len(anchored_poses))
 
         episode_data = {
@@ -777,11 +835,12 @@ async def save_recording(
             'marker_size_cm': 10.0,
             'poses': anchored_poses.tolist(),
             'raw_poses': getattr(visual_tracker, 'last_raw_trajectory', anchored_poses).tolist(),
-            'ee_poses': anchored_poses.tolist(),
+            'ee_poses': ee_poses.tolist(),
             'gripper_states': gripper_states,
             'actions': actions.tolist(),
             'timestamps': timestamps.tolist(),
             'imu_data': parsed_imu,
+            'gripper_offset_applied': camera_gripper_calibrator.get_config(),
             'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
         }
 
@@ -1054,16 +1113,18 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
         smooth_window_ms=smooth_window_ms
     )
     new_poses = np.array(new_poses)
+    ee_poses = camera_gripper_calibrator.transform_trajectory(new_poses, to_gripper=True)
 
     target_ep['poses'] = new_poses.tolist()
     target_ep['raw_poses'] = getattr(visual_tracker, 'last_raw_trajectory', new_poses).tolist()
-    target_ep['ee_poses'] = new_poses.tolist()
-    actions = np.roll(new_poses, -1, axis=0)
-    actions[-1] = new_poses[-1]
+    target_ep['ee_poses'] = ee_poses.tolist()
+    actions = np.roll(ee_poses, -1, axis=0)
+    actions[-1] = ee_poses[-1]
     target_ep['actions'] = actions.tolist()
     target_ep['dev_video_url'] = dev_video_url
     target_ep['canny_video_url'] = canny_video_url
     target_ep['dev_telemetry'] = dev_telemetry
+    target_ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
     target_ep['active_smoothing'] = {'method': smooth_method, 'time_window_ms': smooth_window_ms}
     save_episode_meta(target_ep)
 
@@ -1072,6 +1133,7 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
         "episode_index": episode_index,
         "num_frames": len(new_poses),
         "poses": new_poses.tolist(),
+        "ee_poses": ee_poses.tolist(),
         "dev_video_url": dev_video_url,
         "canny_video_url": canny_video_url
     })
@@ -1106,10 +1168,11 @@ async def smooth_episode_trajectory(episode_index: int, payload: dict = Body(...
             raw_poses, fps=fps, method=method, time_window_ms=time_window_ms
         )
 
+    ee_poses = camera_gripper_calibrator.transform_trajectory(smoothed_poses, to_gripper=True)
     target_ep['poses'] = smoothed_poses.tolist()
-    target_ep['ee_poses'] = smoothed_poses.tolist()
-    actions = np.roll(smoothed_poses, -1, axis=0)
-    actions[-1] = smoothed_poses[-1]
+    target_ep['ee_poses'] = ee_poses.tolist()
+    actions = np.roll(ee_poses, -1, axis=0)
+    actions[-1] = ee_poses[-1]
     target_ep['actions'] = actions.tolist()
     target_ep['active_smoothing'] = {'method': method, 'time_window_ms': time_window_ms}
     save_episode_meta(target_ep)
@@ -1118,6 +1181,7 @@ async def smooth_episode_trajectory(episode_index: int, payload: dict = Body(...
         "status": "success",
         "episode_index": episode_index,
         "poses": smoothed_poses.tolist(),
+        "ee_poses": ee_poses.tolist(),
         "method": method,
         "time_window_ms": time_window_ms
     })
@@ -1172,10 +1236,11 @@ async def get_robot_config():
     Returns the current active robot preset, workspace offset calibration (table plane Z=0),
     and Denavit-Hartenberg (DH) parameter specifications for all available presets.
     """
+    q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
     presets = [
-        get_robot_specs("so_arm101_omni_kin"),
-        get_robot_specs("so101"),
-        get_robot_specs("so100")
+        get_robot_specs("so_arm101_omni_kin", q3_safe_max_deg=q3_safe),
+        get_robot_specs("so101", q3_safe_max_deg=q3_safe),
+        get_robot_specs("so100", q3_safe_max_deg=q3_safe)
     ]
     return JSONResponse({
         "status": "success",
@@ -1205,6 +1270,13 @@ async def update_robot_config(request: Request):
             ROBOT_CONFIG["offset_z"] = float(payload["offset_z"])
         if "yaw_deg" in payload:
             ROBOT_CONFIG["yaw_deg"] = float(payload["yaw_deg"])
+        if "q3_safe_max_deg" in payload:
+            ROBOT_CONFIG["q3_safe_max_deg"] = float(payload["q3_safe_max_deg"])
+        if "gripper_offset" in payload and isinstance(payload["gripper_offset"], dict):
+            if "gripper_offset" not in ROBOT_CONFIG:
+                ROBOT_CONFIG["gripper_offset"] = {}
+            ROBOT_CONFIG["gripper_offset"].update(payload["gripper_offset"])
+            camera_gripper_calibrator.update_config(**payload["gripper_offset"])
 
         save_robot_config(ROBOT_CONFIG)
 
@@ -1220,10 +1292,11 @@ async def update_robot_config(request: Request):
             offset_x=ROBOT_CONFIG["offset_x"],
             offset_y=ROBOT_CONFIG["offset_y"],
             offset_z=ROBOT_CONFIG["offset_z"],
-            yaw_deg=ROBOT_CONFIG["yaw_deg"]
+            yaw_deg=ROBOT_CONFIG["yaw_deg"],
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
         )
 
-        print(f"[{time.strftime('%H:%M:%S')}] 🤖 Robot Config Updated: Model={ROBOT_CONFIG['robot_type']}, Offset=({ROBOT_CONFIG['offset_x']:.2f}m, {ROBOT_CONFIG['offset_y']:.2f}m, Yaw={ROBOT_CONFIG['yaw_deg']:.1f}°)")
+        print(f"[{time.strftime('%H:%M:%S')}] 🤖 Robot Config Updated: Model={ROBOT_CONFIG['robot_type']}, Offset=({ROBOT_CONFIG['offset_x']:.2f}m, {ROBOT_CONFIG['offset_y']:.2f}m, Yaw={ROBOT_CONFIG['yaw_deg']:.1f}°), q3_safe_max={ROBOT_CONFIG.get('q3_safe_max_deg', 0.0)}°")
 
         return JSONResponse({
             "status": "success",
@@ -1234,6 +1307,70 @@ async def update_robot_config(request: Request):
         return JSONResponse({
             "status": "error",
             "message": f"Failed to update robot configuration: {str(err)}"
+        }, status_code=400)
+
+@app.post("/api/robot/gripper_offset")
+async def update_gripper_offset_endpoint(request: Request):
+    """
+    Updates 6-DoF Camera-to-Gripper Extrinsic Offset (Forward, Height, Lateral, Pitch, Roll, Yaw).
+    Optionally recalculates ee_poses and actions for all recorded episodes.
+    """
+    global ROBOT_CONFIG, EPISODES_DB
+    try:
+        payload = await request.json()
+        fwd = float(payload.get("forward_cm", 12.8))
+        hgt = float(payload.get("height_cm", 10.9))
+        lat = float(payload.get("lateral_cm", 0.0))
+        pitch = float(payload.get("pitch_deg", 40.4))
+        roll = float(payload.get("roll_deg", 0.0))
+        yaw = float(payload.get("yaw_deg", 0.0))
+        enabled = bool(payload.get("enabled", True))
+        if "q3_safe_max_deg" in payload:
+            ROBOT_CONFIG["q3_safe_max_deg"] = float(payload["q3_safe_max_deg"])
+
+        camera_gripper_calibrator.update_config(
+            forward_cm=fwd,
+            height_cm=hgt,
+            lateral_cm=lat,
+            pitch_deg=pitch,
+            roll_deg=roll,
+            yaw_deg=yaw,
+            enabled=enabled
+        )
+
+        if "gripper_offset" not in ROBOT_CONFIG:
+            ROBOT_CONFIG["gripper_offset"] = {}
+        ROBOT_CONFIG["gripper_offset"].update(camera_gripper_calibrator.get_config())
+        save_robot_config(ROBOT_CONFIG)
+
+        apply_to_episodes = payload.get("apply_to_episodes", True)
+        updated_count = 0
+        if apply_to_episodes:
+            for ep in EPISODES_DB:
+                poses = ep.get("poses", [])
+                if poses and len(poses) > 0:
+                    ee_poses = camera_gripper_calibrator.transform_trajectory(poses, to_gripper=True)
+                    ep['ee_poses'] = ee_poses.tolist()
+                    actions = np.roll(ee_poses, -1, axis=0)
+                    actions[-1] = ee_poses[-1]
+                    ep['actions'] = actions.tolist()
+                    ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
+                    save_episode_meta(ep)
+                    updated_count += 1
+
+        print(f"[{time.strftime('%H:%M:%S')}] 🦾 Gripper TCP Offset Updated: Pitch={pitch}°, Fwd={fwd}cm, Hgt={hgt}cm, Enabled={enabled} (Applied to {updated_count} episodes)")
+
+        return JSONResponse({
+            "status": "success",
+            "message": f"Gripper offset updated and applied to {updated_count} episodes",
+            "gripper_offset": camera_gripper_calibrator.get_config(),
+            "episodes_updated": updated_count,
+            "active_ee_poses": EPISODES_DB[0]['ee_poses'] if len(EPISODES_DB) > 0 and 'ee_poses' in EPISODES_DB[0] else []
+        })
+    except Exception as err:
+        return JSONResponse({
+            "status": "error",
+            "message": f"Failed to update gripper offset: {str(err)}"
         }, status_code=400)
 
 @app.post("/api/robot/auto_align")
@@ -1259,12 +1396,13 @@ async def auto_align_robot_endpoint(request: Request):
         if not target_ep:
             return JSONResponse({"status": "error", "message": "No episodes available to align to."}, status_code=400)
 
-        poses = target_ep.get("poses") or target_ep.get("ee_poses")
+        # Prioritize Gripper TCP trajectory (ee_poses) so robot base aligns to where the gripper must reach
+        poses = target_ep.get("ee_poses") or target_ep.get("poses")
         if not poses or len(poses) == 0:
             return JSONResponse({"status": "error", "message": "Selected episode has no poses."}, status_code=400)
 
         poses_arr = np.asarray(poses, dtype=np.float64)
-        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so101"))
+        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so101"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
 
         if mode == "recommended":
             new_calib = workspace_calibrator.get_recommended_layout()
@@ -1274,6 +1412,7 @@ async def auto_align_robot_endpoint(request: Request):
             new_calib = workspace_calibrator.auto_align_base_to_start(poses_arr[0], nominal_reach=0.22, default_yaw=90.0)
 
         ROBOT_CONFIG.update(new_calib)
+        workspace_calibrator.update_config(**new_calib)
         save_robot_config(ROBOT_CONFIG)
 
         lerobot_exporter.set_robot_config(
@@ -1281,7 +1420,8 @@ async def auto_align_robot_endpoint(request: Request):
             offset_x=ROBOT_CONFIG["offset_x"],
             offset_y=ROBOT_CONFIG["offset_y"],
             offset_z=ROBOT_CONFIG["offset_z"],
-            yaw_deg=ROBOT_CONFIG["yaw_deg"]
+            yaw_deg=ROBOT_CONFIG["yaw_deg"],
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
         )
 
         # Compute feasibility metrics across episode with this new base alignment
@@ -1312,6 +1452,108 @@ async def auto_align_robot_endpoint(request: Request):
             "message": f"Auto-align failed: {str(err)}"
         }, status_code=400)
 
+@app.post("/api/trajectory/approach_path")
+async def get_approach_path_endpoint(request: Request):
+    """
+    Calculates a collision-safe, C^2 smooth quintic minimum-jerk approach path
+    from the robot's canonical Initial Position (Home) to the demonstration starting point.
+    """
+    global ROBOT_CONFIG, EPISODES_DB
+    try:
+        payload = await request.json()
+        ep_id = payload.get("episode_id")
+        duration_s = float(payload.get("duration_s", 1.5))
+        fps = float(payload.get("fps", 30.0))
+
+        target_ep = None
+        if ep_id:
+            target_ep = next((ep for ep in EPISODES_DB if ep.get("episode_id") == ep_id), None)
+        if not target_ep and EPISODES_DB:
+            target_ep = EPISODES_DB[-1]
+
+        if not target_ep:
+            return JSONResponse({"status": "error", "message": "No episodes available to plan approach for."}, status_code=400)
+
+        poses = target_ep.get("ee_poses") or target_ep.get("poses")
+        if not poses or len(poses) == 0:
+            return JSONResponse({"status": "error", "message": "Selected episode has no poses."}, status_code=400)
+
+        p_start_aruco = poses[0]
+        start_gripper = target_ep.get("gripper_states", [100.0])[0] if target_ep.get("gripper_states") else 100.0
+
+        # Resolve canonical initial position
+        init_cfg = dict(ROBOT_CONFIG.get("initial_position", DEFAULT_INITIAL_POSITION))
+        if "initial_position" in payload and isinstance(payload["initial_position"], dict):
+            init_cfg.update(payload["initial_position"])
+
+        p_home_robot = np.array([
+            float(init_cfg.get("x", 0.15)),
+            float(init_cfg.get("y", 0.00)),
+            float(init_cfg.get("z", 0.20)),
+            np.radians(float(init_cfg.get("roll_deg", 0.0))),
+            np.radians(float(init_cfg.get("pitch_deg", 0.0))),
+            np.radians(float(init_cfg.get("yaw_deg", 0.0)))
+        ], dtype=np.float64)
+        home_gripper = float(init_cfg.get("gripper", 100.0))
+
+        # Synchronize planner instances
+        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
+        trajectory_planner.solver = r_solver
+        trajectory_planner.workspace_calibrator = workspace_calibrator
+        trajectory_planner.camera_gripper_calibrator = camera_gripper_calibrator
+
+        approach_res = trajectory_planner.plan_approach_path(
+            p_start=p_start_aruco,
+            p_home=p_home_robot,
+            duration_s=duration_s,
+            fps=fps,
+            lift_clearance_m=0.06,
+            home_gripper=home_gripper,
+            start_gripper=start_gripper,
+            start_in_robot_frame=False
+        )
+
+        return JSONResponse({
+            "status": "success",
+            "mode": "initial_aware",
+            "approach": approach_res,
+            "initial_position": init_cfg
+        })
+    except Exception as err:
+        return JSONResponse({
+            "status": "error",
+            "message": f"Approach path planning failed: {str(err)}"
+        }, status_code=400)
+
+@app.get("/api/robot/initial_position")
+async def get_initial_position_endpoint():
+    """Returns the canonical Initial Position (Home/Standby Pose) configuration."""
+    return JSONResponse({
+        "status": "success",
+        "initial_position": ROBOT_CONFIG.get("initial_position", DEFAULT_INITIAL_POSITION)
+    })
+
+@app.post("/api/robot/initial_position")
+async def update_initial_position_endpoint(request: Request):
+    """Updates the canonical Initial Position (Home/Standby Pose) configuration."""
+    global ROBOT_CONFIG
+    try:
+        payload = await request.json()
+        if "initial_position" not in ROBOT_CONFIG:
+            ROBOT_CONFIG["initial_position"] = dict(DEFAULT_INITIAL_POSITION)
+        ROBOT_CONFIG["initial_position"].update(payload)
+        save_robot_config(ROBOT_CONFIG)
+        return JSONResponse({
+            "status": "success",
+            "message": "Robot initial position updated successfully",
+            "initial_position": ROBOT_CONFIG["initial_position"]
+        })
+    except Exception as err:
+        return JSONResponse({
+            "status": "error",
+            "message": f"Failed to update initial position: {str(err)}"
+        }, status_code=400)
+
 @app.post("/api/robot/solve_ik")
 async def solve_ik_endpoint(request: Request):
     """
@@ -1320,7 +1562,7 @@ async def solve_ik_endpoint(request: Request):
     """
     try:
         payload = await request.json()
-        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so101"))
+        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so101"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
         in_robot_frame = payload.get("in_robot_frame", False)
 
         if "pose" in payload:
@@ -1379,7 +1621,8 @@ async def parse_urdf_endpoint(request: Request):
         if not urdf_text or not urdf_text.strip():
             return JSONResponse({"status": "error", "message": "No URDF XML provided"}, status_code=400)
 
-        dh_table, specs = URDFParser.parse_urdf(urdf_text)
+        q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
+        dh_table, specs = URDFParser.parse_urdf(urdf_text, q3_safe_max_deg=q3_safe)
         return JSONResponse({
             "status": "success",
             "dh_table": dh_table,
@@ -1400,7 +1643,8 @@ async def apply_urdf_endpoint(request: Request):
     try:
         payload = await request.json()
         urdf_text = payload.get("urdf_text", "")
-        dh_table, specs = URDFParser.parse_urdf(urdf_text)
+        q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
+        dh_table, specs = URDFParser.parse_urdf(urdf_text, q3_safe_max_deg=q3_safe)
         robot_name = specs.get("robot_name", "custom_robot").lower()
 
         ROBOT_CONFIG["custom_dh_table"] = dh_table
@@ -1422,11 +1666,20 @@ async def apply_urdf_endpoint(request: Request):
         }, status_code=400)
 
 @app.post("/api/export_lerobot")
-async def export_lerobot():
+async def export_lerobot(request: Request = None):
     if not EPISODES_DB:
         return JSONResponse({"status": "error", "message": "No episodes recorded yet. Please record or sample an episode first."}, status_code=400)
 
     try:
+        payload = {}
+        if request:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+        traj_mode = payload.get("trajectory_mode", "free_form")
+        init_pos = payload.get("initial_position", ROBOT_CONFIG.get("initial_position"))
+
         # Sync latest configuration
         lerobot_exporter.set_robot_config(
             robot_type=ROBOT_CONFIG["robot_type"],
@@ -1435,16 +1688,22 @@ async def export_lerobot():
             offset_z=ROBOT_CONFIG["offset_z"],
             yaw_deg=ROBOT_CONFIG["yaw_deg"]
         )
-        export_path = lerobot_exporter.export_dataset(EPISODES_DB, dataset_name="mobile_aruco_3d_trajectories")
+        export_path = lerobot_exporter.export_dataset(
+            EPISODES_DB,
+            dataset_name="mobile_aruco_3d_trajectories",
+            trajectory_mode=traj_mode,
+            initial_position=init_pos
+        )
         total_frames = sum(ep.get('num_frames', len(ep.get('poses', []))) for ep in EPISODES_DB)
         return JSONResponse({
             "status": "success",
             "export_path": export_path,
             "robot_type": ROBOT_CONFIG["robot_type"],
+            "trajectory_mode": traj_mode,
             "workspace_calibration": ROBOT_CONFIG,
             "total_episodes": len(EPISODES_DB),
             "total_frames": total_frames,
-            "message": f"LeRobot dataset ({ROBOT_CONFIG['robot_type'].upper()}) exported successfully with {len(EPISODES_DB)} episodes ({total_frames} frames)!"
+            "message": f"LeRobot dataset ({ROBOT_CONFIG['robot_type'].upper()}, mode={traj_mode}) exported successfully with {len(EPISODES_DB)} episodes!"
         })
     except Exception as err:
         import traceback

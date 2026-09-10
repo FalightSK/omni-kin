@@ -26,6 +26,7 @@ import {
   Activity,
   Anchor,
   Sparkles,
+  Zap,
   ShieldCheck,
   CheckCircle2,
   HelpCircle,
@@ -47,10 +48,16 @@ export default function Dashboard({
   onUpdateEpisodePoses,
   robotConfig,
   onUpdateRobotConfig,
-  onOpenRobotModal
+  onOpenRobotModal,
+  trajectoryMode = 'free_form',
+  setTrajectoryMode = () => {}
 }) {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
+  const [combinedSliderIndex, setCombinedSliderIndex] = useState(0);
+
+  // Auto-calculated Approach Trajectory for Initial-Position Aware Mode
+  const [approachData, setApproachData] = useState(null);
+  const [isApproachLoading, setIsApproachLoading] = useState(false);
 
   // Trajectory Smoothing Configuration (Savitzky-Golay / Moving Average)
   const [smoothingMethod, setSmoothingMethod] = useState('savgol');
@@ -76,14 +83,77 @@ export default function Dashboard({
   const scrollContainerRef = useRef(null);
 
   const [overridePoses, setOverridePoses] = useState(null);
+  const [overrideEePoses, setOverrideEePoses] = useState(null);
   const debouncedSmoothRef = useRef(null);
 
   const activeEp = episodes.find((e) => e.episode_index === selectedEpIdx) || episodes[0] || null;
   const poses = overridePoses || activeEp?.poses || [];
+  const eePoses = overrideEePoses || activeEp?.ee_poses || [];
   const totalFrames = activeEp?.num_frames || 0;
-  const safeFrameIndex = totalFrames > 0 ? Math.min(Math.max(0, currentFrameIndex), totalFrames - 1) : 0;
+
+  // Dual Trajectory System Phase & Timeline Index Resolution
+  const isInitialAware = trajectoryMode === 'initial_aware';
+  const approachFramesCount = (isInitialAware && approachData?.num_frames) ? approachData.num_frames : 0;
+  const totalCombinedFrames = approachFramesCount + totalFrames;
+
+  let isApproachPhase = false;
+  let approachFrameIndex = 0;
+  let safeFrameIndex = 0;
+
+  if (isInitialAware && approachFramesCount > 0) {
+    if (combinedSliderIndex < approachFramesCount) {
+      isApproachPhase = true;
+      approachFrameIndex = Math.min(Math.max(0, combinedSliderIndex), approachFramesCount - 1);
+      safeFrameIndex = 0;
+    } else {
+      isApproachPhase = false;
+      approachFrameIndex = approachFramesCount - 1;
+      safeFrameIndex = Math.min(Math.max(0, combinedSliderIndex - approachFramesCount), Math.max(0, totalFrames - 1));
+    }
+  } else {
+    isApproachPhase = false;
+    approachFrameIndex = 0;
+    safeFrameIndex = totalFrames > 0 ? Math.min(Math.max(0, combinedSliderIndex), totalFrames - 1) : 0;
+  }
+
   const currentPose = poses[safeFrameIndex] || [0, 0, 0, 0, 0, 0];
   const currTelemetry = activeEp?.dev_telemetry?.[safeFrameIndex] || activeEp?.dev_telemetry?.[0] || null;
+
+  // Fetch approach path whenever Initial-Aware mode is active or episode / initial position changes
+  useEffect(() => {
+    if (trajectoryMode !== 'initial_aware' || !activeEp) {
+      setApproachData(null);
+      return;
+    }
+
+    let isMounted = true;
+    setIsApproachLoading(true);
+
+    fetch('/api/trajectory/approach_path', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        episode_id: activeEp.episode_id,
+        initial_position: robotConfig?.initial_position
+      })
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (isMounted && data.status === 'success' && data.approach) {
+          setApproachData(data.approach);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to fetch approach path:', err);
+      })
+      .finally(() => {
+        if (isMounted) setIsApproachLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [trajectoryMode, activeEp?.episode_id, robotConfig?.initial_position, overridePoses]);
 
   // Sync selectedEpIdx if activeEp resolved to a different episode
   useEffect(() => {
@@ -95,6 +165,7 @@ export default function Dashboard({
   // Reset override poses when switching active episode
   useEffect(() => {
     setOverridePoses(null);
+    setOverrideEePoses(null);
   }, [activeEp?.episode_index]);
 
   // Ensure dev_video_url and canny_video_url are generated for the active episode if requested
@@ -111,11 +182,11 @@ export default function Dashboard({
     }
   }, [activeEp?.episode_index, activeEp?.dev_video_url, activeEp?.canny_video_url, activeEp?.video_path, onRefreshEpisodes]);
 
-  // Reset playback and frame position whenever active episode or video URL changes
+  // Reset playback and frame position whenever active episode, video URL, or mode changes
   useEffect(() => {
-    setCurrentFrameIndex(0);
+    setCombinedSliderIndex(0);
     setIsPlaying(false);
-  }, [activeEp?.episode_index, activeEp?.video_url]);
+  }, [activeEp?.episode_index, activeEp?.video_url, trajectoryMode]);
 
   const handleApplySmoothing = async (newMethod, newWindowMs) => {
     if (!activeEp) return;
@@ -133,8 +204,11 @@ export default function Dashboard({
       const data = await res.json();
       if (data.status === 'success' && data.poses) {
         setOverridePoses(data.poses);
+        if (data.ee_poses) {
+          setOverrideEePoses(data.ee_poses);
+        }
         if (onUpdateEpisodePoses) {
-          onUpdateEpisodePoses(data.poses);
+          onUpdateEpisodePoses(data.poses, data.ee_poses);
         }
       }
     } catch (err) {
@@ -156,10 +230,11 @@ export default function Dashboard({
 
   useEffect(() => {
     let interval = null;
-    if (isPlaying && totalFrames > 0) {
+    const maxFrames = isInitialAware ? totalCombinedFrames : totalFrames;
+    if (isPlaying && maxFrames > 0) {
       interval = setInterval(() => {
-        setCurrentFrameIndex((prev) => {
-          if (prev >= totalFrames - 1) {
+        setCombinedSliderIndex((prev) => {
+          if (prev >= maxFrames - 1) {
             setIsPlaying(false);
             return 0;
           }
@@ -168,7 +243,7 @@ export default function Dashboard({
       }, 1000 / (activeEp?.fps || 30));
     }
     return () => clearInterval(interval);
-  }, [isPlaying, totalFrames, activeEp?.fps]);
+  }, [isPlaying, isInitialAware, totalCombinedFrames, totalFrames, activeEp?.fps]);
 
   // Handle Dragging Splitter in split modes
   useEffect(() => {
@@ -209,33 +284,50 @@ export default function Dashboard({
     };
   }, [isDragging, layoutMode]);
 
-  const currentX = currentPose[0] || 0;
-  const currentY = currentPose[1] || 0;
-  const currentZ = currentPose[2] || 0;
-  const distToOrigin = Math.sqrt(currentX * currentX + currentY * currentY + currentZ * currentZ);
+  const currentEePose = isApproachPhase
+    ? (approachData?.aruco_ee_poses?.[approachFrameIndex] || [0.15, 0, 0.20, 0, 0, 0])
+    : ((eePoses && eePoses[safeFrameIndex]) ? eePoses[safeFrameIndex] : currentPose);
 
-  // Compute Robot-Relative Coordinates from Active Coplanar Calibration
-  const ox = robotConfig?.offset_x ?? 0.20;
-  const oy = robotConfig?.offset_y ?? 0.00;
+  // 📷 Raw Camera Optical Center Coordinates (relative to ArUco Tag A (0,0,0))
+  const currentCamX = isApproachPhase
+    ? (approachData?.aruco_cam_poses?.[approachFrameIndex]?.[0] || 0)
+    : (currentPose[0] || 0);
+  const currentCamY = isApproachPhase
+    ? (approachData?.aruco_cam_poses?.[approachFrameIndex]?.[1] || 0)
+    : (currentPose[1] || 0);
+  const currentCamZ = isApproachPhase
+    ? (approachData?.aruco_cam_poses?.[approachFrameIndex]?.[2] || 0)
+    : (currentPose[2] || 0);
+  const distCamToOrigin = Math.hypot(currentCamX, currentCamY, currentCamZ);
+
+  // 🎯 True Gripper End-Effector / Tool Center Point (TCP) Coordinates
+  const currentTcpX = currentEePose[0] || 0;
+  const currentTcpY = currentEePose[1] || 0;
+  const currentTcpZ = currentEePose[2] || 0;
+  const distTcpToOrigin = Math.hypot(currentTcpX, currentTcpY, currentTcpZ);
+
+  // Compute Robot-Relative Coordinates using true Gripper TCP
+  const ox = robotConfig?.offset_x ?? 0.038;
+  const oy = robotConfig?.offset_y ?? -0.406;
   const oz = robotConfig?.offset_z ?? 0.00;
-  const yawRad = THREE_to_rad(robotConfig?.yaw_deg ?? 0.0);
+  const yawRad = THREE_to_rad(robotConfig?.yaw_deg ?? 90.0);
 
-  const dx = currentX - ox;
-  const dy = currentY - oy;
-  const dz = currentZ - oz;
+  const dx = currentTcpX - ox;
+  const dy = currentTcpY - oy;
+  const dz = currentTcpZ - oz;
 
   const cosY = Math.cos(yawRad);
   const sinY = Math.sin(yawRad);
-  const robotX = cosY * dx + sinY * dy;
-  const robotY = -sinY * dx + cosY * dy;
-  const robotZ = dz;
-  const distToRobot = Math.sqrt(robotX * robotX + robotY * robotY + robotZ * robotZ);
+  const robotTcpX = cosY * dx + sinY * dy;
+  const robotTcpY = -sinY * dx + cosY * dy;
+  const robotTcpZ = dz;
+  const distToRobot = Math.hypot(robotTcpX, robotTcpY, robotTcpZ);
 
   function THREE_to_rad(deg) {
     return (deg * Math.PI) / 180;
   }
 
-  const robotName = (robotConfig?.robot_type || 'so101').toUpperCase();
+  const robotName = (robotConfig?.robot_type || 'so_arm101_omni_kin').toUpperCase().replace(/_/g, '-');
 
   // Anchor status calculation for intuitive Dev View visualization
   const isTagADetected = currTelemetry?.tags_detected?.includes(0);
@@ -334,6 +426,53 @@ export default function Dashboard({
               </button>
             </div>
 
+            {/* Trajectory Mode Switcher (Free-Form Pretrain vs Initial-Aware Fine-Tune) */}
+            <div className="flex items-center gap-1 bg-slate-900/90 p-0.5 rounded-lg border border-slate-800 ml-1">
+              <button
+                onClick={() => {
+                  setIsPlaying(false);
+                  setCombinedSliderIndex(0);
+                  setTrajectoryMode('free_form');
+                }}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition-all ${
+                  trajectoryMode === 'free_form'
+                    ? 'bg-amber-600 text-white shadow-sm font-semibold'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+                title="Mode A: Raw recorded demonstration from first waypoint (standard pretraining)"
+              >
+                <Zap className="w-3.5 h-3.5 text-amber-300" />
+                <span>Free-Form (Pretrain)</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setIsPlaying(false);
+                  setCombinedSliderIndex(0);
+                  setTrajectoryMode('initial_aware');
+                }}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1.5 transition-all ${
+                  trajectoryMode === 'initial_aware'
+                    ? 'bg-purple-600 text-white shadow-sm font-semibold'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+                title="Mode B: Standardized initial Home position with collision-safe auto-approach path (fine-tuning & deployment)"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-300" />
+                <span>Initial-Aware (Fine-Tune)</span>
+              </button>
+            </div>
+
+            {trajectoryMode === 'initial_aware' && (
+              <button
+                onClick={() => onOpenRobotModal?.('initial_pos')}
+                className="px-2 py-1 rounded-lg bg-purple-950/60 hover:bg-purple-900/60 border border-purple-500/40 text-purple-300 flex items-center gap-1 text-[11px] font-medium transition-all"
+                title="Configure Canonical Initial Home / Standby Position"
+              >
+                <span>🏠 Home Pose</span>
+              </button>
+            )}
+
             {/* PiP Specific Size Controls when in PiP mode */}
             {layoutMode === 'pip' && isPipOpen && (
               <div className="flex items-center gap-1 bg-slate-900/80 p-0.5 rounded-lg border border-slate-800 text-[11px]">
@@ -425,10 +564,18 @@ export default function Dashboard({
             <div className="w-full h-full relative">
               <Viewport3D
                 trajectoryPoses={poses}
+                eePoses={eePoses}
+                gripperStates={activeEp?.gripper_states || []}
                 currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}
                 onUpdateRobotConfig={onUpdateRobotConfig}
                 episodeId={activeEp?.episode_id}
+                trajectoryMode={trajectoryMode}
+                approachEePoses={approachData?.aruco_ee_poses || []}
+                approachGripperStates={approachData?.gripper_states || []}
+                approachCamPoses={approachData?.aruco_cam_poses || []}
+                isApproachPhase={isApproachPhase}
+                approachFrameIndex={approachFrameIndex}
               />
             </div>
 
@@ -521,10 +668,18 @@ export default function Dashboard({
             >
               <Viewport3D
                 trajectoryPoses={poses}
+                eePoses={eePoses}
+                gripperStates={activeEp?.gripper_states || []}
                 currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}
                 onUpdateRobotConfig={onUpdateRobotConfig}
                 episodeId={activeEp?.episode_id}
+                trajectoryMode={trajectoryMode}
+                approachEePoses={approachData?.aruco_ee_poses || []}
+                approachGripperStates={approachData?.gripper_states || []}
+                approachCamPoses={approachData?.aruco_cam_poses || []}
+                isApproachPhase={isApproachPhase}
+                approachFrameIndex={approachFrameIndex}
               />
             </div>
 
@@ -581,8 +736,13 @@ export default function Dashboard({
           <div className="flex items-center gap-3">
             <button
               onClick={() => setIsPlaying(!isPlaying)}
-              disabled={totalFrames === 0}
-              className="p-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold shadow-lg shadow-indigo-600/30 transition-all disabled:opacity-50"
+              disabled={(isInitialAware ? totalCombinedFrames : totalFrames) === 0}
+              className={`p-3 rounded-xl text-white font-bold shadow-lg transition-all disabled:opacity-50 ${
+                isApproachPhase
+                  ? 'bg-purple-600 hover:bg-purple-500 shadow-purple-600/30'
+                  : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/30'
+              }`}
+              title={isPlaying ? 'Pause Playback' : 'Start Playback'}
             >
               {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
             </button>
@@ -591,18 +751,32 @@ export default function Dashboard({
               <input
                 type="range"
                 min="0"
-                max={Math.max(0, totalFrames - 1)}
-                value={safeFrameIndex}
+                max={Math.max(0, (isInitialAware ? totalCombinedFrames : totalFrames) - 1)}
+                value={combinedSliderIndex}
                 onChange={(e) => {
                   setIsPlaying(false);
-                  setCurrentFrameIndex(parseInt(e.target.value) || 0);
+                  setCombinedSliderIndex(parseInt(e.target.value) || 0);
                 }}
-                className="w-full accent-indigo-500 cursor-pointer h-2 bg-slate-800 rounded-lg"
+                className={`w-full cursor-pointer h-2 bg-slate-800 rounded-lg ${
+                  isApproachPhase ? 'accent-purple-500' : 'accent-indigo-500'
+                }`}
               />
               <div className="flex justify-between text-[11px] font-mono text-slate-400">
-                <span>Frame {safeFrameIndex + 1} of {totalFrames}</span>
+                {isApproachPhase ? (
+                  <span className="text-purple-300 font-semibold flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+                    <span>🚀 Approach: Step {approachFrameIndex + 1} of {approachFramesCount} (Home → Start)</span>
+                  </span>
+                ) : (
+                  <span>
+                    Frame {safeFrameIndex + 1} of {totalFrames}
+                    {isInitialAware && <span className="text-indigo-400 ml-1.5 font-sans font-medium">(Demo Phase)</span>}
+                  </span>
+                )}
                 <span>
-                  {((safeFrameIndex / (activeEp?.fps || 30)) || 0).toFixed(2)}s / {(activeEp?.duration || 0).toFixed(2)}s
+                  {isApproachPhase
+                    ? `${((approachFrameIndex / (activeEp?.fps || 30)) || 0).toFixed(2)}s (Approach)`
+                    : `${((safeFrameIndex / (activeEp?.fps || 30)) || 0).toFixed(2)}s / ${(activeEp?.duration || 0).toFixed(2)}s`}
                 </span>
               </div>
             </div>
@@ -610,18 +784,40 @@ export default function Dashboard({
 
           {/* Dual-Coordinate Telemetry Strip: ArUco Table Origin & Robot Base Relative */}
           <div className="grid grid-cols-2 md:grid-cols-6 gap-2 bg-slate-950/70 p-2.5 rounded-xl border border-slate-800/80 text-left font-mono">
-            {/* ArUco Table Origin */}
-            <div className="border-r border-slate-800/80 pr-2">
-              <span className="text-[10px] text-emerald-400 uppercase block font-sans font-semibold">
-                ArUco Tag A (0,0,0)
-              </span>
-              <span className="text-xs font-semibold text-slate-200">
-                [{(currentX * 100).toFixed(1)}, {(currentY * 100).toFixed(1)}, {(currentZ * 100).toFixed(1)}] cm
-              </span>
+            {/* ArUco Table Origin: Camera & Gripper TCP */}
+            <div className="border-r border-slate-800/80 pr-2 col-span-2 flex flex-col justify-center">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-emerald-400 uppercase font-sans font-semibold">
+                  ArUco Origin (0,0,0)
+                </span>
+                {robotConfig?.gripper_offset?.enabled && (
+                  <button
+                    onClick={() => onOpenRobotModal?.('gripper')}
+                    className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-500/40 text-indigo-300 font-sans font-medium transition-all"
+                    title="Click to adjust 6-DoF Camera-to-Gripper Offset"
+                  >
+                    🎯 {robotConfig.gripper_offset.pitch_deg || 40.4}° / {robotConfig.gripper_offset.forward_cm || 12.8}cm
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-col gap-0.5 mt-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400 text-[10px] font-sans">TCP:</span>
+                  <span className="font-semibold text-emerald-300">
+                    [{(currentTcpX * 100).toFixed(1)}, {(currentTcpY * 100).toFixed(1)}, {(currentTcpZ * 100).toFixed(1)}] cm
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-[11px] text-slate-400">
+                  <span className="text-cyan-400/90 text-[10px] font-sans">Cam:</span>
+                  <span className="text-cyan-300 font-mono">
+                    [{(currentCamX * 100).toFixed(1)}, {(currentCamY * 100).toFixed(1)}, {(currentCamZ * 100).toFixed(1)}] cm
+                  </span>
+                </div>
+              </div>
             </div>
 
             {/* Robot Base Relative */}
-            <div className="border-r border-slate-800/80 pr-2 col-span-2">
+            <div className="border-r border-slate-800/80 pr-2 col-span-2 flex flex-col justify-center">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] text-indigo-400 uppercase font-sans font-semibold flex items-center gap-1">
                   <Bot className="w-3 h-3" />
@@ -631,30 +827,35 @@ export default function Dashboard({
                   @ [{(ox * 100).toFixed(0)}, {(oy * 100).toFixed(0)}] cm
                 </span>
               </div>
-              <span className="text-xs font-semibold text-indigo-200">
-                X:{(robotX * 100).toFixed(1)} Y:{(robotY * 100).toFixed(1)} Z:{(robotZ * 100).toFixed(1)} cm
-              </span>
+              <div className="mt-1">
+                <span className="text-xs font-semibold text-indigo-200">
+                  X:{(robotTcpX * 100).toFixed(1)} Y:{(robotTcpY * 100).toFixed(1)} Z:{(robotTcpZ * 100).toFixed(1)} cm
+                </span>
+              </div>
             </div>
 
-            {/* Dist to ArUco Origin */}
-            <div>
-              <span className="text-[10px] text-slate-500 uppercase block font-sans">Dist Origin</span>
-              <span className="text-xs font-semibold text-sky-400">{(distToOrigin * 100).toFixed(1)} cm</span>
-            </div>
-
-            {/* Dist to Robot Base */}
-            <div>
-              <span className="text-[10px] text-slate-500 uppercase block font-sans">Dist Robot</span>
-              <span className="text-xs font-semibold text-indigo-400">{(distToRobot * 100).toFixed(1)} cm</span>
+            {/* Dist to ArUco Origin & Robot Base */}
+            <div className="border-r border-slate-800/80 pr-2 flex flex-col justify-center">
+              <span className="text-[10px] text-slate-500 uppercase block font-sans">Distance</span>
+              <div className="text-[11px] font-semibold text-sky-400 mt-0.5">
+                Origin: {(distTcpToOrigin * 100).toFixed(1)} cm
+              </div>
+              <div className="text-[11px] font-semibold text-indigo-400">
+                Robot: {(distToRobot * 100).toFixed(1)} cm
+              </div>
             </div>
 
             {/* Gripper */}
-            <div>
+            <div className="flex flex-col justify-center">
               <span className="text-[10px] text-slate-500 uppercase block font-sans">Gripper</span>
-              <span className="text-xs font-semibold text-amber-400">
-                {activeEp?.gripper_states?.[safeFrameIndex]
-                  ? `${activeEp.gripper_states[safeFrameIndex].toFixed(0)}%`
-                  : '100%'}
+              <span className={`text-sm font-semibold mt-0.5 ${isApproachPhase ? 'text-purple-300' : 'text-amber-400'}`}>
+                {isApproachPhase
+                  ? (approachData?.gripper_states?.[approachFrameIndex] !== undefined
+                      ? `${approachData.gripper_states[approachFrameIndex].toFixed(0)}%`
+                      : '100%')
+                  : (activeEp?.gripper_states?.[safeFrameIndex] !== undefined
+                      ? `${activeEp.gripper_states[safeFrameIndex].toFixed(0)}%`
+                      : '100%')}
               </span>
             </div>
           </div>

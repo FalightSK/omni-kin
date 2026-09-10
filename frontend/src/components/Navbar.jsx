@@ -9,7 +9,8 @@ export default function Navbar({
   onOpenConnectModal,
   onAddSample,
   onExportLeRobot,
-  robotConfig
+  robotConfig,
+  trajectoryMode = 'free_form'
 }) {
   const robotName = (robotConfig?.robot_type || 'so101').toUpperCase();
 
@@ -103,10 +104,22 @@ export default function Navbar({
 
         <button
           onClick={onExportLeRobot}
-          className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-xs font-semibold flex items-center gap-1.5 shadow-md shadow-indigo-500/20 hover:opacity-95 transition-all"
+          className={`px-3 py-1.5 rounded-xl text-white text-xs font-semibold flex items-center gap-1.5 shadow-md hover:opacity-95 transition-all ${
+            trajectoryMode === 'initial_aware'
+              ? 'bg-gradient-to-r from-purple-600 to-indigo-600 shadow-purple-500/20'
+              : 'bg-gradient-to-r from-indigo-600 to-purple-600 shadow-indigo-500/20'
+          }`}
+          title={`Export LeRobot dataset in ${trajectoryMode === 'initial_aware' ? 'Initial-Position Aware (Fine-Tuning)' : 'Free-Form (Pretraining)'} mode`}
         >
           <Package className="w-3.5 h-3.5" />
           <span>Export LeRobot</span>
+          <span className={`px-1.5 py-0.5 rounded text-[9.5px] font-mono font-bold ${
+            trajectoryMode === 'initial_aware'
+              ? 'bg-purple-950/80 text-purple-200 border border-purple-400/40'
+              : 'bg-indigo-950/80 text-indigo-200 border border-indigo-400/40'
+          }`}>
+            {trajectoryMode === 'initial_aware' ? 'Initial-Aware' : 'Free-Form'}
+          </span>
         </button>
       </div>
     </header>

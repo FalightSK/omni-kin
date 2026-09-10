@@ -7,6 +7,37 @@ Includes WorkspaceCalibrator for ArUco Table-Plane-to-Robot-Base Coordinate Tran
 import os
 import numpy as np
 import xml.etree.ElementTree as ET
+from scipy.spatial.transform import Rotation as R
+
+R_CAM_TO_PHONE = np.diag([1.0, -1.0, -1.0])
+
+
+def rotation_matrix_to_trajectory_euler(R_c_to_w):
+    """
+    Computes [roll, pitch, yaw] in radians from camera-to-world rotation matrix:
+      - 0° pitch = phone held level over workspace table (camera looking down at table)
+      - positive pitch = tilted forward
+      - negative pitch = tilted backward
+      - roll = lateral tilt left/right
+      - yaw = azimuthal heading around table normal (Z)
+    """
+    R_p2w = R_c_to_w @ R_CAM_TO_PHONE
+    r = R.from_matrix(R_p2w)
+    ax, ay, az = r.as_euler('xyz', degrees=False)
+    pitch = float(ax)
+    roll = float(ay)
+    yaw = float(az)
+    return np.array([roll, pitch, yaw], dtype=np.float64)
+
+
+def trajectory_euler_to_rotation_matrix(euler):
+    """
+    Reconstructs camera-to-world rotation matrix R_c_to_w from [roll, pitch, yaw].
+    """
+    roll, pitch, yaw = euler
+    r = R.from_euler('xyz', [pitch, roll, yaw])
+    R_p2w = r.as_matrix()
+    return R_p2w @ R_CAM_TO_PHONE
 
 # ==============================================================================
 # 1. Denavit-Hartenberg (DH) Parameter Specifications
@@ -196,38 +227,194 @@ def dh_transform(theta_rad, d, a, alpha_rad):
 
 
 # ==============================================================================
-# 2. Base DH Kinematics Engine
+# 2. Universal Wrist Detection & 3D Euclidean Camera Clearance Engine
+# ==============================================================================
+
+def find_wrist_pitch_index(dh_table):
+    """
+    Universally identifies the wrist pitch (flex) joint index across arbitrary robot embodiments.
+    Scans for semantic naming keywords ('wrist', 'hand', 'pitch', 'flex', 'tilt', 'elevation')
+    or falls back to the penultimate pitch joint before the end-effector.
+    """
+    if not dh_table or len(dh_table) < 3:
+        return 3 if len(dh_table) > 3 else max(0, len(dh_table) - 1)
+
+    # 1. Semantic match on joint name
+    for i, row in enumerate(dh_table):
+        name = str(row.get("name", "")).lower()
+        if ("wrist" in name or "hand" in name or "grip" in name or "ee" in name) and any(k in name for k in ["pitch", "flex", "tilt", "elev", "bend"]):
+            return i
+
+    # 2. Match any joint with 'pitch' or 'flex' located in distal half of arm chain
+    distal_start = len(dh_table) // 2
+    for i in range(len(dh_table) - 1, distal_start - 1, -1):
+        name = str(dh_table[i].get("name", "")).lower()
+        if any(k in name for k in ["pitch", "flex", "tilt", "elevation"]):
+            return i
+
+    # 3. Default fallback heuristic: penultimate joint in chain (for 5-DOF = 3, 6-DOF = 4)
+    return max(0, min(3, len(dh_table) - 2))
+
+
+def compute_camera_forearm_clearance(p_elbow, p_wrist, p_tip, cam_forward_m=0.128, cam_height_m=0.109, cam_lateral_m=0.0):
+    """
+    Universal 3D Euclidean clearance metric between camera mount and robot forearm link.
+    Invariant to joint numbering, link conventions, DH frame conventions, and axis signs.
+
+    Forearm link: line segment S(t) = p_elbow + t * (p_wrist - p_elbow) for t in [0, 1].
+    Camera position: computed rigidly from wrist/tip frame and extrinsics.
+    """
+    p_elbow = np.asarray(p_elbow, dtype=np.float64)
+    p_wrist = np.asarray(p_wrist, dtype=np.float64)
+    p_tip = np.asarray(p_tip, dtype=np.float64)
+
+    tip_dir = p_tip - p_wrist
+    tip_len = float(np.linalg.norm(tip_dir))
+    if tip_len > 1e-6:
+        tip_dir = tip_dir / tip_len
+    else:
+        tip_dir = np.array([1.0, 0.0, 0.0])
+
+    forearm_dir = p_wrist - p_elbow
+    forearm_len = float(np.linalg.norm(forearm_dir))
+    if forearm_len > 1e-6:
+        forearm_unit = forearm_dir / forearm_len
+    else:
+        forearm_unit = np.array([1.0, 0.0, 0.0])
+
+    lat_dir = np.cross(np.array([0.0, 0.0, 1.0]), tip_dir)
+    lat_len = float(np.linalg.norm(lat_dir))
+    if lat_len > 1e-6:
+        lat_dir = lat_dir / lat_len
+    else:
+        lat_dir = np.array([0.0, 1.0, 0.0])
+
+    up_dir = np.cross(tip_dir, lat_dir)
+    up_len = float(np.linalg.norm(up_dir))
+    if up_len > 1e-6:
+        up_dir = up_dir / up_len
+    else:
+        up_dir = np.array([0.0, 0.0, 1.0])
+
+    p_cam = p_tip - cam_forward_m * tip_dir + cam_height_m * up_dir - cam_lateral_m * lat_dir
+
+    seg = p_wrist - p_elbow
+    seg_len_sq = float(np.dot(seg, seg))
+    if seg_len_sq < 1e-8:
+        return float(np.linalg.norm(p_cam - p_wrist)), p_cam
+
+    t = float(np.clip(np.dot(p_cam - p_elbow, seg) / seg_len_sq, 0.0, 1.0))
+    p_closest = p_elbow + t * seg
+    clearance = float(np.linalg.norm(p_cam - p_closest))
+    return clearance, p_cam
+
+
+# ==============================================================================
+# 3. Base DH Kinematics Engine
 # ==============================================================================
 
 class DHKinematics:
     """
-    Kinematics engine driven directly by a Denavit-Hartenberg (DH) parameter table.
-    Supports 5-DOF arms with serial planar pitch joints + wrist roll + gripper.
+    Universal Kinematics engine driven directly by a Denavit-Hartenberg (DH) parameter table.
+    Supports arbitrary robot arms with serial planar pitch joints, wrist roll, and end-effector.
+    Incorporates coordinate-free 3D Euclidean clearance verification to prevent camera collisions
+    on any embodiment.
     """
 
-    def __init__(self, dh_table, model_name="SO-Robot"):
+    def __init__(self, dh_table, model_name="SO-Robot", q3_safe_max_deg=0.0, cam_forward_m=0.128, cam_height_m=0.109, cam_lateral_m=0.0):
         self.dh_table = dh_table
         self.model_name = model_name
+        self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
+        self.wrist_pitch_safe_max_deg = self.q3_safe_max_deg
+        self.cam_forward_m = float(cam_forward_m)
+        self.cam_height_m = float(cam_height_m)
+        self.cam_lateral_m = float(cam_lateral_m)
+
+        # Universally identify wrist pitch joint index
+        self.wrist_pitch_idx = find_wrist_pitch_index(self.dh_table)
 
         # Extract link lengths from DH table:
-        # d_1: Base height L1
-        # a_2: Upper arm L2
-        # a_3: Forearm L3
-        # d_5: Wrist-to-gripper tip L4
         self.L1 = float(self.dh_table[0]["d"])
         self.L2 = float(self.dh_table[1]["a"])
         self.L3 = float(self.dh_table[2]["a"])
-        self.L4 = float(self.dh_table[4]["d"])
+        self.L4 = float(self.dh_table[min(4, len(self.dh_table) - 1)]["d"])
+        if self.L4 <= 0.01 and "a" in self.dh_table[-1]:
+            self.L4 = float(self.dh_table[-1]["a"]) or 0.110
 
         self.max_reach = self.L2 + self.L3 + self.L4
 
-        # Extract joint limits in radians
+        # Detect collision rotation direction: +1 if positive wrist angle moves camera toward forearm, -1 if inverted
+        self.wrist_collision_sign = self._detect_collision_sign()
+
+        # Extract joint limits in radians with camera-safe wrist pitch ceiling
         self.joint_limits = []
-        for row in self.dh_table:
+        for i, row in enumerate(self.dh_table):
             min_deg, max_deg = row["limits_deg"]
+            if i == self.wrist_pitch_idx and self.q3_safe_max_deg is not None:
+                if self.wrist_collision_sign > 0:
+                    max_deg = min(max_deg, self.q3_safe_max_deg)
+                else:
+                    min_deg = max(min_deg, -self.q3_safe_max_deg)
             self.joint_limits.append((np.radians(min_deg), np.radians(max_deg)))
         # Gripper limit (0.0=closed to 100.0=open)
         self.joint_limits.append((0.0, 100.0))
+
+    def _detect_collision_sign(self):
+        """
+        Determines whether positive or negative rotation around wrist_pitch_idx tilts
+        the camera mount towards the forearm link. Returns +1 if positive angle reduces clearance,
+        -1 if inverted.
+        """
+        try:
+            def eval_clearance(wrist_angle_rad):
+                q0 = 0.0
+                q1 = 0.5
+                q2 = -0.8
+                q3 = wrist_angle_rad
+                r_elbow = self.L2 * np.cos(q1)
+                p_elbow = np.array([r_elbow, 0.0, self.L1 + self.L2 * np.sin(q1)])
+                th2 = q1 + q2
+                r_forearm = self.L3 * np.cos(th2)
+                p_wrist = np.array([p_elbow[0] + r_forearm, 0.0, p_elbow[2] + self.L3 * np.sin(th2)])
+                th3 = q1 + q2 + q3
+                r_tip = r_forearm + self.L4 * np.cos(th3)
+                p_tip = np.array([p_elbow[0] + r_tip, 0.0, p_wrist[2] + self.L4 * np.sin(th3)])
+                c, _ = compute_camera_forearm_clearance(p_elbow, p_wrist, p_tip, self.cam_forward_m, self.cam_height_m, self.cam_lateral_m)
+                return c
+
+            c_neg = eval_clearance(-np.radians(20.0))
+            c_pos = eval_clearance(+np.radians(20.0))
+            return 1 if c_pos < c_neg else -1
+        except Exception:
+            return 1
+
+    def update_camera_extrinsics(self, forward_cm=None, height_cm=None, lateral_cm=None):
+        """Updates camera mounting extrinsics for universal 3D geometric clearance checks."""
+        if forward_cm is not None:
+            self.cam_forward_m = float(forward_cm) / 100.0
+        if height_cm is not None:
+            self.cam_height_m = float(height_cm) / 100.0
+        if lateral_cm is not None:
+            self.cam_lateral_m = float(lateral_cm) / 100.0
+        self.wrist_collision_sign = self._detect_collision_sign()
+
+    def update_q3_safe_max(self, q3_safe_max_deg):
+        """Dynamically updates the camera-safe upper limit for the wrist pitch joint."""
+        self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
+        self.wrist_pitch_safe_max_deg = self.q3_safe_max_deg
+        idx = getattr(self, "wrist_pitch_idx", 3)
+        if len(self.joint_limits) > idx and len(self.dh_table) > idx:
+            raw_min, raw_max = self.dh_table[idx]["limits_deg"]
+            if getattr(self, "wrist_collision_sign", 1) > 0:
+                clamped_max = min(raw_max, self.q3_safe_max_deg)
+                self.joint_limits[idx] = (np.radians(raw_min), np.radians(clamped_max))
+            else:
+                clamped_min = max(raw_min, -self.q3_safe_max_deg)
+                self.joint_limits[idx] = (np.radians(clamped_min), np.radians(raw_max))
+
+    def update_wrist_safe_max(self, safe_max_deg):
+        """Universal alias for update_q3_safe_max across all robot types."""
+        self.update_q3_safe_max(safe_max_deg)
 
     def get_dh_table(self):
         """Returns the DH parameter table representation."""
@@ -311,13 +498,24 @@ class DHKinematics:
         best_err = 1e9
         best_is_exact = False
 
-        # Generate candidate approach pitch angles
-        # Nominal pitch first, followed by angular perturbations if limits are saturated
-        pitch_candidates = [pitch]
+        # Ground-proximity adaptive approach pitch:
+        # When target elevation is low (near tabletop/floor, z < 0.16m), horizontal grasp
+        # is physically impossible and tilts wrist camera backward into forearm.
+        # Dynamically seed pitch towards a downward plunge approach (-60°).
+        nominal_pitch = float(pitch)
+        if z < 0.16:
+            alpha_z = float(np.clip((z - 0.02) / 0.14, 0.0, 1.0))
+            plunge_pitch = np.radians(-60.0)
+            nominal_pitch = float(plunge_pitch * (1.0 - alpha_z) + nominal_pitch * alpha_z)
+
+        # Generate candidate approach pitch angles:
+        # Downward plunge angles FIRST (prioritizes q3 <= safe_max and avoids camera collision)
+        pitch_candidates = [nominal_pitch]
         if allow_pitch_adaptation:
             for delta_deg in range(5, 75, 5):
-                pitch_candidates.append(pitch - np.radians(delta_deg))
-                pitch_candidates.append(pitch + np.radians(delta_deg))
+                pitch_candidates.append(nominal_pitch - np.radians(delta_deg))
+            for delta_deg in range(5, 75, 5):
+                pitch_candidates.append(nominal_pitch + np.radians(delta_deg))
 
         for p_cand in pitch_candidates:
             p_clamped = np.clip(p_cand, -np.radians(85), np.radians(85))
@@ -369,12 +567,42 @@ class DHKinematics:
                     fk = self.forward_kinematics(q_rad)
                     pos_err = float(np.linalg.norm(fk[:3] - np.array([x, y, z])))
                     pitch_diff = abs(p_clamped - pitch)
-                    score = pos_err * 100.0 + pitch_diff * 0.1
+
+                    # 1. Asymmetric Wrist Safety Cost:
+                    # Invariant to joint numbering and axis direction conventions
+                    wrist_idx = getattr(self, "wrist_pitch_idx", 3)
+                    collision_sign = getattr(self, "wrist_collision_sign", 1)
+                    wrist_deg = float(np.degrees(q_rad[wrist_idx]))
+                    effective_wrist_tilt = wrist_deg * collision_sign
+
+                    if effective_wrist_tilt > self.q3_safe_max_deg:
+                        wrist_penalty = 500.0 * ((effective_wrist_tilt - self.q3_safe_max_deg) ** 2)
+                    else:
+                        wrist_penalty = -0.1 * abs(wrist_deg)
+
+                    # 2. Universal 3D Euclidean clearance: camera mount to forearm segment (Elbow -> Wrist)
+                    r_elbow = self.L2 * np.cos(q1)
+                    p_elbow = np.array([r_elbow * np.cos(q0), r_elbow * np.sin(q0), self.L1 + self.L2 * np.sin(q1)])
+                    th2 = q1 + q2
+                    r_forearm = self.L3 * np.cos(th2)
+                    p_wrist = np.array([p_elbow[0] + r_forearm * np.cos(q0), p_elbow[1] + r_forearm * np.sin(q0), p_elbow[2] + self.L3 * np.sin(th2)])
+                    p_tip = fk[:3]
+
+                    clearance, _ = compute_camera_forearm_clearance(
+                        p_elbow, p_wrist, p_tip,
+                        self.cam_forward_m, self.cam_height_m, self.cam_lateral_m
+                    )
+
+                    clearance_penalty = 0.0
+                    if clearance < 0.045:
+                        clearance_penalty = 1000.0 * ((0.045 - clearance) ** 2)
+
+                    score = pos_err * 200.0 + pitch_diff * 0.05 + wrist_penalty + clearance_penalty
 
                     if score < best_err:
                         best_err = score
                         best_q = q_rad
-                        if pos_err < 0.005 and not was_clamped:
+                        if pos_err < 0.005 and not was_clamped and effective_wrist_tilt <= self.q3_safe_max_deg and clearance >= 0.045:
                             best_is_exact = True
                             break
 
@@ -383,8 +611,8 @@ class DHKinematics:
 
         if best_q is None:
             # Fallback: enforce limits by projection
-            r_w = r - self.L4 * np.cos(pitch)
-            z_w = (z_eff - self.L1) - self.L4 * np.sin(pitch)
+            r_w = r - self.L4 * np.cos(nominal_pitch)
+            z_w = (z_eff - self.L1) - self.L4 * np.sin(nominal_pitch)
             d_w = np.hypot(r_w, z_w)
             if d_w > max_reach_wrist:
                 clamped_reasons.append("OUT_OF_REACH")
@@ -398,13 +626,17 @@ class DHKinematics:
             alpha = np.arctan2(z_w, r_w)
             beta = np.arctan2(self.L3 * np.sin(q2), self.L2 + self.L3 * np.cos(q2))
             q1 = alpha - beta
-            q3 = pitch - (q1 + q2)
+            q3 = nominal_pitch - (q1 + q2)
             q4 = roll
             best_q = [q0, q1, q2, q3, q4]
+            wrist_idx = getattr(self, "wrist_pitch_idx", 3)
+            collision_sign = getattr(self, "wrist_collision_sign", 1)
             for j in range(5):
                 lo, hi = self.joint_limits[j]
                 if best_q[j] < lo or best_q[j] > hi:
                     clamped_reasons.append(f"JOINT_LIMIT_Q{j}")
+                    if j == wrist_idx and (np.degrees(best_q[j]) * collision_sign) > self.q3_safe_max_deg:
+                        clamped_reasons.append("CAMERA_COLLISION_RISK")
                 best_q[j] = float(np.clip(best_q[j], lo, hi))
 
         # Convert to degrees
@@ -462,20 +694,20 @@ class DHKinematics:
 
 class SO100Kinematics(DHKinematics):
     """SO-100 5-DOF Robot Arm Kinematics (LeRobot Original Preset)."""
-    def __init__(self):
-        super().__init__(SO100_DH_TABLE, model_name="SO-100")
+    def __init__(self, q3_safe_max_deg=0.0, **kwargs):
+        super().__init__(SO100_DH_TABLE, model_name="SO-100", q3_safe_max_deg=q3_safe_max_deg, **kwargs)
 
 
 class SO101OmniKinKinematics(DHKinematics):
     """SO-ARM101-OMNI-KIN 5-DOF Robot Arm Kinematics (Default Project Setup)."""
-    def __init__(self):
-        super().__init__(SO101_OMNIKIN_DH_TABLE, model_name="SO-ARM101-OMNI-KIN")
+    def __init__(self, q3_safe_max_deg=0.0, **kwargs):
+        super().__init__(SO101_OMNIKIN_DH_TABLE, model_name="SO-ARM101-OMNI-KIN", q3_safe_max_deg=q3_safe_max_deg, **kwargs)
 
 
 class SO101Kinematics(DHKinematics):
     """SO-101 5-DOF Robot Arm Kinematics (Refined Open Hardware Preset)."""
-    def __init__(self):
-        super().__init__(SO101_DH_TABLE, model_name="SO-101")
+    def __init__(self, q3_safe_max_deg=0.0, **kwargs):
+        super().__init__(SO101_DH_TABLE, model_name="SO-101", q3_safe_max_deg=q3_safe_max_deg, **kwargs)
 
 
 ROBOT_PRESETS = {
@@ -520,26 +752,44 @@ def normalize_robot_type(robot_type):
     return r if r in ROBOT_PRESETS else "so_arm101_omni_kin"
 
 
-def get_robot_solver(robot_type="so_arm101_omni_kin"):
-    """Factory helper to obtain the kinematic solver instance."""
+def get_robot_solver(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0, **kwargs):
+    """Factory helper to obtain the kinematic solver instance with camera safety limits."""
     r_type = normalize_robot_type(robot_type)
     if r_type in ROBOT_PRESETS:
-        return ROBOT_PRESETS[r_type]["class"]()
-    return SO101OmniKinKinematics()
+        return ROBOT_PRESETS[r_type]["class"](q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+    return SO101OmniKinKinematics(q3_safe_max_deg=q3_safe_max_deg, **kwargs)
 
 
-def get_robot_specs(robot_type="so_arm101_omni_kin"):
-    """Returns metadata and DH table for the specified robot preset."""
+def get_robot_specs(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0):
+    """Returns metadata, DH table, and component breakdown for the specified robot preset."""
     r_type = normalize_robot_type(robot_type)
     preset = ROBOT_PRESETS.get(r_type, ROBOT_PRESETS["so_arm101_omni_kin"])
+    urdf_str = get_robot_urdf(r_type)
+    components = None
+    try:
+        _, parsed_specs = URDFParser.parse_urdf(urdf_str, q3_safe_max_deg=q3_safe_max_deg)
+        components = parsed_specs.get("components")
+    except Exception:
+        pass
+
+    dh_table_copy = [dict(row) for row in preset["dh_table"]]
+    wrist_idx = find_wrist_pitch_index(dh_table_copy)
+    if len(dh_table_copy) > wrist_idx and q3_safe_max_deg is not None:
+        limits = list(dh_table_copy[wrist_idx]["limits_deg"])
+        limits[1] = min(limits[1], float(q3_safe_max_deg))
+        dh_table_copy[wrist_idx]["limits_deg"] = limits
+
     return {
         "robot_type": r_type,
         "name": preset["name"],
         "description": preset["description"],
         "reach_meters": preset["reach_meters"],
         "payload_kg": preset["payload_kg"],
-        "dh_table": preset["dh_table"],
-        "urdf": get_robot_urdf(r_type)
+        "dh_table": dh_table_copy,
+        "urdf": urdf_str,
+        "components": components,
+        "wrist_pitch_idx": wrist_idx,
+        "q3_safe_max_deg": float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
     }
 
 
@@ -692,7 +942,7 @@ class URDFParser:
     """
 
     @staticmethod
-    def parse_urdf(urdf_text):
+    def parse_urdf(urdf_text, q3_safe_max_deg=0.0):
         """
         Parses a URDF XML string, extracts the serial kinematic joint chain,
         and constructs the corresponding Denavit-Hartenberg (DH) table and robot metadata.
@@ -711,6 +961,19 @@ class URDFParser:
         joints_by_parent = {}
         joints_by_child = {}
         joints_dict = {}
+        links_dict = {}
+
+        for link_elem in root.findall("link"):
+            l_name = link_elem.get("name", "")
+            visual_elem = link_elem.find("visual")
+            mesh_file = ""
+            if visual_elem is not None:
+                geo = visual_elem.find("geometry")
+                if geo is not None:
+                    m = geo.find("mesh")
+                    if m is not None:
+                        mesh_file = m.get("filename", "")
+            links_dict[l_name] = {"name": l_name, "mesh": mesh_file}
 
         for joint_elem in root.findall("joint"):
             j_name = joint_elem.get("name", "joint")
@@ -720,6 +983,7 @@ class URDFParser:
             origin_elem = joint_elem.find("origin")
             limit_elem = joint_elem.find("limit")
             axis_elem = joint_elem.find("axis")
+            mimic_elem = joint_elem.find("mimic")
 
             parent_link = parent_elem.get("link") if parent_elem is not None else ""
             child_link = child_elem.get("link") if child_elem is not None else ""
@@ -740,10 +1004,18 @@ class URDFParser:
             if limit_elem is not None:
                 low_val = float(limit_elem.get("lower", -np.pi))
                 high_val = float(limit_elem.get("upper", np.pi))
-                if j_type == "revolute":
+                if j_type in ["revolute", "continuous"]:
                     limits_deg = [round(float(np.degrees(low_val)), 1), round(float(np.degrees(high_val)), 1)]
                 else:
-                    limits_deg = [round(float(low_val), 1), round(float(high_val), 1)]
+                    limits_deg = [round(float(low_val * 100.0), 1), round(float(high_val * 100.0), 1)]
+
+            mimic_info = None
+            if mimic_elem is not None:
+                mimic_info = {
+                    "joint": mimic_elem.get("joint", ""),
+                    "multiplier": float(mimic_elem.get("multiplier", 1.0)),
+                    "offset": float(mimic_elem.get("offset", 0.0))
+                }
 
             joint_info = {
                 "name": j_name,
@@ -753,10 +1025,13 @@ class URDFParser:
                 "xyz": xyz,
                 "rpy": rpy,
                 "axis": axis,
-                "limits_deg": limits_deg
+                "limits_deg": limits_deg,
+                "mimic": mimic_info
             }
             joints_dict[j_name] = joint_info
-            joints_by_parent[parent_link] = joint_info
+            if parent_link not in joints_by_parent:
+                joints_by_parent[parent_link] = []
+            joints_by_parent[parent_link].append(joint_info)
             joints_by_child[child_link] = joint_info
 
         if not joints_dict:
@@ -768,19 +1043,66 @@ class URDFParser:
         base_candidates = list(all_parents - all_children)
         current_link = base_candidates[0] if base_candidates else list(all_parents)[0]
 
-        # Trace ordered joint chain
-        ordered_joints = []
+        # Trace ordered serial arm joint chain up to the gripper base
+        arm_chain_joints = []
+        arm_chain_links = [current_link]
+        flange_joint = None
+        gripper_base_link = None
+
         while current_link in joints_by_parent:
-            j_info = joints_by_parent[current_link]
-            ordered_joints.append(j_info)
-            current_link = j_info["child"]
+            children_joints = joints_by_parent[current_link]
+            primary_joint = None
+            for j in children_joints:
+                if "grip" in j["child"].lower() or "wrist_roll" in j["name"].lower():
+                    flange_joint = j
+                    gripper_base_link = j["child"]
+                    primary_joint = j
+                    break
+                elif j["type"] in ["revolute", "continuous"]:
+                    primary_joint = j
+                    break
 
-        # Filter arm joints + gripper
-        arm_joints = [j for j in ordered_joints if j["type"] in ["revolute", "continuous"]]
-        gripper_joint = next((j for j in ordered_joints if j["type"] in ["prismatic", "revolute"] and ("grip" in j["name"].lower() or j["type"] == "prismatic")), None)
+            if not primary_joint:
+                primary_joint = children_joints[0]
 
+            arm_chain_joints.append(primary_joint)
+            current_link = primary_joint["child"]
+            arm_chain_links.append(current_link)
+
+            if flange_joint is not None or len(arm_chain_joints) >= 5:
+                break
+
+        # If gripper_base_link wasn't marked, set to the 5th child
+        if not gripper_base_link and len(arm_chain_links) > 5:
+            gripper_base_link = arm_chain_links[5]
+        elif not gripper_base_link and len(arm_chain_links) > 0:
+            gripper_base_link = arm_chain_links[-1]
+
+        # Filter arm joints
+        arm_joints = [j for j in arm_chain_joints if j["type"] in ["revolute", "continuous"]]
         if len(arm_joints) < 3:
-            arm_joints = ordered_joints[:5]
+            arm_joints = arm_chain_joints[:5]
+
+        # Extract all End-Effector links and joints attached downstream
+        ee_joints = []
+        ee_links = []
+        if gripper_base_link:
+            ee_links.append(gripper_base_link)
+            frontier = [gripper_base_link]
+            while frontier:
+                p = frontier.pop(0)
+                if p in joints_by_parent:
+                    for j in joints_by_parent[p]:
+                        if j not in arm_chain_joints and j not in ee_joints:
+                            ee_joints.append(j)
+                            ee_links.append(j["child"])
+                            frontier.append(j["child"])
+
+        for j_name, j_info in joints_dict.items():
+            if j_info not in arm_chain_joints and j_info not in ee_joints:
+                ee_joints.append(j_info)
+                if j_info["child"] not in ee_links:
+                    ee_links.append(j_info["child"])
 
         # Extract link lengths
         # L1: Base to shoulder height
@@ -799,7 +1121,6 @@ class URDFParser:
         j2 = arm_joints[2] if len(arm_joints) > 2 else None
         if j2:
             norm2 = float(np.linalg.norm(j2["xyz"]))
-            # Nominal SO-101 upper arm is 140mm; in OMNI-KIN URDF, CAD joint offset is along Y and offset by shoulder joint Y
             L2 = 0.140 if (0.110 <= norm2 <= 0.145 and "omni" in robot_name.lower()) else (norm2 if norm2 > 0.05 else 0.140)
         else:
             L2 = 0.140
@@ -813,6 +1134,7 @@ class URDFParser:
             L3 = 0.135
 
         # L4: Wrist to gripper tip
+        gripper_joint = next((j for j in ee_joints if j["type"] in ["prismatic", "revolute"]), None)
         L4 = 0.110
         if gripper_joint:
             norm_grip = float(np.linalg.norm(gripper_joint["xyz"]))
@@ -821,27 +1143,26 @@ class URDFParser:
             elif norm_grip > 0.03:
                 L4 = 0.110
 
-        # Joint limits normalization:
-        # Mechanical CAD assemblies (SolidWorks, Onshape, Fusion 360) frequently define
-        # zero at parking/folded position and axes inverted (e.g. elbow lower=0.0, upper=3.316;
-        # shoulder lower=-3.229, upper=0.262).
-        # Serial planar DH kinematics defines zero outstretched forward, where elbow flexion is
-        # negative (-150 to 0 deg) and shoulder pitch reaches upward (+80 deg).
-        # If naive limits are kept, elbow (q2 <= 0) and shoulder (q1 > 15 deg) lock permanently.
-        # We normalize CAD offsets based on total angular range (span):
+        # Detect universal wrist pitch joint index dynamically
+        detected_wrist_idx = find_wrist_pitch_index(arm_joints)
+
+        # Joint limits normalization
         def normalize_joint_limits(j_idx, raw_limits):
             if not raw_limits or len(raw_limits) != 2:
                 return [-180.0, 180.0]
             low, high = float(raw_limits[0]), float(raw_limits[1])
             span = high - low
             if j_idx == 1:  # Shoulder pitch
-                if high < 45.0:  # Shifted CAD rest limit (e.g. [-185, 15])
+                if high < 45.0:
                     half_span = min(100.0, round(span / 2.0, 1))
                     return [-half_span, half_span]
             elif j_idx == 2:  # Elbow pitch
-                if low >= -10.0:  # One-sided folded CAD limit (e.g. [0, 190])
+                if low >= -10.0:
                     half_span = min(150.0, round(span, 1))
                     return [-half_span, half_span]
+            elif j_idx == detected_wrist_idx:  # Universally detected wrist pitch joint
+                if q3_safe_max_deg is not None:
+                    high = min(high, float(q3_safe_max_deg))
             return [round(low, 1), round(high, 1)]
 
         # Construct DH Table
@@ -899,13 +1220,78 @@ class URDFParser:
         ]
 
         reach_m = round(float(L2 + L3 + L4), 3)
+
+        # Clear semantic component separation between Arm Body and End-Effector
+        components = {
+            "arm_body": {
+                "name": "Arm Body (5-DOF Serial Chain)",
+                "root_link": arm_chain_links[0] if arm_chain_links else "base",
+                "links": [
+                    {"name": l, "mesh": links_dict.get(l, {}).get("mesh", "")}
+                    for l in arm_chain_links if l != gripper_base_link
+                ],
+                "joints": [
+                    {
+                        "name": j["name"],
+                        "type": j["type"],
+                        "parent": j["parent"],
+                        "child": j["child"],
+                        "axis": j["axis"],
+                        "limits_deg": j["limits_deg"]
+                    }
+                    for j in arm_chain_joints[:5]
+                ],
+                "link_lengths_cm": {
+                    "L1_base_height": round(float(L1 * 100), 1),
+                    "L2_upper_arm": round(float(L2 * 100), 1),
+                    "L3_forearm": round(float(L3 * 100), 1)
+                },
+                "reach_cm": round(float((L2 + L3) * 100), 1)
+            },
+            "end_effector": {
+                "name": "End-Effector (Gripper Assembly & TCP)",
+                "mount_link": arm_chain_joints[3]["child"] if len(arm_chain_joints) > 3 else "wrist",
+                "flange_joint": flange_joint["name"] if flange_joint else (arm_chain_joints[4]["name"] if len(arm_chain_joints) > 4 else "wrist_roll_joint"),
+                "palm_link": gripper_base_link or "gripper_base",
+                "palm_mesh": links_dict.get(gripper_base_link, {}).get("mesh", ""),
+                "links": [
+                    {"name": l, "mesh": links_dict.get(l, {}).get("mesh", "")}
+                    for l in ee_links
+                ],
+                "actuator_joints": [
+                    {
+                        "name": j["name"],
+                        "type": j["type"],
+                        "parent": j["parent"],
+                        "child": j["child"],
+                        "limits_deg": j["limits_deg"]
+                    }
+                    for j in ee_joints if "gear" in j["name"].lower() or "jaw" in j["name"].lower() or j["type"] == "continuous"
+                ],
+                "fingers": [
+                    {
+                        "name": j["name"],
+                        "link": j["child"],
+                        "type": j["type"],
+                        "stroke_cm": round(abs(j["limits_deg"][1] - j["limits_deg"][0]), 2) if j["type"] == "prismatic" else 4.4,
+                        "mimic": j.get("mimic")
+                    }
+                    for j in ee_joints if "left" in j["name"].lower() or "right" in j["name"].lower() or "finger" in j["name"].lower() or "arm_" in j["child"].lower()
+                ],
+                "tcp_offset_cm": round(float(L4 * 100), 1),
+                "total_length_cm": round(float(L4 * 100), 1)
+            }
+        }
+
         specs = {
             "robot_name": robot_name,
-            "total_joints_parsed": len(ordered_joints),
+            "wrist_pitch_idx": detected_wrist_idx,
+            "total_joints_parsed": len(joints_dict),
             "revolute_joints": len(arm_joints),
             "reach_meters": reach_m,
             "payload_kg": 0.50,
-            "dh_table": dh_table
+            "dh_table": dh_table,
+            "components": components
         }
 
         return dh_table, specs
@@ -1178,6 +1564,368 @@ class WorkspaceCalibrator:
             yaw_deg=90.0
         )
         return self.get_config()
+
+
+class CameraGripperCalibrator:
+    """
+    6-DoF Camera-to-Gripper (Tool Center Point / TCP) Extrinsic Calibrator.
+    Transforms 6-DoF trajectory poses between the Camera Optical Center and the physical Gripper Fingertip TCP.
+
+    Parameters (matching physical CAD teleoperation assembly):
+      forward_cm : Longitudinal distance forward along gripper axis from mount to fingertips (default: 12.8 cm)
+      height_cm  : Vertical height distance from gripper grasp centerline up to camera lens (default: 10.9 cm)
+      lateral_cm : Lateral offset across gripper (default: 0.0 cm)
+      pitch_deg  : Camera tilt angle downward towards gripper fingertips (default: 40.4 deg)
+      roll_deg   : Roll alignment angle (default: 0.0 deg)
+      yaw_deg    : Yaw alignment angle (default: 0.0 deg)
+      enabled    : If False, passes poses through unchanged (default: True)
+    """
+
+    @staticmethod
+    def compute_tilted_angle(forward_cm, height_cm):
+        """
+        Computes the angle (in degrees) of the line from Gripper TCP to Camera relative to horizontal X-axis:
+        theta = arctan2(height_cm, forward_cm)
+        """
+        if abs(forward_cm) <= 1e-6:
+            return 90.0 if height_cm > 0 else 0.0
+        return float(np.degrees(np.arctan2(height_cm, forward_cm)))
+
+    @staticmethod
+    def compute_height_from_angle(forward_cm, angle_deg):
+        """
+        Computes the vertical height distance from forward distance and tilt angle:
+        height_cm = forward_cm * tan(angle_deg)
+        """
+        return float(forward_cm * np.tan(np.radians(angle_deg)))
+
+    @staticmethod
+    def compute_forward_from_angle(height_cm, angle_deg):
+        """
+        Computes the forward distance from vertical height and tilt angle:
+        forward_cm = height_cm / tan(angle_deg)
+        """
+        tan_val = np.tan(np.radians(angle_deg))
+        if abs(tan_val) < 1e-6:
+            return 0.0
+        return float(height_cm / tan_val)
+
+    def __init__(
+        self,
+        forward_cm=12.8,
+        height_cm=10.9,
+        lateral_cm=0.0,
+        pitch_deg=40.4,
+        roll_deg=0.0,
+        yaw_deg=0.0,
+        enabled=True
+    ):
+        self.forward_cm = float(forward_cm)
+        self.height_cm = float(height_cm)
+        self.lateral_cm = float(lateral_cm)
+        self.pitch_deg = float(pitch_deg)
+        self.roll_deg = float(roll_deg)
+        self.yaw_deg = float(yaw_deg)
+        self.enabled = bool(enabled)
+        self._recompute_relative_transform()
+
+    def update_config(
+        self,
+        forward_cm=None,
+        height_cm=None,
+        lateral_cm=None,
+        pitch_deg=None,
+        roll_deg=None,
+        yaw_deg=None,
+        enabled=None
+    ):
+        if forward_cm is not None:
+            self.forward_cm = float(forward_cm)
+        if height_cm is not None:
+            self.height_cm = float(height_cm)
+        if lateral_cm is not None:
+            self.lateral_cm = float(lateral_cm)
+        if pitch_deg is not None:
+            self.pitch_deg = float(pitch_deg)
+        if roll_deg is not None:
+            self.roll_deg = float(roll_deg)
+        if yaw_deg is not None:
+            self.yaw_deg = float(yaw_deg)
+        if enabled is not None:
+            self.enabled = bool(enabled)
+        self._recompute_relative_transform()
+
+    def get_config(self):
+        return {
+            "forward_cm": self.forward_cm,
+            "height_cm": self.height_cm,
+            "lateral_cm": self.lateral_cm,
+            "pitch_deg": self.pitch_deg,
+            "roll_deg": self.roll_deg,
+            "yaw_deg": self.yaw_deg,
+            "enabled": self.enabled
+        }
+
+    def _recompute_relative_transform(self):
+        # Convert cm to meters
+        self.forward_m = self.forward_cm / 100.0
+        self.height_m = self.height_cm / 100.0
+        self.lateral_m = self.lateral_cm / 100.0
+
+        # In Gripper Frame {G}:
+        # +X_g: Right (lateral)
+        # +Y_g: Forward (along gripper grasp)
+        # +Z_g: Up (vertical)
+        # The vector from camera to gripper tip is: [lateral_m, forward_m, -height_m]
+        self.delta_g = np.array([self.lateral_m, self.forward_m, -self.height_m], dtype=np.float64)
+
+        # Relative rotation from Phone body to Gripper body:
+        # Camera is tilted by pitch_deg around lateral axis (X):
+        theta_pitch = np.radians(self.pitch_deg)
+        theta_roll = np.radians(self.roll_deg)
+        theta_yaw = np.radians(self.yaw_deg)
+
+        # R_rel rotates from gripper frame to phone frame:
+        # When phone tilts forward by theta_pitch, gripper pitch = phone_pitch - theta_pitch
+        R_pitch = R.from_euler('x', -theta_pitch).as_matrix()
+        if abs(self.roll_deg) > 1e-4 or abs(self.yaw_deg) > 1e-4:
+            R_ext = R.from_euler('yz', [-theta_roll, -theta_yaw]).as_matrix()
+            self.R_rel = R_pitch @ R_ext
+        else:
+            self.R_rel = R_pitch
+
+    def camera_to_gripper(self, pose_cam):
+        """
+        Transforms a 6-DoF pose [x, y, z, roll, pitch, yaw] from camera optical center to gripper tip.
+        """
+        if not self.enabled:
+            return np.array(pose_cam, dtype=np.float64)
+
+        p_c = np.array(pose_cam[:3], dtype=np.float64)
+        euler_c = np.array(pose_cam[3:], dtype=np.float64)
+
+        R_c2w = trajectory_euler_to_rotation_matrix(euler_c)
+        R_p2w = R_c2w @ R_CAM_TO_PHONE
+
+        # Gripper orientation in world:
+        R_g2w = R_p2w @ self.R_rel
+
+        # Position in world: delta_w = R_g2w @ delta_g
+        delta_w = R_g2w @ self.delta_g
+        p_g = p_c + delta_w
+
+        # Gripper Euler angles in world (for robot / inverse kinematics):
+        euler_g = rotation_matrix_to_trajectory_euler(R_g2w @ R_CAM_TO_PHONE)
+
+        return np.array([
+            p_g[0], p_g[1], p_g[2],
+            euler_g[0], euler_g[1], euler_g[2]
+        ], dtype=np.float64)
+
+    def gripper_to_camera(self, pose_gripper):
+        """
+        Transforms a 6-DoF pose [x, y, z, roll, pitch, yaw] from gripper tip back to camera optical center.
+        """
+        if not self.enabled:
+            return np.array(pose_gripper, dtype=np.float64)
+
+        p_g = np.array(pose_gripper[:3], dtype=np.float64)
+        euler_g = np.array(pose_gripper[3:], dtype=np.float64)
+
+        R_g2w = trajectory_euler_to_rotation_matrix(euler_g) @ R_CAM_TO_PHONE
+
+        # Position in world: p_c = p_g - R_g2w @ delta_g
+        delta_w = R_g2w @ self.delta_g
+        p_c = p_g - delta_w
+
+        # Camera orientation in world:
+        R_p2w = R_g2w @ self.R_rel.T
+        euler_c = rotation_matrix_to_trajectory_euler(R_p2w @ R_CAM_TO_PHONE)
+
+        return np.array([
+            p_c[0], p_c[1], p_c[2],
+            euler_c[0], euler_c[1], euler_c[2]
+        ], dtype=np.float64)
+
+    def transform_trajectory(self, trajectory, to_gripper=True):
+        """
+        Batch-transforms a trajectory array (N, 6).
+        """
+        traj = np.asarray(trajectory, dtype=np.float64)
+        if len(traj) == 0 or not self.enabled:
+            return traj
+
+        res = np.zeros_like(traj)
+        func = self.camera_to_gripper if to_gripper else self.gripper_to_camera
+        for i in range(len(traj)):
+            res[i] = func(traj[i])
+        return res
+
+
+DEFAULT_INITIAL_POSITION = {
+    "x": 0.15,
+    "y": 0.00,
+    "z": 0.20,
+    "pitch_deg": 0.0,
+    "roll_deg": 0.0,
+    "yaw_deg": 0.0,
+    "gripper": 100.0,
+    "enabled": True
+}
+
+
+class TrajectoryPlanner:
+    """
+    Trajectory Planner for Robot Arm Approach & Execution.
+    Generates smooth C^2 quintic minimum-jerk trajectory paths connecting
+    the robot's Initial Home/Standby Position to the demonstration starting point.
+    """
+
+    @staticmethod
+    def quintic_blend(tau):
+        """
+        C^2 minimum-jerk polynomial scale factor:
+        s(tau) = 10*tau^3 - 15*tau^4 + 6*tau^5 for tau in [0, 1].
+        Yields zero velocity and zero acceleration at tau = 0 and tau = 1.
+        """
+        tau = np.clip(tau, 0.0, 1.0)
+        return 10.0 * (tau**3) - 15.0 * (tau**4) + 6.0 * (tau**5)
+
+    @staticmethod
+    def shortest_angle_diff(th_target, th_source):
+        """Computes shortest angular difference wrapped to [-pi, pi]."""
+        diff = th_target - th_source
+        return (diff + np.pi) % (2 * np.pi) - np.pi
+
+    def __init__(self, solver=None, workspace_calibrator=None, camera_gripper_calibrator=None):
+        self.solver = solver or get_robot_solver()
+        self.workspace_calibrator = workspace_calibrator or WorkspaceCalibrator()
+        self.camera_gripper_calibrator = camera_gripper_calibrator or CameraGripperCalibrator()
+
+    def plan_approach_path(
+        self,
+        p_start,
+        p_home=None,
+        duration_s=1.5,
+        fps=30,
+        lift_clearance_m=0.06,
+        home_gripper=100.0,
+        start_gripper=100.0,
+        start_in_robot_frame=False
+    ):
+        """
+        Calculates a collision-safe, smooth approach trajectory from the robot's Initial Position
+        (Home/Standby Pose) to the demonstration starting point p_start.
+
+        Parameters:
+          p_start : 6-DoF starting pose [x, y, z, roll, pitch, yaw] of the demonstration
+          p_home  : 6-DoF canonical initial pose [x, y, z, roll, pitch, yaw] in Robot Base Frame.
+                    If None, uses DEFAULT_INITIAL_POSITION.
+          duration_s : Approach duration in seconds (default: 1.5s)
+          fps : Frame rate (default: 30)
+          lift_clearance_m : Extra elevation clearance above table for parabolic arc (default: 0.06m)
+          home_gripper : Gripper opening at home (0-100%, default: 100% open)
+          start_gripper: Gripper opening at demo start (0-100%, default: 100%)
+          start_in_robot_frame : True if p_start is already in Robot Frame, False if in ArUco table frame.
+
+        Returns dict containing:
+          - 'robot_ee_poses': (N, 6) in Robot Base Frame
+          - 'aruco_ee_poses': (N, 6) in ArUco Table Frame
+          - 'aruco_cam_poses': (N, 6) Camera Poses in ArUco Table Frame
+          - 'gripper_states': (N,) 0-100%
+          - 'joint_states': (N, 6) degrees
+          - 'actions': (N, 6) next-step joint states
+          - 'timestamps': (N,) seconds
+          - 'num_frames': N
+          - 'is_feasible': bool (True if all waypoints have feasible IK)
+          - 'max_error_cm': max IK tracking error along approach
+        """
+        if p_home is None:
+            p_home = np.array([
+                DEFAULT_INITIAL_POSITION["x"],
+                DEFAULT_INITIAL_POSITION["y"],
+                DEFAULT_INITIAL_POSITION["z"],
+                np.radians(DEFAULT_INITIAL_POSITION.get("pitch_deg", 0.0)),
+                np.radians(DEFAULT_INITIAL_POSITION.get("roll_deg", 0.0)),
+                np.radians(DEFAULT_INITIAL_POSITION.get("yaw_deg", 0.0))
+            ], dtype=np.float64)
+        else:
+            p_home = np.asarray(p_home, dtype=np.float64)
+
+        p_start_arr = np.asarray(p_start, dtype=np.float64)
+        if start_in_robot_frame:
+            p_start_robot = p_start_arr
+            p_start_aruco = self.workspace_calibrator.robot_to_aruco(p_start_arr)
+        else:
+            p_start_aruco = p_start_arr
+            p_start_robot = self.workspace_calibrator.aruco_to_robot(p_start_arr)
+
+        num_frames = max(10, int(round(duration_s * fps)))
+        tau_vals = np.linspace(0.0, 1.0, num_frames)
+
+        zh = p_home[2]
+        zs = p_start_robot[2]
+        z_peak = max(zh, zs + float(lift_clearance_m))
+        z_extra = max(0.0, z_peak - max(zh, zs))
+
+        robot_ee = np.zeros((num_frames, 6), dtype=np.float64)
+        grippers = np.zeros(num_frames, dtype=np.float64)
+
+        for i, tau in enumerate(tau_vals):
+            s = self.quintic_blend(tau)
+            # Cartesian X, Y
+            x = p_home[0] + s * (p_start_robot[0] - p_home[0])
+            y = p_home[1] + s * (p_start_robot[1] - p_home[1])
+            # Elevation Z with parabolic clearance arch
+            z = (zh + s * (zs - zh)) + (4.0 * tau * (1.0 - tau) * z_extra)
+            # Enforce minimum table surface clearance (1.2 cm)
+            z = max(0.012, z)
+
+            # Orientations (shortest angular path)
+            roll = p_home[3] + s * self.shortest_angle_diff(p_start_robot[3], p_home[3])
+            pitch = p_home[4] + s * self.shortest_angle_diff(p_start_robot[4], p_home[4])
+            yaw = p_home[5] + s * self.shortest_angle_diff(p_start_robot[5], p_home[5])
+
+            robot_ee[i] = [x, y, z, roll, pitch, yaw]
+            grippers[i] = float(home_gripper) + s * (float(start_gripper) - float(home_gripper))
+
+        # Transform to ArUco frame
+        aruco_ee = self.workspace_calibrator.transform_trajectory(robot_ee, to_robot=False)
+        aruco_cam = self.camera_gripper_calibrator.transform_trajectory(aruco_ee, to_gripper=False)
+
+        # Solve IK for all waypoints and verify feasibility
+        joint_states = np.zeros((num_frames, 6), dtype=np.float64)
+        feasible_count = 0
+        max_err = 0.0
+
+        for i in range(num_frames):
+            res = self.solver.solve_feasible_ik(robot_ee[i], gripper_state=grippers[i])
+            joint_states[i] = res["joints"]
+            if res["is_feasible"]:
+                feasible_count += 1
+            max_err = max(max_err, res["error_distance_cm"])
+
+        actions = np.roll(joint_states, -1, axis=0)
+        actions[-1] = joint_states[-1]
+        timestamps = np.linspace(0.0, duration_s, num_frames, dtype=np.float32)
+
+        is_feasible = (feasible_count == num_frames) and (max_err < 1.5)
+
+        return {
+            "robot_ee_poses": robot_ee.tolist(),
+            "aruco_ee_poses": aruco_ee.tolist(),
+            "aruco_cam_poses": aruco_cam.tolist(),
+            "gripper_states": grippers.tolist(),
+            "joint_states": joint_states.tolist(),
+            "actions": actions.tolist(),
+            "timestamps": timestamps.tolist(),
+            "num_frames": num_frames,
+            "duration_s": duration_s,
+            "is_feasible": is_feasible,
+            "max_error_cm": round(float(max_err), 2),
+            "home_pose_robot": p_home.tolist(),
+            "home_pose_aruco": self.workspace_calibrator.robot_to_aruco(p_home).tolist()
+        }
 
 
 if __name__ == "__main__":
