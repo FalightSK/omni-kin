@@ -53,13 +53,33 @@ export default function App() {
   const [selectedEpIdx, setSelectedEpIdx] = useState(-1);
   const [isEkfModalOpen, setIsEkfModalOpen] = useState(false);
   const [isRobotModalOpen, setIsRobotModalOpen] = useState(false);
+  const [robotModalTab, setRobotModalTab] = useState('offset');
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
+  const [trajectoryMode, setTrajectoryMode] = useState('free_form'); // 'free_form' | 'initial_aware'
   const [robotConfig, setRobotConfig] = useState({
     robot_type: 'so_arm101_omni_kin',
     offset_x: 0.038,
     offset_y: -0.406,
     offset_z: 0.00,
-    yaw_deg: 90.0
+    yaw_deg: 90.0,
+    gripper_offset: {
+      forward_cm: 12.8,
+      height_cm: 10.9,
+      lateral_cm: 0.0,
+      pitch_deg: 40.4,
+      roll_deg: 0.0,
+      yaw_deg: 0.0,
+      enabled: true
+    },
+    initial_position: {
+      x: 0.15,
+      y: 0.00,
+      z: 0.20,
+      pitch: 0.0,
+      roll: 0.0,
+      yaw: 0.0,
+      gripper: 100.0
+    }
   });
 
   const fetchEpisodes = async (preferredIndex = null) => {
@@ -136,17 +156,33 @@ export default function App() {
 
   const handleExportLeRobot = async () => {
     try {
-      const res = await fetch('/api/export_lerobot', { method: 'POST' });
+      const res = await fetch('/api/export_lerobot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trajectory_mode: trajectoryMode })
+      });
       const data = await res.json();
-      alert(`LeRobot Dataset Exported Successfully!\n\nEmbodiment: ${data.robot_type.toUpperCase()}\nPath: ${data.export_path}\nTotal Episodes: ${data.total_episodes}`);
+      const modeLabel = data.trajectory_mode === 'initial_aware'
+        ? 'Initial-Position Aware (Fine-Tuning)'
+        : 'Free-Form (Pretraining)';
+      alert(`LeRobot Dataset Exported Successfully!\n\nEmbodiment: ${data.robot_type.toUpperCase()}\nMode: ${modeLabel}\nPath: ${data.export_path}\nTotal Episodes: ${data.total_episodes}`);
     } catch (err) {
       console.error(err);
     }
   };
 
-  const handleReprocessComplete = (newPoses) => {
+  const handleOpenRobotModal = (tab = 'offset') => {
+    setRobotModalTab(tab);
+    setIsRobotModalOpen(true);
+  };
+
+  const handleReprocessComplete = (newPoses, newEePoses) => {
     setEpisodes((prev) =>
-      prev.map((ep) => (ep.episode_index === selectedEpIdx ? { ...ep, poses: newPoses } : ep))
+      prev.map((ep) =>
+        ep.episode_index === selectedEpIdx
+          ? { ...ep, poses: newPoses, ...(newEePoses ? { ee_poses: newEePoses } : {}) }
+          : ep
+      )
     );
   };
 
@@ -165,11 +201,12 @@ export default function App() {
             currentView={currentView}
             setCurrentView={setCurrentView}
             onOpenEkfModal={() => setIsEkfModalOpen(true)}
-            onOpenRobotModal={() => setIsRobotModalOpen(true)}
+            onOpenRobotModal={() => handleOpenRobotModal('offset')}
             onOpenConnectModal={() => setIsConnectModalOpen(true)}
             onAddSample={handleAddSample}
             onExportLeRobot={handleExportLeRobot}
             robotConfig={robotConfig}
+            trajectoryMode={trajectoryMode}
           />
 
           <main className="flex-1 flex flex-col min-h-0">
@@ -183,7 +220,9 @@ export default function App() {
               onUpdateEpisodePoses={handleReprocessComplete}
               robotConfig={robotConfig}
               onUpdateRobotConfig={(newCfg) => setRobotConfig(newCfg)}
-              onOpenRobotModal={() => setIsRobotModalOpen(true)}
+              onOpenRobotModal={handleOpenRobotModal}
+              trajectoryMode={trajectoryMode}
+              setTrajectoryMode={setTrajectoryMode}
             />
           </main>
 
@@ -198,6 +237,7 @@ export default function App() {
             isOpen={isRobotModalOpen}
             onClose={() => setIsRobotModalOpen(false)}
             robotConfig={robotConfig}
+            initialTab={robotModalTab}
             onConfigSaved={(newConfig) => setRobotConfig(newConfig)}
           />
 

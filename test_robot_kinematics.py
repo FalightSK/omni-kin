@@ -13,6 +13,7 @@ from robot_kinematics import (
     SO100Kinematics,
     SO101Kinematics,
     WorkspaceCalibrator,
+    CameraGripperCalibrator,
     get_robot_solver,
     get_robot_specs,
     ROBOT_PRESETS
@@ -171,6 +172,63 @@ def test_feasible_ik_and_auto_align():
 
     print('[PASS] Feasible IK and Auto-Align successfully verified!')
 
+def test_camera_gripper_calibrator():
+    print('\n=== Test 6: 6-DoF Camera-to-Gripper (TCP) Extrinsic Calibrator ===')
+    # CAD parameters from user drawing (128.084mm forward, 109.075mm height -> 40.4°):
+    theta_calc = CameraGripperCalibrator.compute_tilted_angle(12.8, 10.9)
+    assert np.isclose(theta_calc, 40.42, atol=0.05), f"Expected ~40.4 deg, got {theta_calc}"
+    h_calc = CameraGripperCalibrator.compute_height_from_angle(12.8, 40.4)
+    assert np.isclose(h_calc, 10.89, atol=0.05), f"Expected ~10.9 cm, got {h_calc}"
+    print(f"  CAD Tilted Angle Calculation: (12.8cm, 10.9cm) -> {theta_calc:.2f}° vs X-axis [OK]")
+
+    calib = CameraGripperCalibrator(
+        forward_cm=12.8,
+        height_cm=10.9,
+        lateral_cm=0.0,
+        pitch_deg=40.4,
+        roll_deg=0.0,
+        yaw_deg=0.0,
+        enabled=True
+    )
+
+    # 1. Camera looking forward and down at pitch = 40.4 deg
+    pitch_cam = np.radians(40.4)
+    p_cam = np.array([0.0, -0.20, 0.25, 0.0, pitch_cam, 0.0])
+    p_grip = calib.camera_to_gripper(p_cam)
+
+    # In this configuration, gripper should be horizontal (pitch = 0.0 deg)
+    assert np.isclose(p_grip[4], 0.0, atol=1e-3), f"Gripper pitch should be 0.0 deg, got {np.degrees(p_grip[4]):.2f}"
+    # Gripper should be forward by 12.8cm: Y = -0.20 + 0.128 = -0.072
+    assert np.isclose(p_grip[1], -0.072, atol=1e-3), f"Gripper Y should be -0.072m, got {p_grip[1]:.4f}"
+    # Gripper height should be down by 10.9cm: Z = 0.25 - 0.109 = 0.141
+    assert np.isclose(p_grip[2], 0.141, atol=1e-3), f"Gripper Z should be 0.141m, got {p_grip[2]:.4f}"
+    print(f"  CAD Pose Transformation: Cam at Z=0.25m, Pitch=40.4° -> Gripper at Z={p_grip[2]:.3f}m, Pitch={np.degrees(p_grip[4]):.1f}° [OK]")
+
+    # 2. Invertibility / Roundtrip Test
+    p_cam_reconstructed = calib.gripper_to_camera(p_grip)
+    assert np.allclose(p_cam[:3], p_cam_reconstructed[:3], atol=1e-5), "Position roundtrip mismatch!"
+    assert np.allclose(p_cam[3:], p_cam_reconstructed[3:], atol=1e-5), "Orientation roundtrip mismatch!"
+    print(f"  Roundtrip Invariance: cam -> gripper -> cam matches within 0.01mm and 0.001° [OK]")
+
+    # 3. Batch Trajectory Transformation
+    fake_traj = np.array([
+        [0.0, -0.25, 0.25, 0.0, pitch_cam, 0.0],
+        [0.05, -0.20, 0.22, 0.05, pitch_cam + 0.1, 0.02],
+        [0.10, -0.15, 0.20, 0.0, pitch_cam - 0.05, -0.01]
+    ])
+    grip_traj = calib.transform_trajectory(fake_traj, to_gripper=True)
+    back_traj = calib.transform_trajectory(grip_traj, to_gripper=False)
+    assert grip_traj.shape == fake_traj.shape
+    assert np.allclose(fake_traj, back_traj, atol=1e-5)
+    print(f"  Batch Trajectory Transformation: {len(fake_traj)} frames transformed and inverted successfully [OK]")
+
+    # 4. Disabled mode pass-through
+    calib_disabled = CameraGripperCalibrator(enabled=False)
+    assert np.allclose(calib_disabled.camera_to_gripper(p_cam), p_cam)
+    print(f"  Disabled Mode: Clean pass-through verified [OK]")
+
+    print('[PASS] 6-DoF Camera-to-Gripper Calibrator fully verified!')
+
 if __name__ == '__main__':
     test_dh_tables_and_specs()
     test_omnikin_forward_inverse_consistency()
@@ -178,5 +236,7 @@ if __name__ == '__main__':
     test_so100_forward_inverse_consistency()
     test_workspace_calibrator()
     test_feasible_ik_and_auto_align()
+    test_camera_gripper_calibrator()
     print('\nALL ROBOT KINEMATICS & WORKSPACE CALIBRATION TESTS PASSED!')
+
 

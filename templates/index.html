@@ -932,18 +932,7 @@
         );
         eeCursorGroup.add(tcpSphere);
 
-        const fingerLeft = new THREE.Mesh(
-            new THREE.BoxGeometry(0.005, 0.02, 0.007),
-            new THREE.MeshStandardMaterial({ color: 0x818cf8, metalness: 0.6, roughness: 0.3 })
-        );
-        fingerLeft.position.set(-0.010, 0.010, 0);
 
-        const fingerRight = new THREE.Mesh(
-            new THREE.BoxGeometry(0.005, 0.02, 0.007),
-            new THREE.MeshStandardMaterial({ color: 0x818cf8, metalness: 0.6, roughness: 0.3 })
-        );
-        fingerRight.position.set(0.010, 0.010, 0);
-        eeCursorGroup.add(fingerLeft, fingerRight);
 
         const toolAxes = new THREE.AxesHelper(0.03);
         eeCursorGroup.add(toolAxes);
@@ -1085,9 +1074,7 @@
 
             eeCursorGroup.rotation.set(p[4] || 0, p[5] || 0, p[3] || 0, 'ZYX');
 
-            const fingerOffset = 0.005 + (gripper / 100.0) * 0.010;
-            fingerLeft.position.x = -fingerOffset;
-            fingerRight.position.x = fingerOffset;
+
 
             // Compute distance from (0,0,0) ArUco Marker
             const distFromMarker = Math.sqrt(p[0]*p[0] + p[1]*p[1] + p[2]*p[2]);
