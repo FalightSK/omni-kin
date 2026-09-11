@@ -1,4 +1,4 @@
-﻿# CONTINUITY.md — Mobile Dataset Collector
+# CONTINUITY.md — Mobile Dataset Collector
 
 **Last Updated:** 2026-09-11  
 **Project Version:** v2.0  
@@ -28,35 +28,36 @@ This document serves as the technical handover, architecture specification, and 
 
 ## 1. System Architectural Overview
 
-```
-                                [ SMARTPHONE CLIENT ]
-                           HTML5 Camera (720p @ 30 FPS)
-                       DeviceMotionEvent IMU (100 Hz - 200 Hz)
-                                          │
-                  ┌───────────────────────┴───────────────────────┐
-                  │ HTTPS (Port 8443) / Local Wi-Fi               │
-                  ▼                                               ▼
-         [ FASTAPI BACKEND ]                             [ REACT WEB DASHBOARD ]
-             server.py                                     frontend/src/
-      ┌───────────────────────┐                    ┌────────────────────────────┐
-      │ visual_tracker.py     │                    │ Viewport3D.jsx (Three.js)  │
-      │ - 8-Point solvePnP    │                    │ - 3D Robot Arm Mesh        │
-      │ - 12-State EKF Fusion │                    │ - Client-Side solve5DofIK  │
-      │ - UMI Occlusion Spline│                    │ - Reachability Tube Color  │
-      ├───────────────────────┤                    ├────────────────────────────┤
-      │ robot_kinematics.py   │                    │ DevVisionMonitor.jsx       │
-      │ - DH Inverse Kinemat. │                    │ - 2D Canvas ArUco Overlay  │
-      │ - Clearance Checking  │                    │ - OpenCV Canny Monitor     │
-      │ - Trajectory Planner  │                    ├────────────────────────────┤
-      ├───────────────────────┤                    │ EpisodeList / Player       │
-      │ lerobot_exporter.py   │                    │ - Synchronized Playback    │
-      │ - Parquet Exporter    │                    │ - Reactive Smoothing Slider│
-      │ - Dynamic Joint Names │                    └────────────────────────────┘
-      └───────────────────────┘
-                  │
-                  ▼
-      [ HUGGING FACE LEROBOT ]
-       Parquet / JSON / MP4
+```mermaid
+flowchart TD
+    subgraph Client["📱 SMARTPHONE CLIENT"]
+        Cam["HTML5 Camera (720p @ 30 FPS)"]
+        IMU["DeviceMotionEvent IMU (100 Hz - 200 Hz)"]
+        Cam --- IMU
+    end
+
+    subgraph Backend["⚙️ FASTAPI BACKEND (server.py)"]
+        direction TB
+        VT["visual_tracker.py<br/>• 8-Point solvePnP<br/>• 12-State EKF Fusion<br/>• UMI Occlusion Spline"]
+        RK["robot_kinematics.py<br/>• DH Inverse Kinematics<br/>• 3D Clearance Invariant<br/>• Trajectory Planner"]
+        LE["lerobot_exporter.py<br/>• Parquet Exporter<br/>• Dynamic Joint Names<br/>• Action Shifter"]
+        VT --> RK --> LE
+    end
+
+    subgraph Dashboard["🖥️ REACT WEB DASHBOARD (frontend/src/)"]
+        direction TB
+        V3D["Viewport3D.jsx (Three.js)<br/>• 3D Robot Arm Mesh<br/>• Client-Side solve5DofIK<br/>• Reachability Tube Color"]
+        DVM["DevVisionMonitor.jsx<br/>• 2D Canvas ArUco Overlay<br/>• OpenCV Canny Monitor"]
+        Ctrl["EpisodeList / Player<br/>• Synchronized Playback<br/>• Reactive Smoothing Slider"]
+    end
+
+    subgraph Export["📦 HUGGING FACE LEROBOT"]
+        DS["Dataset Archive<br/>• data/chunk-000/*.parquet<br/>• meta/*.json & *.jsonl<br/>• videos/*.mp4"]
+    end
+
+    Client -- "HTTPS (Port 8443) / Local Wi-Fi" --> Backend
+    Backend -- "WebSockets / REST" --> Dashboard
+    LE --> Export
 ```
 
 ---

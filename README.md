@@ -1,23 +1,38 @@
-﻿# OmniKin Mobile Dataset Collector 🦾📱
+# OmniKin Mobile Dataset Collector 🦾📱
 
 **A high-precision, low-cost robot demonstration collection framework powered by an everyday smartphone.** Capture 3D manipulation demonstrations using Dual-ArUco optical anchoring and IMU sensor fusion, visualize real-time robot arm kinematics, and export directly into [Hugging Face LeRobot](https://github.com/huggingface/lerobot) format for imitation learning (ACT, Diffusion Policy).
 
-```
-   ┌──────────────────┐       Local Wi-Fi (HTTPS :8443)       ┌──────────────────────────────┐
-   │  Smartphone      │ ────────────────────────────────────► │  FastAPI Backend (:8000)     │
-   │  - 720p 30FPS    │   Video + 100Hz IMU Telemetry         │  - 8-Point Rigid Board PnP   │
-   │  - High-Freq IMU │                                       │  - 12-State EKF Fusion       │
-   └──────────────────┘                                       └──────────────┬───────────────┘
-                                                                             │
-           ┌─────────────────────────────────────────────────────────────────┴──────────────────────────┐
-           ▼                                                                                            ▼
-┌──────────────────────────────────────┐                                             ┌──────────────────────────────────────┐
-│  React + Three.js Desktop Dashboard  │                                             │  Hugging Face LeRobot v2.0 Dataset   │
-│  - 3D Robot Arm Kinematics Preview   │                                             │  - data/chunk-000/file-000.parquet   │
-│  - Reachability Color Coding (G/Y/R) │                                             │  - meta/info.json, meta/stats.json   │
-│  - Synchronized Dual-Pane Player     │                                             │  - videos/observation.images.phone/  │
-│  - Real-Time Trajectory Smoothing    │                                             │  - Direct Training with LeRobot ACT  │
-└──────────────────────────────────────┘                                             └──────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph Client["📱 Smartphone Client"]
+        Phone["Smartphone<br/>- 720p 30 FPS Camera<br/>- 100Hz+ High-Freq IMU"]
+    end
+
+    subgraph Backend["⚙️ FastAPI Backend (:8000 / HTTPS :8443)"]
+        Server["server.py"]
+        PnP["8-Point Rigid Board solvePnP"]
+        EKF["12-State EKF Sensor Fusion"]
+        IK["DH Inverse Kinematics & Clearance"]
+        Server --> PnP --> EKF --> IK
+    end
+
+    subgraph Dashboard["🖥️ React + Three.js Desktop Dashboard"]
+        View3D["3D Robot Arm Kinematics Preview"]
+        ReachColor["Reachability Color Tube (G/Y/R)"]
+        DualPlayer["Synchronized Dual-Pane Player"]
+        Smooth["Real-Time Trajectory Smoothing"]
+    end
+
+    subgraph Dataset["📦 Hugging Face LeRobot v2.0 Dataset"]
+        Parquet["data/chunk-000/file-000.parquet"]
+        Meta["meta/info.json & stats.json"]
+        Videos["videos/observation.images.phone/"]
+        Train["Direct Training (ACT / Diffusion)"]
+    end
+
+    Phone -- "Video + IMU Telemetry (Wi-Fi HTTPS :8443)" --> Server
+    Server -- "WebSockets / REST" --> Dashboard
+    IK --> Dataset
 ```
 
 ---
@@ -146,17 +161,15 @@ cd ..
 
 Follow this guide to set up your physical table, record your first episode, and export a dataset.
 
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│ 1. Print Sheet  │ ──► │ 2. Start Server │ ──► │ 3. Connect Phone│ ──► │ 4. Calibrate    │
-│ & Tape to Table │     │  python server  │     │   Scan QR Code  │     │ Workspace & Arm │
-└─────────────────┘     └─────────────────┘     └─────────────────┘     └─────────────────┘
-                                                                                 │
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐              ▼
-│ 8. Train Policy │ ◄── │ 7. LeRobot Export│ ◄── │ 6. Inspect &    │ ◄── ┌─────────────────┐
-│  with LeRobot   │     │  .parquet / mp4 │     │    Smooth Path  │     │ 5. Record Motion│
-└─────────────────┘     └─────────────────┘     └─────────────────┘     │ on Smartphone   │
-                                                                        └─────────────────┘
+```mermaid
+flowchart LR
+    Step1["1. Print Sheet<br/>& Tape to Table"] --> Step2["2. Start Server<br/>(python server.py)"]
+    Step2 --> Step3["3. Connect Phone<br/>(Scan QR Code)"]
+    Step3 --> Step4["4. Calibrate<br/>Workspace & Arm"]
+    Step4 --> Step5["5. Record Motion<br/>on Smartphone"]
+    Step5 --> Step6["6. Inspect &<br/>Smooth Path"]
+    Step6 --> Step7["7. LeRobot Export<br/>(.parquet / mp4)"]
+    Step7 --> Step8["8. Train Policy<br/>with LeRobot"]
 ```
 
 ---
@@ -177,21 +190,23 @@ The Dual-ArUco rigid board establishes the physical Cartesian world origin $(0, 
    - **Gap between Tag A and Tag B**: Exactly $5.0\text{ cm}$ (Tag B origin at $X = 0.15\text{ m}$)
 5. Tape the printed sheet flat onto your table with clear tape so it cannot slide.
 
-```
-  Top View of Workstation Table:
-  ──────────────────────────────────────────────────────────────────────────
-                [ Robot Arm Base: X = 0.091m, Y = -0.41m, Yaw = 90° ]
-                                     ▲
-                                     │  Robot Reach Zone
-                                     ▼
-        ┌──────────────────┐     ┌─────────┐
-        │                  │     │         │
-        │      TAG A       │     │  TAG B  │
-        │     (10 cm)      │     │ (5 cm)  │
-        │                  │     │         │
-        └──────────────────┘     └─────────┘
-        ▲ (0, 0, 0) Origin        ▲ X = 0.15m
-  ──────────────────────────────────────────────────────────────────────────
+```mermaid
+flowchart TB
+    subgraph Table["Top View of Workstation Desk"]
+        direction TB
+        Robot["🦾 Robot Arm Base<br/>X = 0.091m, Y = -0.410m, Yaw = 90°"]
+        Reach["↕️ Robot Reach Envelope ↕️"]
+        
+        subgraph Board["Physical Dual-ArUco Board"]
+            direction LR
+            TagA["🏷️ Tag A (10 cm)<br/>ID: 0 (Origin: 0, 0, 0)"]
+            Gap["◄ 5 cm Gap ►"]
+            TagB["🏷️ Tag B (5 cm)<br/>ID: 1 (Offset: 0.15m, 0, 0)"]
+            TagA --- Gap --- TagB
+        end
+
+        Robot --- Reach --- Board
+    end
 ```
 
 ---
@@ -319,12 +334,18 @@ In the desktop dashboard (`http://localhost:8000`):
 
 In the export panel on the desktop dashboard, select your desired trajectory paradigm:
 
-```
-Mode 1: Free-Form (Pretraining)
-[Demo Frame 0] ────────────────► [Demo Frame 1] ────────────────► [Demo End]
+```mermaid
+flowchart TD
+    subgraph Mode1["Mode 1: Free-Form (Pretraining)"]
+        direction LR
+        F0["Demo Frame 0"] --> F1["Demo Frame 1"] --> FEnd["Demo End Waypoint"]
+    end
 
-Mode 2: Initial-Position Aware (Fine-Tuning)
-[Robot Home Pose] ───(Quintic Minimum-Jerk Lift Arc)───► [Demo Frame 0] ────────► [Demo End]
+    subgraph Mode2["Mode 2: Initial-Position Aware (Fine-Tuning)"]
+        direction LR
+        Home["Robot Standby Home Pose"] -->|"Quintic C² Minimum-Jerk Lift Arc (+6cm)"| D0["Demo Frame 0"]
+        D0 --> D1["Demo Frame 1"] --> DEnd["Demo End Waypoint"]
+    end
 ```
 
 | Mode | Key in API | Characteristics | When to Use |
