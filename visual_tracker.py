@@ -9,6 +9,7 @@ Implements:
   - Extended Kalman Filter (EKF): 12-state strapdown inertial propagation with adaptive visual measurement updates.
 """
 
+import os
 import cv2
 import numpy as np
 import scipy.signal
@@ -1213,6 +1214,22 @@ class VisualInertialTracker:
         return bridged
 
 
+    def is_physically_valid_camera_pose(self, rvec, tvec):
+        """
+        Enforces universal coordinate-free physical invariants for tabletop manipulation:
+          1. Tabletop clearance invariant: camera cannot penetrate beneath solid tabletop (Z > 0.02 m).
+          2. Maximum optical visibility range: camera must be within physical tag tracking volume (dist <= 3.0 m).
+          3. Optical downward alignment invariant: camera forward optical axis points downwards into tabletop (R_w2c[2, 2] < 0).
+        Works universally across ANY workspace position (South, North, East, West, Overhead).
+        """
+        if rvec is None or tvec is None:
+            return False
+        R_w2c, _ = cv2.Rodrigues(rvec)
+        p_cam = -R_w2c.T @ tvec.reshape(3, 1)
+        z_cam = float(p_cam[2, 0])
+        dist_to_origin = float(np.linalg.norm(p_cam))
+        return (z_cam > 0.02) and (dist_to_origin <= 3.0) and (R_w2c[2, 2] < 0.0)
+
     def detect_marker_pnp(self, frame, camera_matrix, dist_coeffs, return_corners=False):
         """
         Phase 1: Dual-ArUco Rigid Board Detection & Dynamic PnP Solver.
@@ -1261,33 +1278,34 @@ class VisualInertialTracker:
                 refined_corners[idx_b][0].astype(np.float32)
             ])
             is_dual = True
-            flags = cv2.SOLVEPNP_ITERATIVE
         elif has_tag_a:
             idx_a = ids_flat.index(self.tag_a_id)
             matched_3d = self.tag_a_3d
             matched_2d = refined_corners[idx_a][0].astype(np.float32)
-            flags = cv2.SOLVEPNP_IPPE_SQUARE
         elif has_tag_b:
             idx_b = ids_flat.index(self.tag_b_id)
             matched_3d = self.tag_b_3d
             matched_2d = refined_corners[idx_b][0].astype(np.float32)
-            flags = cv2.SOLVEPNP_IPPE_SQUARE
         else:
             matched_3d = self.tag_a_3d
             matched_2d = refined_corners[0][0].astype(np.float32)
-            flags = cv2.SOLVEPNP_IPPE_SQUARE
 
-        # Solve Perspective-n-Point with temporal continuity
+        # Solve Perspective-n-Point with physical invariant validation
         success = False
         rvec = None
         tvec = None
 
-        has_prev_guess = hasattr(self, 'last_rvec') and self.last_rvec is not None and self.last_tvec is not None
+        has_prev_guess = (
+            hasattr(self, 'last_rvec') and self.last_rvec is not None and
+            self.last_tvec is not None and self.is_physically_valid_camera_pose(self.last_rvec, self.last_tvec)
+        )
+
+        # Tier 1: Temporal Continuity Warm Start via Levenberg-Marquardt
         if has_prev_guess:
             try:
                 r_guess = self.last_rvec.copy()
                 t_guess = self.last_tvec.copy()
-                success, rvec, tvec = cv2.solvePnP(
+                succ, r_cand, t_cand = cv2.solvePnP(
                     matched_3d,
                     matched_2d,
                     camera_matrix,
@@ -1297,64 +1315,80 @@ class VisualInertialTracker:
                     useExtrinsicGuess=True,
                     flags=cv2.SOLVEPNP_ITERATIVE
                 )
+                if succ and self.is_physically_valid_camera_pose(r_cand, t_cand):
+                    # Check kinematic step distance to prevent basin jumping (< 20cm per frame)
+                    R_cand, _ = cv2.Rodrigues(r_cand)
+                    p_cand = (-R_cand.T @ t_cand).ravel()
+                    R_prev, _ = cv2.Rodrigues(self.last_rvec)
+                    p_prev = (-R_prev.T @ self.last_tvec).ravel()
+                    if np.linalg.norm(p_cand - p_prev) < 0.20:
+                        rvec, tvec = r_cand, t_cand
+                        success = True
             except Exception:
                 success = False
 
+        # Tier 2: Globally Optimal SQPNP & Unseeded Iterative Solver (Cold Start or Occlusion Recovery)
         if not success:
-            if flags == cv2.SOLVEPNP_IPPE_SQUARE:
-                # Anti-flip solver: IPPE produces up to 2 planar solutions.
-                # Choose the solution that avoids planar ambiguity flip and is consistent with previous pose.
+            for try_flag in [cv2.SOLVEPNP_SQPNP, cv2.SOLVEPNP_ITERATIVE]:
                 try:
-                    ret_g, rvecs_g, tvecs_g, _ = cv2.solvePnPGeneric(
+                    succ, r_cand, t_cand = cv2.solvePnP(
                         matched_3d,
                         matched_2d,
                         camera_matrix,
                         dist_coeffs,
-                        flags=cv2.SOLVEPNP_IPPE_SQUARE
+                        flags=try_flag
                     )
-                    if ret_g and len(rvecs_g) > 0:
-                        best_idx = 0
-                        if len(rvecs_g) > 1 and has_prev_guess:
-                            R_prev, _ = cv2.Rodrigues(self.last_rvec)
-                            min_ang = 1e9
-                            for sol_idx, cand_rvec in enumerate(rvecs_g):
-                                R_cand, _ = cv2.Rodrigues(cand_rvec)
-                                R_diff = R_cand @ R_prev.T
-                                tr = float(np.clip((np.trace(R_diff) - 1.0) / 2.0, -1.0, 1.0))
-                                ang = np.arccos(tr)
-                                if ang < min_ang:
-                                    min_ang = ang
-                                    best_idx = sol_idx
-                        elif len(rvecs_g) > 1:
-                            R_0, _ = cv2.Rodrigues(rvecs_g[0])
-                            R_1, _ = cv2.Rodrigues(rvecs_g[1])
-                            if R_1[2, 2] < R_0[2, 2]:
-                                best_idx = 1
-                        rvec = rvecs_g[best_idx]
-                        tvec = tvecs_g[best_idx]
+                    if succ and self.is_physically_valid_camera_pose(r_cand, t_cand):
+                        rvec, tvec = r_cand, t_cand
                         success = True
+                        break
                 except Exception:
-                    success = False
+                    pass
 
-            if not success:
-                success, rvec, tvec = cv2.solvePnP(
+        # Tier 3: Multi-Candidate IPPE Solver with Kinematic Disambiguation Fallback
+        if not success and len(matched_3d) == 4:
+            try:
+                ret_g, rvecs_g, tvecs_g, reproj = cv2.solvePnPGeneric(
                     matched_3d,
                     matched_2d,
                     camera_matrix,
                     dist_coeffs,
-                    flags=flags
+                    flags=cv2.SOLVEPNP_IPPE_SQUARE
                 )
+                if ret_g and len(rvecs_g) > 0:
+                    valid_indices = [
+                        i_s for i_s in range(len(rvecs_g))
+                        if self.is_physically_valid_camera_pose(rvecs_g[i_s], tvecs_g[i_s])
+                    ]
+                    cands = valid_indices if len(valid_indices) > 0 else list(range(len(rvecs_g)))
+                    best_idx = cands[0]
 
-        if not success and flags != cv2.SOLVEPNP_ITERATIVE:
-            success, rvec, tvec = cv2.solvePnP(
-                matched_3d,
-                matched_2d,
-                camera_matrix,
-                dist_coeffs,
-                flags=cv2.SOLVEPNP_ITERATIVE
-            )
+                    if has_prev_guess and len(cands) > 1:
+                        best_cost = 1e9
+                        R_prev, _ = cv2.Rodrigues(self.last_rvec)
+                        p_prev = (-R_prev.T @ self.last_tvec).ravel()
+                        for i_s in cands:
+                            R_cand, _ = cv2.Rodrigues(rvecs_g[i_s])
+                            p_cand = (-R_cand.T @ tvecs_g[i_s]).ravel()
+                            dp = np.linalg.norm(p_cand - p_prev)
+                            tr = float(np.clip((np.trace(R_cand @ R_prev.T) - 1.0) / 2.0, -1.0, 1.0))
+                            dtheta = np.arccos(tr)
+                            reproj_err = float(reproj[i_s][0]) if reproj is not None else 0.0
+                            cost = dp + 0.15 * dtheta + 0.05 * reproj_err
+                            if cost < best_cost:
+                                best_cost = cost
+                                best_idx = i_s
+                    elif len(cands) > 1 and reproj is not None:
+                        reprojs = [float(reproj[i_s][0]) for i_s in cands]
+                        best_idx = cands[int(np.argmin(reprojs))]
 
-        if not success:
+                    rvec = rvecs_g[best_idx]
+                    tvec = tvecs_g[best_idx]
+                    success = True
+            except Exception:
+                success = False
+
+        if not success or rvec is None:
             self.last_rvec = None
             self.last_tvec = None
             if return_corners:
@@ -1783,18 +1817,30 @@ class VisualInertialTracker:
         # Initialize OpenCV Virtual SLAM Feature Map Tracker
         feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
 
+        # Cleanly reset all tracking state so this episode never inherits previous takes' poses
+        self.last_rvec = None
+        self.last_tvec = None
+        self.last_detected_ids = []
+        self.last_detected_corners = []
+        self.last_raw_trajectory = None
+
         dev_writer = None
         canny_writer = None
+        tmp_dev_path = None
+        tmp_canny_path = None
+
         # Prefer H.264 (avc1) with Cisco OpenH264 for universal HTML5 browser playback, fallback to mp4v
         fourcc = cv2.VideoWriter_fourcc(*'avc1')
         if output_dev_video_path:
-            dev_writer = cv2.VideoWriter(output_dev_video_path, fourcc, fps, (width, height))
+            tmp_dev_path = output_dev_video_path + ".tmp.mp4"
+            dev_writer = cv2.VideoWriter(tmp_dev_path, fourcc, fps, (width, height))
             if not dev_writer.isOpened():
-                dev_writer = cv2.VideoWriter(output_dev_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+                dev_writer = cv2.VideoWriter(tmp_dev_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
         if output_canny_video_path:
-            canny_writer = cv2.VideoWriter(output_canny_video_path, fourcc, fps, (width, height))
+            tmp_canny_path = output_canny_video_path + ".tmp.mp4"
+            canny_writer = cv2.VideoWriter(tmp_canny_path, fourcc, fps, (width, height))
             if not canny_writer.isOpened():
-                canny_writer = cv2.VideoWriter(output_canny_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+                canny_writer = cv2.VideoWriter(tmp_canny_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
         video_detections = []  # (frame_idx, p_world, euler, is_dual, source)
         dev_telemetry = []
@@ -1947,8 +1993,23 @@ class VisualInertialTracker:
         cap.release()
         if dev_writer is not None:
             dev_writer.release()
+            if tmp_dev_path and os.path.exists(tmp_dev_path):
+                try:
+                    if os.path.exists(output_dev_video_path):
+                        os.remove(output_dev_video_path)
+                    os.replace(tmp_dev_path, output_dev_video_path)
+                except Exception as e:
+                    print(f"Warning finalizing dev video: {e}")
+
         if canny_writer is not None:
             canny_writer.release()
+            if tmp_canny_path and os.path.exists(tmp_canny_path):
+                try:
+                    if os.path.exists(output_canny_video_path):
+                        os.remove(output_canny_video_path)
+                    os.replace(tmp_canny_path, output_canny_video_path)
+                except Exception as e:
+                    print(f"Warning finalizing canny video: {e}")
 
         num_frames = frame_idx
         if num_frames == 0:

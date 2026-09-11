@@ -35,6 +35,7 @@ export default function DevVisionMonitor({
 
   // Vision view mode: 'dev' (ArUco + SLAM overlay), 'canny' (OpenCV Canny Edge View), 'raw' (Original Video)
   const [visionMode, setVisionMode] = useState('dev');
+  const [useLiveOverlay, setUseLiveOverlay] = useState(false);
   const [cannyThresholdLow, setCannyThresholdLow] = useState(50);
   const [cannyThresholdHigh, setCannyThresholdHigh] = useState(150);
   const [videoDims, setVideoDims] = useState(null);
@@ -42,13 +43,13 @@ export default function DevVisionMonitor({
 
   useEffect(() => {
     setVideoError(false);
-  }, [visionMode, devVideoUrl, cannyVideoUrl]);
+  }, [visionMode, devVideoUrl, cannyVideoUrl, useLiveOverlay]);
 
   let currentVideoSrc = videoUrl;
   let usePreRenderedDev = false;
   let usePreRenderedCanny = false;
 
-  if (visionMode === 'dev' && devVideoUrl && !videoError) {
+  if (visionMode === 'dev' && devVideoUrl && !videoError && !useLiveOverlay) {
     currentVideoSrc = devVideoUrl;
     usePreRenderedDev = true;
   } else if (visionMode === 'canny' && cannyVideoUrl && !videoError) {
@@ -401,6 +402,34 @@ export default function DevVisionMonitor({
             <span>Raw Video</span>
           </button>
         </div>
+
+        {/* Live GPU vs Pre-Rendered MP4 Switcher for Dev View */}
+        {visionMode === 'dev' && (
+          <div className="flex items-center gap-1 bg-slate-900/90 p-0.5 rounded-xl border border-slate-800 text-[11px]">
+            <button
+              onClick={() => setUseLiveOverlay(false)}
+              className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+                !useLiveOverlay
+                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Pre-rendered MP4 video with baked-in OpenCV annotations"
+            >
+              🎞️ OpenCV MP4
+            </button>
+            <button
+              onClick={() => setUseLiveOverlay(true)}
+              className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+                useLiveOverlay
+                  ? 'bg-emerald-600 text-white font-semibold shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+              title="Smooth native camera video with real-time GPU canvas overlays"
+            >
+              ⚡ Smooth Native + GPU Box
+            </button>
+          </div>
+        )}
       </div>
 
       {/* 2. Video Stage: Displaying Real Video with OpenCV Augmentations */}

@@ -12,7 +12,9 @@ import {
   SwitchCamera,
   Maximize2,
   Minimize2,
-  RotateCw
+  RotateCw,
+  Hand,
+  UploadCloud
 } from 'lucide-react';
 
 const TASK_MODES = [
@@ -37,6 +39,17 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const [accelData, setAccelData] = useState([0, 0, 9.81]);
   const [focusPoint, setFocusPoint] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // 1-Hand Gripper State & Telemetry Logging
+  const [gripperOpen, setGripperOpen] = useState(true); // true = 100% open, false = 0% closed
+  const gripperValRef = useRef(1.0);
+  const gripperDataRef = useRef([]);
+
+  // High-Throughput Asynchronous Upload Queue
+  const uploadQueueRef = useRef([]);
+  const isUploadingRef = useRef(false);
+  const [queueCount, setQueueCount] = useState(0);
+  const [uploadStatus, setUploadStatus] = useState('');
 
   // Orientation State: Checks window aspect ratio and Accelerometer Ax (|Ax| >= 6.0 m/s^2)
   const [isLandscape, setIsLandscape] = useState(
@@ -277,12 +290,75 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     return () => clearInterval(interval);
   };
 
+  const toggleGripper = () => {
+    const nextVal = !gripperOpen;
+    setGripperOpen(nextVal);
+    const numVal = nextVal ? 1.0 : 0.0;
+    gripperValRef.current = numVal;
+
+    // Haptic feedback if available on mobile
+    if (typeof navigator !== 'undefined' && navigator.vibrate) {
+      try { navigator.vibrate(35); } catch (_) {}
+    }
+
+    if (isRecording) {
+      const nowEpoch = performance.timeOrigin + performance.now();
+      const elapsedSec = (nowEpoch - startTimeRef.current) / 1000.0;
+      gripperDataRef.current.push({
+        t: elapsedSec,
+        val: numVal
+      });
+    }
+  };
+
+  const processUploadQueue = async () => {
+    if (isUploadingRef.current) return;
+    if (uploadQueueRef.current.length === 0) return;
+
+    isUploadingRef.current = true;
+    while (uploadQueueRef.current.length > 0) {
+      const item = uploadQueueRef.current[0];
+      setQueueCount(uploadQueueRef.current.length);
+      setUploadStatus(`Uploading: ${item.task}`);
+
+      const formData = new FormData();
+      formData.append('video', item.blob, `recording${item.ext}`);
+      formData.append('imu_data', JSON.stringify(item.imuData));
+      formData.append('gripper_data', JSON.stringify(item.gripperData));
+      formData.append('task', item.task);
+      formData.append('client_take_id', item.id);
+
+      try {
+        const res = await fetch('/api/recordings/upload', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        if (data.status === 'queued') {
+          console.log(`[OmniKin] Take ${item.id} enqueued on server at position ${data.queue_position}`);
+          if (onUploadSuccess) onUploadSuccess();
+        }
+      } catch (err) {
+        console.error('Failed uploading take to server:', err);
+      } finally {
+        uploadQueueRef.current.shift();
+        setQueueCount(uploadQueueRef.current.length);
+      }
+    }
+
+    isUploadingRef.current = false;
+    setUploadStatus('');
+  };
+
   const startRecording = () => {
     if (!videoRef.current || !videoRef.current.srcObject) return;
     recordedChunksRef.current = [];
     imuDataRef.current = [];
+    gripperDataRef.current = [{ t: 0.0, val: gripperValRef.current }];
     startTimeRef.current = performance.timeOrigin + performance.now();
     setIsRecording(true);
+    setRecTime('00:00.0');
+    setStatusMsg('🔴 Recording demonstration...');
 
     // Adaptive hardware-accelerated codec selection (prioritizes GPU-accelerated AVC1/H264 over software VP8)
     const preferredMimes = [
@@ -320,44 +396,70 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     }, 100);
   };
 
-  const stopRecording = async () => {
+  const stopRecording = () => {
+    // ⚡ Instant Shutter Reset (<200ms): Immediately clears recording state so operator can tap Record again!
     setIsRecording(false);
     clearInterval(timerIntervalRef.current);
-    setStatusMsg('Processing 3D motion & sensor logs...');
+    setStatusMsg('✅ Take saved to queue! Shutter ready.');
+    setTimeout(() => setStatusMsg(''), 2200);
 
     const mediaRecorder = mediaRecorderRef.current;
     if (!mediaRecorder) return;
 
+    // Snapshot current sensor logs
+    const currentImu = [...imuDataRef.current];
+    const currentGripper = [...gripperDataRef.current];
+    const selectedMode = TASK_MODES[activeModeIdx];
+    const currentTask = selectedMode?.id === 'custom' ? customTask || 'custom motion' : (selectedMode?.id || 'reach to object');
+
     mediaRecorder.stop();
-    mediaRecorder.onstop = async () => {
+    mediaRecorder.onstop = () => {
       const mimeType = recordedChunksRef.current[0]?.type || 'video/webm';
       const ext = mimeType.includes('mp4') ? '.mp4' : '.webm';
       const blob = new Blob(recordedChunksRef.current, { type: mimeType });
 
-      const selectedMode = TASK_MODES[activeModeIdx];
-      const task = selectedMode.id === 'custom' ? customTask || 'custom motion' : selectedMode.id;
+      const takeItem = {
+        id: `take_${Date.now()}`,
+        blob,
+        ext,
+        imuData: currentImu,
+        gripperData: currentGripper,
+        task: currentTask,
+        createdAt: new Date().toLocaleTimeString()
+      };
 
-      const formData = new FormData();
-      formData.append('video', blob, `recording${ext}`);
-      formData.append('imu_data', JSON.stringify(imuDataRef.current));
-      formData.append('task', task);
+      uploadQueueRef.current.push(takeItem);
+      setQueueCount(uploadQueueRef.current.length);
 
-      try {
-        const res = await fetch('/api/recordings/save', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (data.status === 'success') {
-          setStatusMsg(`Episode #${data.episode_index} Saved (${data.num_frames} frames)`);
-          if (onUploadSuccess) onUploadSuccess();
-          setTimeout(() => setStatusMsg(''), 3500);
-        } else {
-          setStatusMsg('Error: ' + (data.message || 'Processing failed'));
-        }
-      } catch (err) {
-        console.error(err);
-        setStatusMsg('Upload failed: ' + err.message);
-      }
+      // Asynchronously stream to server in background
+      processUploadQueue();
     };
   };
+
+  // Hardware Volume Button Shortcut (Optional background trigger, UI buttons remain primary)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (
+        e.code === 'VolumeDown' ||
+        e.code === 'VolumeUp' ||
+        e.key === 'AudioVolumeDown' ||
+        e.key === 'AudioVolumeUp'
+      ) {
+        try { e.preventDefault(); } catch (_) {}
+
+        if (isRecording) {
+          stopRecording();
+        } else if (isCameraActive) {
+          startRecording();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isRecording, isCameraActive, activeModeIdx, customTask]);
 
   const handleTapViewfinder = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -509,7 +611,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
               </button>
             </div>
 
-            {/* Center Left: Recording Timer or Status Badge */}
+            {/* Center Left: Recording Timer, Status Badge & Upload Queue */}
             <div className="flex flex-col items-center gap-2">
               {isRecording ? (
                 <div className="bg-rose-600/90 backdrop-blur-md px-3 py-1.5 rounded-full border border-rose-400/50 flex items-center gap-1.5 shadow-xl shadow-rose-600/30">
@@ -520,6 +622,13 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
                 <div className="bg-black/60 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/15 flex items-center gap-1.5">
                   <span className={`w-2 h-2 rounded-full ${isCameraActive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
                   <span className="text-[10px] font-semibold text-white/90 font-mono">{imuHz} Hz</span>
+                </div>
+              )}
+
+              {queueCount > 0 && (
+                <div className="bg-indigo-950/90 backdrop-blur-md px-2.5 py-1 rounded-full border border-indigo-500/40 flex items-center gap-1.5 shadow-lg animate-pulse">
+                  <UploadCloud className="w-3.5 h-3.5 text-indigo-400" />
+                  <span className="text-[10px] font-mono text-indigo-200 font-bold">{queueCount} in queue</span>
                 </div>
               )}
             </div>
@@ -586,6 +695,27 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
               })}
             </div>
 
+            {/* Thumb Gripper Toggle Button (1-Handed Manipulation) */}
+            <button
+              onClick={toggleGripper}
+              className={`w-22 py-1.5 px-2 rounded-xl border flex flex-col items-center justify-center transition-all active:scale-95 shadow-lg ${
+                gripperOpen
+                  ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 shadow-emerald-500/15'
+                  : 'bg-amber-500/20 border-amber-400 text-amber-300 shadow-amber-500/15'
+              }`}
+              title="Toggle Gripper Open / Closed"
+            >
+              <div className="flex items-center gap-1.5">
+                <Hand className={`w-3.5 h-3.5 ${gripperOpen ? 'text-emerald-400' : 'text-amber-400'}`} />
+                <span className="text-[10px] font-extrabold tracking-wider">
+                  {gripperOpen ? 'OPEN' : 'CLOSED'}
+                </span>
+              </div>
+              <span className="text-[8px] font-mono opacity-80">
+                {gripperOpen ? '100% GRIP' : '0% GRIP'}
+              </span>
+            </button>
+
             {/* Large 76px Circular Shutter Button Under Right Thumb */}
             <button
               onClick={isRecording ? stopRecording : startRecording}
@@ -624,8 +754,16 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
                   <span className="font-mono text-xs font-bold text-white">{recTime}</span>
                 </div>
               ) : (
-                <div className="bg-black/60 px-3 py-1 rounded-full border border-white/15 text-xs font-semibold text-white">
-                  ArUco Ready ({imuHz} Hz)
+                <div className="flex items-center gap-1.5">
+                  <div className="bg-black/60 px-3 py-1 rounded-full border border-white/15 text-xs font-semibold text-white">
+                    ArUco Ready ({imuHz} Hz)
+                  </div>
+                  {queueCount > 0 && (
+                    <div className="bg-indigo-950/90 px-2.5 py-1 rounded-full border border-indigo-500/40 text-[10px] font-mono text-indigo-300 flex items-center gap-1 animate-pulse">
+                      <UploadCloud className="w-3 h-3 text-indigo-400" />
+                      <span>{queueCount}</span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -661,20 +799,39 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
               ))}
             </div>
 
-            {/* Circular Shutter Button */}
-            <button
-              onClick={isRecording ? stopRecording : startRecording}
-              disabled={!isCameraActive}
-              className="w-18 h-18 rounded-full border-4 border-white flex items-center justify-center p-1.5 active:scale-95 transition-transform"
-            >
-              <div
-                className={`transition-all duration-300 ${
-                  isRecording
-                    ? 'w-7 h-7 rounded-md bg-rose-600 animate-pulse'
-                    : 'w-full h-full rounded-full bg-rose-600'
+            {/* Controls: Gripper Toggle + Circular Shutter */}
+            <div className="flex items-center gap-4">
+              <button
+                onClick={toggleGripper}
+                className={`px-3 py-2 rounded-xl border flex items-center gap-1.5 transition-all active:scale-95 shadow-lg ${
+                  gripperOpen
+                    ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 shadow-emerald-500/20'
+                    : 'bg-amber-500/20 border-amber-400 text-amber-300 shadow-amber-500/20'
                 }`}
-              />
-            </button>
+                title="Toggle Gripper"
+              >
+                <Hand className={`w-4 h-4 ${gripperOpen ? 'text-emerald-400' : 'text-amber-400'}`} />
+                <div className="flex flex-col text-left leading-tight">
+                  <span className="text-[10px] font-extrabold">{gripperOpen ? 'OPEN' : 'CLOSED'}</span>
+                  <span className="text-[8px] font-mono opacity-80">{gripperOpen ? '100%' : '0%'}</span>
+                </div>
+              </button>
+
+              {/* Circular Shutter Button */}
+              <button
+                onClick={isRecording ? stopRecording : startRecording}
+                disabled={!isCameraActive}
+                className="w-18 h-18 rounded-full border-4 border-white flex items-center justify-center p-1.5 active:scale-95 transition-transform"
+              >
+                <div
+                  className={`transition-all duration-300 ${
+                    isRecording
+                      ? 'w-7 h-7 rounded-md bg-rose-600 animate-pulse'
+                      : 'w-full h-full rounded-full bg-rose-600'
+                  }`}
+                />
+              </button>
+            </div>
           </div>
         </div>
       )}
