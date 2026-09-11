@@ -108,11 +108,20 @@ When visual measurements arrive ($\sim 30\text{ Hz}$), the measurement noise cov
 Top-mounted wrist cameras risk crashing into the robot forearm link ($L_3$) during high-elevation or upward-pitch manipulation. Instead of relying on hardcoded joint angle heuristics, OmniKin enforces an analytic 3D Euclidean clearance invariant.
 
 Let $\mathbf{p}_{\text{elbow}}$ and $\mathbf{p}_{\text{wrist}}$ be the 3D Cartesian coordinates of the forearm joint centers, and let $\mathbf{p}_{\text{cam}}$ be the camera optical center. The projection parameter $t^*$ along the forearm segment is:
-$$t^* = \text{clip}\left(\frac{(\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{elbow}}) \cdot (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}})}{\|\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}}\|^2}, 0, 1\right)$$
+
+$$
+t^* = \operatorname{clip}\left(\frac{(\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{elbow}}) \cdot (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}})}{\|\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}}\|^2}, 0, 1\right)
+$$
 
 The closest point on the forearm link is:
-$$\mathbf{p}_{\text{closest}} = \mathbf{p}_{\text{elbow}} + t^* (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}})$$
-$$d_{\text{clearance}} = \|\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{closest}}\|$$
+
+$$
+\mathbf{p}_{\text{closest}} = \mathbf{p}_{\text{elbow}} + t^* (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}})
+$$
+
+$$
+d_{\text{clearance}} = \|\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{closest}}\|
+$$
 
 - If $d_{\text{clearance}} < 0.045\text{ m}$ ($4.5\text{ cm}$), the candidate is penalized with cost:
   $$\Phi_{\text{clearance}} = 800 \cdot (0.045 - d_{\text{clearance}})^2$$
