@@ -13,6 +13,10 @@ import io
 import uuid
 import numpy as np
 import cv2
+import asyncio
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # Set stdout/stderr to UTF-8
 if hasattr(sys.stdout, 'reconfigure'):
@@ -26,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from visual_tracker import VisualInertialTracker
-from lerobot_exporter import LeRobotExporter
+from lerobot_exporter import LeRobotExporter, find_feasible_window
 from robot_kinematics import (
     WorkspaceCalibrator,
     CameraGripperCalibrator,
@@ -234,13 +238,232 @@ def load_episodes_from_disk():
                 except Exception as e:
                     print(f"Error auto-processing {item}: {e}")
 
+    r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
     for idx, ep in enumerate(loaded):
         ep['episode_index'] = idx
+        raw_p = ep.get('ee_poses') or ep.get('poses')
+        if raw_p and len(raw_p) > 0:
+            try:
+                poses_arr = np.asarray(raw_p, dtype=np.float64)
+                robot_poses = workspace_calibrator.transform_trajectory(poses_arr, to_robot=True)
+                f_start, f_end = find_feasible_window(robot_poses, r_solver)
+                ep['feasible_window'] = {
+                    "start": int(f_start),
+                    "end": int(f_end),
+                    "total": len(poses_arr),
+                    "is_trimmed": bool(f_start > 0 or f_end < len(poses_arr))
+                }
+            except Exception:
+                ep['feasible_window'] = {
+                    "start": 0,
+                    "end": len(raw_p),
+                    "total": len(raw_p),
+                    "is_trimmed": False
+                }
+        else:
+            ep['feasible_window'] = {
+                "start": 0,
+                "end": 0,
+                "total": 0,
+                "is_trimmed": False
+            }
     EPISODES_DB = loaded
     print(f"[{time.strftime('%H:%M:%S')}] 📂 Loaded {len(EPISODES_DB)} saved episodes from disk.")
 
 # Load existing recordings on server initialization
 load_episodes_from_disk()
+
+# ==============================================================================
+# Thread-Safe Background Processing Queue & Worker Thread
+# ==============================================================================
+PROCESSING_QUEUE = queue.Queue()
+PROCESSING_STATUS = {
+    "is_processing": False,
+    "current_job": None,
+    "pending_count": 0,
+    "completed_count": 0,
+    "failed_count": 0,
+    "recent_jobs": []
+}
+
+def _sync_execute_processing_job(job):
+    """
+    Synchronously runs visual_tracker.process_video_and_imu and trajectory calculation.
+    Executed inside THREAD_POOL via loop.run_in_executor.
+    """
+    ep_uid = job["job_id"]
+    ep_dir = job["ep_dir"]
+    video_path = job["video_path"]
+    video_url = job["video_url"]
+    task = job.get("task", "reach to apple")
+    parsed_imu = job.get("parsed_imu", [])
+    raw_gripper_list = job.get("parsed_gripper", [])
+
+    print(f"\n[{time.strftime('%H:%M:%S')}] ⚙️ Executing Server-Side Sensory Fusion for {ep_uid} ('{task}')...")
+
+    # 1. Inspect video frame count and FPS
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0 or fps > 120 or np.isnan(fps):
+        fps = 30.0
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if frame_count <= 0:
+        count = 0
+        while True:
+            ret, _ = cap.read()
+            if not ret:
+                break
+            count += 1
+        frame_count = max(count, 1)
+    cap.release()
+
+    # 2. Server-Side Visual-Inertial fusion
+    dev_video_filename = "dev_visualization.mp4"
+    dev_video_path = os.path.join(ep_dir, dev_video_filename)
+    dev_video_url = f"/recordings/{ep_uid}/{dev_video_filename}"
+
+    canny_video_filename = "canny_visualization.mp4"
+    canny_video_path = os.path.join(ep_dir, canny_video_filename)
+    canny_video_url = f"/recordings/{ep_uid}/{canny_video_filename}"
+
+    anchored_poses, dev_telemetry = visual_tracker.process_video_and_imu(
+        video_path,
+        parsed_imu,
+        fps=fps,
+        output_dev_video_path=dev_video_path,
+        output_canny_video_path=canny_video_path,
+        return_dev_info=True
+    )
+
+    num_pts = len(anchored_poses)
+    timestamps = np.linspace(0, num_pts / fps, num_pts)
+
+    # 3. Resolve Gripper States
+    gripper_states = []
+    if raw_gripper_list and len(raw_gripper_list) > 0:
+        try:
+            if isinstance(raw_gripper_list[0], dict) and ('t' in raw_gripper_list[0] or 'timestamp' in raw_gripper_list[0]):
+                times = np.array([float(g.get('t', g.get('timestamp', 0.0))) for g in raw_gripper_list])
+                vals = np.array([float(g.get('val', g.get('value', 100.0))) for g in raw_gripper_list])
+                # Normalize to 0-100 if in 0-1 range
+                if np.max(vals) <= 1.0 + 1e-4:
+                    vals = vals * 100.0
+                interp_grippers = np.interp(timestamps, times, vals)
+                gripper_states = interp_grippers.tolist()
+            elif len(raw_gripper_list) == num_pts:
+                vals = np.array(raw_gripper_list, dtype=np.float32)
+                if np.max(vals) <= 1.0 + 1e-4:
+                    vals = vals * 100.0
+                gripper_states = vals.tolist()
+            else:
+                for i in range(num_pts):
+                    g = 100.0 if i < (num_pts * 0.7) else 10.0
+                    gripper_states.append(g)
+        except Exception as grip_err:
+            print(f"Warning parsing gripper trajectory: {grip_err}")
+            for i in range(num_pts):
+                g = 100.0 if i < (num_pts * 0.7) else 10.0
+                gripper_states.append(g)
+    else:
+        for i in range(num_pts):
+            g = 100.0 if i < (num_pts * 0.7) else 10.0
+            gripper_states.append(g)
+
+    anchored_poses = np.array(anchored_poses)
+    # Apply 6-DoF Camera-to-Gripper Extrinsic Calibration
+    ee_poses = camera_gripper_calibrator.transform_trajectory(anchored_poses, to_gripper=True)
+    actions = np.roll(ee_poses, -1, axis=0)
+    actions[-1] = ee_poses[-1]
+
+    ep_idx = len(EPISODES_DB)
+    episode_data = {
+        'episode_index': ep_idx,
+        'episode_id': ep_uid,
+        'task': task,
+        'video_path': video_path,
+        'video_url': video_url,
+        'dev_video_url': dev_video_url,
+        'canny_video_url': canny_video_url,
+        'dev_telemetry': dev_telemetry,
+        'num_frames': num_pts,
+        'fps': fps,
+        'duration': num_pts / fps,
+        'anchor': 'aruco_feature_imu_fusion',
+        'marker_size_cm': 10.0,
+        'poses': anchored_poses.tolist(),
+        'raw_poses': getattr(visual_tracker, 'last_raw_trajectory', anchored_poses).tolist(),
+        'ee_poses': ee_poses.tolist(),
+        'gripper_states': gripper_states,
+        'actions': actions.tolist(),
+        'timestamps': timestamps.tolist(),
+        'imu_data': parsed_imu,
+        'gripper_offset_applied': camera_gripper_calibrator.get_config(),
+        'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+    EPISODES_DB.append(episode_data)
+    save_episode_meta(episode_data)
+    print(f"[{time.strftime('%H:%M:%S')}] 🎉 Episode #{ep_idx} successfully calculated via ArUco+Feature+IMU fusion ({num_pts} frames)!\n")
+    return episode_data
+
+def _background_processing_worker_thread():
+    """
+    Dedicated background worker thread that continuously consumes jobs from PROCESSING_QUEUE.
+    Fully thread-safe and independent of uvicorn HTTP/HTTPS event loops.
+    """
+    print(f"[{time.strftime('%H:%M:%S')}] 🚀 Started OmniKin Background Processing Worker thread.")
+    while True:
+        try:
+            job = PROCESSING_QUEUE.get()
+            PROCESSING_STATUS["is_processing"] = True
+            PROCESSING_STATUS["pending_count"] = PROCESSING_QUEUE.qsize()
+            PROCESSING_STATUS["current_job"] = {
+                "job_id": job["job_id"],
+                "task": job["task"],
+                "client_take_id": job.get("client_take_id"),
+                "started_at": time.time()
+            }
+            print(f"\n[{time.strftime('%H:%M:%S')}] ⚙️ [Worker] Starting background processing for Job {job['job_id']} ('{job['task']}'). Queue remaining: {PROCESSING_QUEUE.qsize()}")
+
+            try:
+                episode_data = _sync_execute_processing_job(job)
+                PROCESSING_STATUS["completed_count"] += 1
+                PROCESSING_STATUS["recent_jobs"].append({
+                    "job_id": job["job_id"],
+                    "episode_index": episode_data["episode_index"],
+                    "task": job["task"],
+                    "status": "completed",
+                    "frames": episode_data["num_frames"],
+                    "completed_at": time.strftime("%Y-%m-%d %H:%M:%S")
+                })
+                print(f"[{time.strftime('%H:%M:%S')}] ✅ [Worker] Completed Episode #{episode_data['episode_index']} ({episode_data['num_frames']} frames) for Job {job['job_id']}")
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                PROCESSING_STATUS["failed_count"] += 1
+                PROCESSING_STATUS["recent_jobs"].append({
+                    "job_id": job["job_id"],
+                    "task": job["task"],
+                    "status": "failed",
+                    "error": str(e),
+                    "failed_at": time.strftime("%Y-%m-%d %H:%M:%S")
+                })
+                print(f"[{time.strftime('%H:%M:%S')}] ❌ [Worker] Failed processing Job {job['job_id']}: {e}")
+            finally:
+                if len(PROCESSING_STATUS["recent_jobs"]) > 20:
+                    PROCESSING_STATUS["recent_jobs"] = PROCESSING_STATUS["recent_jobs"][-20:]
+                PROCESSING_STATUS["is_processing"] = False
+                PROCESSING_STATUS["current_job"] = None
+                PROCESSING_STATUS["pending_count"] = PROCESSING_QUEUE.qsize()
+                PROCESSING_QUEUE.task_done()
+        except Exception as loop_err:
+            print(f"Worker thread error: {loop_err}")
+            time.sleep(0.5)
+
+# Launch worker thread once on server initialization
+_worker_thread = threading.Thread(target=_background_processing_worker_thread, daemon=True, name="OmniKinWorker")
+_worker_thread.start()
 
 def get_local_ip():
     try:
@@ -730,20 +953,19 @@ async def clear_all_episodes():
 async def save_recording(
     video: UploadFile = File(...),
     imu_data: str = Form("[]"),
+    gripper_data: str = Form("[]"),
     task: str = Form("reach to apple")
 ):
     """
     Receives raw sensor recording (video stream + high-frequency IMU telemetry) from mobile phone,
-    saves the raw files to disk, and executes the entire 3D Visual-Inertial EKF Reconstruction
-    and ArUco solvePnP trajectory calculation SERVER-SIDE.
+    saves the raw files to disk, and executes the 3D Visual-Inertial EKF Reconstruction
+    synchronously in the background thread pool.
     """
     try:
-        ep_idx = len(EPISODES_DB)
         ep_uid = f"rec_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
         ep_dir = os.path.join(RECORDINGS_DIR, ep_uid)
         os.makedirs(ep_dir, exist_ok=True)
 
-        # 1. Preserve original video container extension (.webm or .mp4)
         filename = video.filename or "recording.mp4"
         ext = os.path.splitext(filename)[1].lower()
         if not ext or ext == ".":
@@ -753,106 +975,45 @@ async def save_recording(
         video_path = os.path.join(ep_dir, video_filename)
         video_url = f"/recordings/{ep_uid}/{video_filename}"
 
-        print(f"\n[{time.strftime('%H:%M:%S')}] 📥 Server received upload request for Episode #{ep_idx} ({video.filename}, {video.content_type})")
+        print(f"\n[{time.strftime('%H:%M:%S')}] 📥 Server received synchronous upload request ({video.filename}, {video.content_type})")
 
+        content = await video.read()
         with open(video_path, "wb") as f:
-            content = await video.read()
             f.write(content)
 
         print(f"[{time.strftime('%H:%M:%S')}] 💾 Raw video payload saved to disk: {video_path} ({len(content)} bytes)")
 
-        # 2. Parse IMU JSON
         try:
             parsed_imu = json.loads(imu_data)
-            print(f"[{time.strftime('%H:%M:%S')}] 📊 Parsed IMU telemetry stream: {len(parsed_imu)} samples")
         except Exception as imu_err:
             print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Warning parsing IMU telemetry: {imu_err}")
             parsed_imu = []
 
-        # 3. Inspect video frame count and FPS
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if not fps or fps <= 0 or fps > 120 or np.isnan(fps):
-            fps = 30.0
+        try:
+            parsed_gripper = json.loads(gripper_data)
+        except Exception:
+            parsed_gripper = []
 
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if frame_count <= 0:
-            count = 0
-            while True:
-                ret, _ = cap.read()
-                if not ret:
-                    break
-                count += 1
-            frame_count = max(count, 1)
-        cap.release()
-
-        print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Executing Server-Side Sensory Fusion (ArUco + Scene Feature Map + 100Hz IMU EKF)...")
-
-        # 4. SERVER-SIDE COMPUTATION: ArUco + Feature Extraction + 12-State EKF Trajectory Reconstruction
-        dev_video_filename = "dev_visualization.mp4"
-        dev_video_path = os.path.join(ep_dir, dev_video_filename)
-        dev_video_url = f"/recordings/{ep_uid}/{dev_video_filename}"
-
-        canny_video_filename = "canny_visualization.mp4"
-        canny_video_path = os.path.join(ep_dir, canny_video_filename)
-        canny_video_url = f"/recordings/{ep_uid}/{canny_video_filename}"
-
-        anchored_poses, dev_telemetry = visual_tracker.process_video_and_imu(
-            video_path,
-            parsed_imu,
-            fps=fps,
-            output_dev_video_path=dev_video_path,
-            output_canny_video_path=canny_video_path,
-            return_dev_info=True
-        )
-
-        # 5. Gripper state heuristic
-        gripper_states = []
-        for i in range(len(anchored_poses)):
-            g = 100.0 if i < (len(anchored_poses) * 0.7) else 10.0
-            gripper_states.append(g)
-
-        anchored_poses = np.array(anchored_poses)
-        # Apply 6-DoF Camera-to-Gripper Extrinsic Calibration to compute true gripper TCP poses
-        ee_poses = camera_gripper_calibrator.transform_trajectory(anchored_poses, to_gripper=True)
-        actions = np.roll(ee_poses, -1, axis=0)
-        actions[-1] = ee_poses[-1]
-        timestamps = np.linspace(0, len(anchored_poses) / fps, len(anchored_poses))
-
-        episode_data = {
-            'episode_index': ep_idx,
-            'episode_id': ep_uid,
-            'task': task,
-            'video_path': video_path,
-            'video_url': video_url,
-            'dev_video_url': dev_video_url,
-            'canny_video_url': canny_video_url,
-            'dev_telemetry': dev_telemetry,
-            'num_frames': len(anchored_poses),
-            'fps': fps,
-            'duration': len(anchored_poses) / fps,
-            'anchor': 'aruco_feature_imu_fusion',
-            'marker_size_cm': 10.0,
-            'poses': anchored_poses.tolist(),
-            'raw_poses': getattr(visual_tracker, 'last_raw_trajectory', anchored_poses).tolist(),
-            'ee_poses': ee_poses.tolist(),
-            'gripper_states': gripper_states,
-            'actions': actions.tolist(),
-            'timestamps': timestamps.tolist(),
-            'imu_data': parsed_imu,
-            'gripper_offset_applied': camera_gripper_calibrator.get_config(),
-            'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
+        job = {
+            "job_id": ep_uid,
+            "ep_dir": ep_dir,
+            "task": task,
+            "video_path": video_path,
+            "video_filename": video_filename,
+            "video_url": video_url,
+            "parsed_imu": parsed_imu,
+            "parsed_gripper": parsed_gripper,
+            "enqueued_at": time.time()
         }
 
-        EPISODES_DB.append(episode_data)
-        save_episode_meta(episode_data)
-        print(f"[{time.strftime('%H:%M:%S')}] 🎉 Episode #{ep_idx} successfully calculated via ArUco+Feature+IMU fusion ({len(anchored_poses)} frames)!\n")
+        loop = asyncio.get_event_loop()
+        episode_data = await loop.run_in_executor(None, _sync_execute_processing_job, job)
 
         return JSONResponse({
             "status": "success",
-            "episode_index": ep_idx,
+            "episode_index": episode_data["episode_index"],
             "task": task,
-            "num_frames": len(anchored_poses),
+            "num_frames": episode_data["num_frames"],
             "anchor": "ArUco + Feature Map + IMU Fusion (0,0,0) Origin"
         })
 
@@ -864,6 +1025,111 @@ async def save_recording(
             "status": "error",
             "message": f"Server processing error: {str(err)}"
         }, status_code=500)
+
+@app.post("/api/recordings/upload")
+async def upload_recording_async(
+    video: UploadFile = File(...),
+    imu_data: str = Form("[]"),
+    gripper_data: str = Form("[]"),
+    task: str = Form("reach to apple"),
+    client_take_id: str = Form(None)
+):
+    """
+    High-Throughput Non-Blocking Ingestion Endpoint:
+    Streams the raw mobile video & telemetry to disk in < 150ms and immediately enqueues
+    the take for background visual-inertial processing. Returns 200 OK immediately so the
+    mobile camera shutter can reset instantly for the next demonstration.
+    """
+    try:
+        ep_uid = f"rec_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+        ep_dir = os.path.join(RECORDINGS_DIR, ep_uid)
+        os.makedirs(ep_dir, exist_ok=True)
+
+        filename = video.filename or "recording.mp4"
+        ext = os.path.splitext(filename)[1].lower()
+        if not ext or ext == ".":
+            ext = ".webm" if "webm" in (video.content_type or "") else ".mp4"
+
+        video_filename = f"recording{ext}"
+        video_path = os.path.join(ep_dir, video_filename)
+        video_url = f"/recordings/{ep_uid}/{video_filename}"
+
+        content = await video.read()
+        with open(video_path, "wb") as f:
+            f.write(content)
+
+        try:
+            parsed_imu = json.loads(imu_data)
+        except Exception:
+            parsed_imu = []
+
+        try:
+            parsed_gripper = json.loads(gripper_data)
+        except Exception:
+            parsed_gripper = []
+
+        # Save upload manifest for persistence
+        upload_manifest = {
+            "job_id": ep_uid,
+            "task": task,
+            "video_path": video_path,
+            "video_url": video_url,
+            "client_take_id": client_take_id,
+            "uploaded_at": time.time(),
+            "bytes": len(content)
+        }
+        with open(os.path.join(ep_dir, "upload_manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(upload_manifest, f, indent=2)
+
+        job = {
+            "job_id": ep_uid,
+            "ep_dir": ep_dir,
+            "task": task,
+            "video_path": video_path,
+            "video_filename": video_filename,
+            "video_url": video_url,
+            "parsed_imu": parsed_imu,
+            "parsed_gripper": parsed_gripper,
+            "client_take_id": client_take_id,
+            "enqueued_at": time.time()
+        }
+
+        PROCESSING_QUEUE.put(job)
+        queue_pos = PROCESSING_QUEUE.qsize()
+
+        print(f"[{time.strftime('%H:%M:%S')}] 📥 Fast Ingestion: Take '{client_take_id or ep_uid}' ('{task}') enqueued at #{queue_pos} ({len(content)} bytes)")
+
+        return JSONResponse({
+            "status": "queued",
+            "job_id": ep_uid,
+            "client_take_id": client_take_id,
+            "task": task,
+            "queue_position": queue_pos,
+            "message": "Recording uploaded and enqueued for background processing"
+        })
+    except Exception as err:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({
+            "status": "error",
+            "message": f"Upload failed: {str(err)}"
+        }, status_code=500)
+
+@app.get("/api/processing/status")
+async def get_processing_status():
+    """
+    Returns the real-time background processing queue status,
+    active job details, and recent job completion history.
+    """
+    return JSONResponse({
+        "status": "success",
+        "is_processing": PROCESSING_STATUS["is_processing"],
+        "pending_count": PROCESSING_QUEUE.qsize(),
+        "completed_count": PROCESSING_STATUS["completed_count"],
+        "failed_count": PROCESSING_STATUS["failed_count"],
+        "current_job": PROCESSING_STATUS["current_job"],
+        "recent_jobs": PROCESSING_STATUS["recent_jobs"][-5:]
+    })
 
 @app.post("/api/recordings/sample")
 async def generate_sample_recording(task: str = "reach to apple", shape: str = "circle"):
@@ -1478,8 +1744,24 @@ async def get_approach_path_endpoint(request: Request):
         if not poses or len(poses) == 0:
             return JSONResponse({"status": "error", "message": "Selected episode has no poses."}, status_code=400)
 
-        p_start_aruco = poses[0]
-        start_gripper = target_ep.get("gripper_states", [100.0])[0] if target_ep.get("gripper_states") else 100.0
+        auto_trim = bool(payload.get("auto_trim", True))
+
+        # Synchronize planner instances
+        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
+        trajectory_planner.solver = r_solver
+        trajectory_planner.workspace_calibrator = workspace_calibrator
+        trajectory_planner.camera_gripper_calibrator = camera_gripper_calibrator
+
+        idx_start = 0
+        if auto_trim and len(poses) > 15:
+            poses_arr = np.asarray(poses, dtype=np.float64)
+            robot_poses = workspace_calibrator.transform_trajectory(poses_arr, to_robot=True)
+            f_start, f_end = find_feasible_window(robot_poses, r_solver)
+            if f_start < len(poses):
+                idx_start = f_start
+
+        p_start_aruco = poses[idx_start]
+        start_gripper = target_ep.get("gripper_states", [100.0])[idx_start] if target_ep.get("gripper_states") else 100.0
 
         # Resolve canonical initial position
         init_cfg = dict(ROBOT_CONFIG.get("initial_position", DEFAULT_INITIAL_POSITION))
@@ -1487,20 +1769,14 @@ async def get_approach_path_endpoint(request: Request):
             init_cfg.update(payload["initial_position"])
 
         p_home_robot = np.array([
-            float(init_cfg.get("x", 0.15)),
-            float(init_cfg.get("y", 0.00)),
-            float(init_cfg.get("z", 0.20)),
-            np.radians(float(init_cfg.get("roll_deg", 0.0))),
-            np.radians(float(init_cfg.get("pitch_deg", 0.0))),
-            np.radians(float(init_cfg.get("yaw_deg", 0.0)))
+            float(init_cfg.get("x", DEFAULT_INITIAL_POSITION.get("x", 0.24))),
+            float(init_cfg.get("y", DEFAULT_INITIAL_POSITION.get("y", 0.00))),
+            float(init_cfg.get("z", DEFAULT_INITIAL_POSITION.get("z", 0.20))),
+            np.radians(float(init_cfg.get("roll_deg", DEFAULT_INITIAL_POSITION.get("roll_deg", 0.0)))),
+            np.radians(float(init_cfg.get("pitch_deg", DEFAULT_INITIAL_POSITION.get("pitch_deg", -20.0)))),
+            np.radians(float(init_cfg.get("yaw_deg", DEFAULT_INITIAL_POSITION.get("yaw_deg", 0.0))))
         ], dtype=np.float64)
         home_gripper = float(init_cfg.get("gripper", 100.0))
-
-        # Synchronize planner instances
-        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
-        trajectory_planner.solver = r_solver
-        trajectory_planner.workspace_calibrator = workspace_calibrator
-        trajectory_planner.camera_gripper_calibrator = camera_gripper_calibrator
 
         approach_res = trajectory_planner.plan_approach_path(
             p_start=p_start_aruco,
@@ -1517,7 +1793,8 @@ async def get_approach_path_endpoint(request: Request):
             "status": "success",
             "mode": "initial_aware",
             "approach": approach_res,
-            "initial_position": init_cfg
+            "initial_position": init_cfg,
+            "trimmed_start_frame": idx_start
         })
     except Exception as err:
         return JSONResponse({
@@ -1666,6 +1943,7 @@ async def apply_urdf_endpoint(request: Request):
         }, status_code=400)
 
 @app.post("/api/export_lerobot")
+@app.post("/api/export/lerobot")
 async def export_lerobot(request: Request = None):
     if not EPISODES_DB:
         return JSONResponse({"status": "error", "message": "No episodes recorded yet. Please record or sample an episode first."}, status_code=400)
@@ -1679,6 +1957,7 @@ async def export_lerobot(request: Request = None):
                 payload = {}
         traj_mode = payload.get("trajectory_mode", "free_form")
         init_pos = payload.get("initial_position", ROBOT_CONFIG.get("initial_position"))
+        auto_trim = payload.get("auto_trim", True)
 
         # Sync latest configuration
         lerobot_exporter.set_robot_config(
@@ -1692,7 +1971,8 @@ async def export_lerobot(request: Request = None):
             EPISODES_DB,
             dataset_name="mobile_aruco_3d_trajectories",
             trajectory_mode=traj_mode,
-            initial_position=init_pos
+            initial_position=init_pos,
+            auto_trim=auto_trim
         )
         total_frames = sum(ep.get('num_frames', len(ep.get('poses', []))) for ep in EPISODES_DB)
         return JSONResponse({
@@ -1700,10 +1980,11 @@ async def export_lerobot(request: Request = None):
             "export_path": export_path,
             "robot_type": ROBOT_CONFIG["robot_type"],
             "trajectory_mode": traj_mode,
+            "auto_trim": auto_trim,
             "workspace_calibration": ROBOT_CONFIG,
             "total_episodes": len(EPISODES_DB),
             "total_frames": total_frames,
-            "message": f"LeRobot dataset ({ROBOT_CONFIG['robot_type'].upper()}, mode={traj_mode}) exported successfully with {len(EPISODES_DB)} episodes!"
+            "message": f"LeRobot dataset ({ROBOT_CONFIG['robot_type'].upper()}, mode={traj_mode}, auto_trim={auto_trim}) exported successfully with {len(EPISODES_DB)} episodes!"
         })
     except Exception as err:
         import traceback

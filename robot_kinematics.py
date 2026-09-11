@@ -420,6 +420,15 @@ class DHKinematics:
         """Returns the DH parameter table representation."""
         return self.dh_table
 
+    def clip_joint_limits(self, joints_deg):
+        """Clips joint angles in degrees to the physical and safety joint limits."""
+        q = np.array(joints_deg, dtype=np.float64)
+        for j in range(min(len(q), len(self.joint_limits))):
+            lo_deg = float(np.degrees(self.joint_limits[j][0]))
+            hi_deg = float(np.degrees(self.joint_limits[j][1]))
+            q[j] = np.clip(q[j], lo_deg, hi_deg)
+        return q
+
     def forward_kinematics(self, joints):
         """
         Computes Forward Kinematics via DH matrix chain.
@@ -545,7 +554,9 @@ class DHKinematics:
             cos_q2 = (d2 - self.L2**2 - self.L3**2) / (2.0 * self.L2 * self.L3)
             cos_q2 = np.clip(cos_q2, -1.0, 1.0)
 
-            configs_to_test = [True, False] if prev_joints is None else [True]
+            # Standard tabletop robot arm orientation: enforce natural human-like elbow-up configuration
+            # to prevent inverted scorpion/praying mantis postures when target approaches inner dead zone
+            configs_to_test = [True]
 
             for elbow_up in configs_to_test:
                 q2 = -np.arccos(cos_q2) if elbow_up else np.arccos(cos_q2)
@@ -1763,10 +1774,10 @@ class CameraGripperCalibrator:
 
 
 DEFAULT_INITIAL_POSITION = {
-    "x": 0.15,
+    "x": 0.24,
     "y": 0.00,
     "z": 0.20,
-    "pitch_deg": 0.0,
+    "pitch_deg": -20.0,
     "roll_deg": 0.0,
     "yaw_deg": 0.0,
     "gripper": 100.0,
@@ -1845,8 +1856,8 @@ class TrajectoryPlanner:
                 DEFAULT_INITIAL_POSITION["x"],
                 DEFAULT_INITIAL_POSITION["y"],
                 DEFAULT_INITIAL_POSITION["z"],
-                np.radians(DEFAULT_INITIAL_POSITION.get("pitch_deg", 0.0)),
                 np.radians(DEFAULT_INITIAL_POSITION.get("roll_deg", 0.0)),
+                np.radians(DEFAULT_INITIAL_POSITION.get("pitch_deg", 0.0)),
                 np.radians(DEFAULT_INITIAL_POSITION.get("yaw_deg", 0.0))
             ], dtype=np.float64)
         else:
@@ -1860,56 +1871,41 @@ class TrajectoryPlanner:
             p_start_aruco = p_start_arr
             p_start_robot = self.workspace_calibrator.aruco_to_robot(p_start_arr)
 
+        ik_home = self.solver.solve_feasible_ik(p_home, gripper_state=float(home_gripper))
+        ik_start = self.solver.solve_feasible_ik(p_start_robot, gripper_state=float(start_gripper))
+
+        q_home = ik_home["joints"]
+        q_start = ik_start["joints"]
+
         num_frames = max(10, int(round(duration_s * fps)))
         tau_vals = np.linspace(0.0, 1.0, num_frames)
 
-        zh = p_home[2]
-        zs = p_start_robot[2]
-        z_peak = max(zh, zs + float(lift_clearance_m))
-        z_extra = max(0.0, z_peak - max(zh, zs))
-
         robot_ee = np.zeros((num_frames, 6), dtype=np.float64)
         grippers = np.zeros(num_frames, dtype=np.float64)
+        joint_states = np.zeros((num_frames, 6), dtype=np.float64)
 
         for i, tau in enumerate(tau_vals):
             s = self.quintic_blend(tau)
-            # Cartesian X, Y
-            x = p_home[0] + s * (p_start_robot[0] - p_home[0])
-            y = p_home[1] + s * (p_start_robot[1] - p_home[1])
-            # Elevation Z with parabolic clearance arch
-            z = (zh + s * (zs - zh)) + (4.0 * tau * (1.0 - tau) * z_extra)
-            # Enforce minimum table surface clearance (1.2 cm)
-            z = max(0.012, z)
+            # Joint-space C^2 quintic minimum-jerk blend (MoveJ)
+            q_i = q_home + s * (q_start - q_home)
+            q_i = self.solver.clip_joint_limits(q_i)
+            joint_states[i] = q_i
 
-            # Orientations (shortest angular path)
-            roll = p_home[3] + s * self.shortest_angle_diff(p_start_robot[3], p_home[3])
-            pitch = p_home[4] + s * self.shortest_angle_diff(p_start_robot[4], p_home[4])
-            yaw = p_home[5] + s * self.shortest_angle_diff(p_start_robot[5], p_home[5])
-
-            robot_ee[i] = [x, y, z, roll, pitch, yaw]
+            # Forward kinematics for exact Cartesian EE pose
+            fk = self.solver.forward_kinematics(np.radians(q_i[:5]))
+            robot_ee[i] = fk
             grippers[i] = float(home_gripper) + s * (float(start_gripper) - float(home_gripper))
 
         # Transform to ArUco frame
         aruco_ee = self.workspace_calibrator.transform_trajectory(robot_ee, to_robot=False)
         aruco_cam = self.camera_gripper_calibrator.transform_trajectory(aruco_ee, to_gripper=False)
 
-        # Solve IK for all waypoints and verify feasibility
-        joint_states = np.zeros((num_frames, 6), dtype=np.float64)
-        feasible_count = 0
-        max_err = 0.0
-
-        for i in range(num_frames):
-            res = self.solver.solve_feasible_ik(robot_ee[i], gripper_state=grippers[i])
-            joint_states[i] = res["joints"]
-            if res["is_feasible"]:
-                feasible_count += 1
-            max_err = max(max_err, res["error_distance_cm"])
-
         actions = np.roll(joint_states, -1, axis=0)
         actions[-1] = joint_states[-1]
         timestamps = np.linspace(0.0, duration_s, num_frames, dtype=np.float32)
 
-        is_feasible = (feasible_count == num_frames) and (max_err < 1.5)
+        is_feasible = bool(ik_home["is_feasible"] and ik_start["is_feasible"])
+        max_err = max(ik_home["error_distance_cm"], ik_start["error_distance_cm"])
 
         return {
             "robot_ee_poses": robot_ee.tolist(),

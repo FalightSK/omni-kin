@@ -29,14 +29,57 @@ from robot_kinematics import (
 )
 
 
+def find_feasible_window(ee_poses_robot, solver, max_err_cm=1.5):
+    """
+    Evaluates inverse kinematics across Cartesian EE waypoints (in Robot Base Frame)
+    and determines the contiguous active manipulation window [f_start, f_end] where
+    the arm is physically reachable and not jammed against mechanical stops (r >= 17.6cm).
+    """
+    n = len(ee_poses_robot)
+    if n == 0:
+        return 0, 0
+    feasible = []
+    for i in range(n):
+        res = solver.solve_feasible_ik(ee_poses_robot[i])
+        is_ok = res['is_feasible'] and res['error_distance_cm'] <= max_err_cm
+        feasible.append(is_ok)
+
+    if not any(feasible):
+        return 0, n
+
+    f_start = 0
+    while f_start < n and not feasible[f_start]:
+        f_start += 1
+
+    f_end = n
+    while f_end > f_start and not feasible[f_end - 1]:
+        f_end -= 1
+
+    return f_start, f_end
+
+
 class LeRobotExporter:
     """
-    Exports episode datasets into the standard Hugging Face LeRobot directory schema.
+    Exports captured 3D multimodal trajectories into official Hugging Face LeRobot format.
+    Ensures standard structure:
+      data/chunk-000/file-000.parquet
+      videos/observation.images.phone/chunk-000/episode_000000.mp4
+      meta/info.json
+      meta/stats.json
+      meta/tasks.jsonl
+      meta/episodes/file-000.parquet & meta/episodes.jsonl
     """
 
-    def __init__(self, output_dir="lerobot_dataset", fps=30, robot_type="so_arm101_omni_kin", workspace_calibrator=None, q3_safe_max_deg=0.0):
+    def __init__(
+        self,
+        output_dir="lerobot_dataset",
+        fps=30,
+        robot_type="so_arm101_omni_kin",
+        workspace_calibrator=None,
+        q3_safe_max_deg=None
+    ):
         self.output_dir = output_dir
-        self.fps = fps
+        self.fps = int(fps)
         self.robot_type = robot_type
         self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
         self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg)
@@ -52,10 +95,11 @@ class LeRobotExporter:
         self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg)
         self.workspace_calibrator.update_config(offset_x, offset_y, offset_z, yaw_deg)
 
-    def _ensure_joint_states_and_poses(self, ep, trajectory_mode="free_form", initial_position=None):
+    def _ensure_joint_states_and_poses(self, ep, trajectory_mode="free_form", initial_position=None, auto_trim=True):
         """
         Extracts or computes both joint states [q0, q1, q2, q3, q4, gripper]
         and Cartesian EE poses [x, y, z, roll, pitch, yaw] with gripper.
+        When auto_trim == True, trims idle lead-in and lead-out frames outside reachable workspace.
         When trajectory_mode == 'initial_aware', prepends a smooth quintic minimum-jerk
         approach trajectory from the canonical Initial Position (Home) to the start waypoint.
         """
@@ -73,46 +117,83 @@ class LeRobotExporter:
         else:
             num_frames = 30
 
+        orig_num_frames = num_frames
+
         # 1. Resolve Cartesian EE Poses (in Robot Base Frame)
         if raw_poses is not None and len(raw_poses) == num_frames:
             raw_arr = np.asarray(raw_poses, dtype=np.float64)
             ee_poses = self.workspace_calibrator.transform_trajectory(raw_arr, to_robot=True).astype(np.float32)
         else:
             ee_poses = np.zeros((num_frames, 6), dtype=np.float32)
-            ee_poses[:, 0] = 0.15
+            ee_poses[:, 0] = 0.24
             ee_poses[:, 2] = 0.20
 
-        # 2. Resolve Gripper States
+        # 2. Resolve Gripper States (Strictly normalized [0.0, 1.0] for LeRobot standard)
         if gripper_states is not None and len(gripper_states) == num_frames:
             grippers = np.asarray(gripper_states, dtype=np.float32)
         else:
-            grippers = np.full((num_frames,), 100.0, dtype=np.float32)
+            grippers = np.full((num_frames,), 1.0, dtype=np.float32)
 
-        # 3. Resolve Joint States
+        if np.max(grippers) > 1.0 + 1e-3:
+            grippers = np.clip(grippers / 100.0, 0.0, 1.0)
+        else:
+            grippers = np.clip(grippers, 0.0, 1.0)
+
+        # 3. Automatic Feasible Workspace Trimming
+        trim_info = {"f_start": 0, "f_end": orig_num_frames, "orig_frames": orig_num_frames, "is_trimmed": False}
+        if auto_trim and len(ee_poses) > 15:
+            f_start, f_end = find_feasible_window(ee_poses, self.ik_solver)
+            if f_end > f_start and (f_start > 0 or f_end < orig_num_frames):
+                print(f"[LeRobot Exporter] ✂️ Auto-trimming out-of-reach boundary frames: [{f_start}:{f_end}] (kept {f_end - f_start}/{orig_num_frames} frames)")
+                ee_poses = ee_poses[f_start:f_end]
+                grippers = grippers[f_start:f_end]
+                if raw_joints is not None and len(raw_joints) == orig_num_frames:
+                    raw_joints = [raw_joints[i] for i in range(f_start, f_end)]
+                num_frames = len(ee_poses)
+                trim_info = {
+                    "f_start": f_start,
+                    "f_end": f_end,
+                    "orig_frames": orig_num_frames,
+                    "is_trimmed": True
+                }
+
+        # 4. Resolve Joint States
         if raw_joints is not None and len(raw_joints) == num_frames:
             joint_states = np.asarray(raw_joints, dtype=np.float32)
+            # Ensure last column (gripper) is normalized [0, 1]
+            if joint_states.shape[1] > 0 and np.max(joint_states[:, -1]) > 1.0 + 1e-3:
+                joint_states[:, -1] = np.clip(joint_states[:, -1] / 100.0, 0.0, 1.0)
         else:
             # Compute Inverse Kinematics for arm from Cartesian EE Poses
             computed_joints = []
+            prev_q = None
             for i in range(num_frames):
                 pose_i = ee_poses[i]
                 grip_i = float(grippers[i])
                 try:
-                    q = self.ik_solver.inverse_kinematics(pose_i, gripper_state=grip_i)
+                    q = self.ik_solver.inverse_kinematics(pose_i, gripper_state=grip_i, prev_joints=prev_q)
+                    prev_q = q[:5]
                 except Exception:
-                    q = np.array([0.0, 30.0, 45.0, -15.0, 0.0, grip_i], dtype=np.float32)
+                    q = np.array([0.0, 35.0, -55.0, -20.0, 0.0, grip_i], dtype=np.float32)
                 computed_joints.append(q)
             joint_states = np.array(computed_joints, dtype=np.float32)
+            joint_states[:, -1] = grippers
 
-        # 4. Resolve Actions (Next-frame target joints)
+        # 5. Resolve Actions (Next-frame target joints)
         raw_actions = ep.get('actions')
-        if raw_actions is not None and len(raw_actions) == num_frames:
-            actions = np.asarray(raw_actions, dtype=np.float32)
+        if raw_actions is not None and len(raw_actions) == orig_num_frames:
+            raw_act_arr = np.asarray(raw_actions, dtype=np.float32)
+            if trim_info["is_trimmed"]:
+                actions = raw_act_arr[trim_info["f_start"]:trim_info["f_end"]]
+            else:
+                actions = raw_act_arr
+            if actions.shape[1] > 0 and np.max(actions[:, -1]) > 1.0 + 1e-3:
+                actions[:, -1] = np.clip(actions[:, -1] / 100.0, 0.0, 1.0)
         else:
             actions = np.roll(joint_states, -1, axis=0)
             actions[-1] = joint_states[-1]
 
-        # 4b. Enforce Universal Camera Safe Ceiling on Wrist Pitch Joint
+        # 5b. Enforce Universal Camera Safe Ceiling on Wrist Pitch Joint
         wrist_idx = getattr(self.ik_solver, "wrist_pitch_idx", 3)
         collision_sign = getattr(self.ik_solver, "wrist_collision_sign", 1)
         if len(joint_states) > 0 and joint_states.shape[1] > wrist_idx:
@@ -129,31 +210,28 @@ class LeRobotExporter:
                     joint_states[:, wrist_idx] = np.maximum(joint_states[:, wrist_idx], -float(self.q3_safe_max_deg))
                     actions[:, wrist_idx] = np.maximum(actions[:, wrist_idx], -float(self.q3_safe_max_deg))
 
-        # 5. Resolve Timestamps
-        raw_times = ep.get('timestamps')
-        if raw_times is not None and len(raw_times) == num_frames:
-            timestamps = np.asarray(raw_times, dtype=np.float32)
-        else:
-            timestamps = np.linspace(0, num_frames / self.fps, num_frames, dtype=np.float32)
+        # 6. Resolve Timestamps
+        timestamps = np.linspace(0, num_frames / self.fps, num_frames, dtype=np.float32)
 
-        # 6. Prepend Auto Approach Path if Initial-Position Aware Mode is active
+        # 7. Prepend Auto Approach Path if Initial-Position Aware Mode is active
+        prepend_approach_frames = 0
         if str(trajectory_mode).lower() == "initial_aware" and len(ee_poses) > 0:
             try:
                 planner = TrajectoryPlanner(solver=self.ik_solver, workspace_calibrator=self.workspace_calibrator)
                 p_start_robot = ee_poses[0]
-                start_grip = float(grippers[0]) if len(grippers) > 0 else 100.0
+                start_grip = float(grippers[0]) if len(grippers) > 0 else 1.0
 
                 init_cfg = dict(DEFAULT_INITIAL_POSITION)
                 if initial_position and isinstance(initial_position, dict):
                     init_cfg.update(initial_position)
 
                 p_home_robot = np.array([
-                    float(init_cfg.get("x", 0.15)),
-                    float(init_cfg.get("y", 0.00)),
-                    float(init_cfg.get("z", 0.20)),
-                    np.radians(float(init_cfg.get("roll_deg", 0.0))),
-                    np.radians(float(init_cfg.get("pitch_deg", 0.0))),
-                    np.radians(float(init_cfg.get("yaw_deg", 0.0)))
+                    float(init_cfg.get("x", DEFAULT_INITIAL_POSITION["x"])),
+                    float(init_cfg.get("y", DEFAULT_INITIAL_POSITION["y"])),
+                    float(init_cfg.get("z", DEFAULT_INITIAL_POSITION["z"])),
+                    np.radians(float(init_cfg.get("roll_deg", DEFAULT_INITIAL_POSITION.get("roll_deg", 0.0)))),
+                    np.radians(float(init_cfg.get("pitch_deg", DEFAULT_INITIAL_POSITION.get("pitch_deg", -20.0)))),
+                    np.radians(float(init_cfg.get("yaw_deg", DEFAULT_INITIAL_POSITION.get("yaw_deg", 0.0))))
                 ], dtype=np.float64)
 
                 approach_res = planner.plan_approach_path(
@@ -163,14 +241,17 @@ class LeRobotExporter:
                     fps=self.fps,
                     lift_clearance_m=0.06,
                     home_gripper=float(init_cfg.get("gripper", 100.0)),
-                    start_gripper=start_grip,
+                    start_gripper=start_grip * 100.0,
                     start_in_robot_frame=True
                 )
 
                 app_ee = np.asarray(approach_res['robot_ee_poses'], dtype=np.float32)
                 app_joints = np.asarray(approach_res['joint_states'], dtype=np.float32)
+                app_joints[:, -1] = np.clip(app_joints[:, -1] / 100.0, 0.0, 1.0)
                 app_actions = np.asarray(approach_res['actions'], dtype=np.float32)
+                app_actions[:, -1] = np.clip(app_actions[:, -1] / 100.0, 0.0, 1.0)
 
+                prepend_approach_frames = len(app_ee)
                 ee_poses = np.vstack([app_ee, ee_poses])
                 joint_states = np.vstack([app_joints, joint_states])
                 actions = np.vstack([app_actions, actions])
@@ -179,12 +260,23 @@ class LeRobotExporter:
             except Exception as e:
                 print(f"Warning: Failed to prepend approach path in export: {e}")
 
-        return joint_states, ee_poses, actions, timestamps, num_frames
+        return joint_states, ee_poses, actions, timestamps, num_frames, trim_info, prepend_approach_frames
 
-    def _transcode_video_to_mp4(self, src_path, dst_path, target_fps=30, num_frames=30):
+    def _transcode_video_to_mp4(
+        self,
+        src_path,
+        dst_path,
+        target_fps=30,
+        num_frames=30,
+        slice_start=0,
+        slice_end=None,
+        prepend_hold_frames=0
+    ):
         """
-        Transcodes any video format (including WebM from phone) into a standardized,
-        browser-and-torchvision compliant MP4 file.
+        Transcodes any video format into a standardized MP4 file,
+        applying synchronous frame slicing (slice_start to slice_end) and
+        prepending static hold frames for the approach phase.
+        Guarantees exact 1:1 frame count parity with the tabular parquet dataset.
         """
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
 
@@ -196,21 +288,40 @@ class LeRobotExporter:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             writer = cv2.VideoWriter(dst_path, fourcc, target_fps, (w, h))
 
-            count = 0
+            f_idx = 0
+            first_kept_frame = None
+            written_count = 0
+
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
+
+                if f_idx < slice_start:
+                    f_idx += 1
+                    continue
+
+                if slice_end is not None and f_idx >= slice_end:
+                    break
+
+                # On encountering the first kept frame, write prepend_hold_frames for approach
+                if first_kept_frame is None:
+                    first_kept_frame = frame
+                    for _ in range(prepend_hold_frames):
+                        writer.write(first_kept_frame)
+                        written_count += 1
+
                 writer.write(frame)
-                count += 1
+                written_count += 1
+                f_idx += 1
 
             cap.release()
             writer.release()
 
-            if count > 0:
+            if written_count > 0:
                 return True
 
-        # Fallback: Generate clean placeholder MP4
+        # Fallback: Generate clean placeholder MP4 with exact frame count
         w, h = 640, 480
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         writer = cv2.VideoWriter(dst_path, fourcc, target_fps, (w, h))
@@ -222,10 +333,18 @@ class LeRobotExporter:
         writer.release()
         return True
 
-    def export_dataset(self, episodes_data, dataset_name="mobile_aruco_3d_trajectories", trajectory_mode="free_form", initial_position=None):
+    def export_dataset(
+        self,
+        episodes_data,
+        dataset_name="mobile_aruco_3d_trajectories",
+        trajectory_mode="free_form",
+        initial_position=None,
+        auto_trim=True
+    ):
         """
         Exports episodes_data into the official Hugging Face LeRobot dataset schema.
-        Supports both 'free_form' (pretraining) and 'initial_aware' (fine-tuning) modes.
+        Supports both 'free_form' (pretraining) and 'initial_aware' (fine-tuning) modes,
+        with optional auto_trim of out-of-reach boundary frames.
         """
         if not episodes_data:
             raise ValueError("No episodes provided for LeRobot export.")
@@ -258,21 +377,30 @@ class LeRobotExporter:
             task = ep.get('task', 'reach to object')
             task_idx = task_to_idx[task]
 
-            # Robust data extraction & IK resolution
-            joint_states, ee_poses, actions, timestamps, num_frames = self._ensure_joint_states_and_poses(
+            # Robust data extraction & IK resolution with auto-trim
+            joint_states, ee_poses, actions, timestamps, num_frames, trim_info, prepend_approach_frames = self._ensure_joint_states_and_poses(
                 ep,
                 trajectory_mode=trajectory_mode,
-                initial_position=initial_position
+                initial_position=initial_position,
+                auto_trim=auto_trim
             )
 
             all_states.append(joint_states)
             all_ee_poses.append(ee_poses)
             all_actions.append(actions)
 
-            # Transcode / copy video
+            # Transcode / copy video with synchronous trimming and approach frame padding
             src_video = ep.get('video_path', '')
             dst_video = os.path.join(video_dir, f"episode_{ep_idx:06d}.mp4")
-            self._transcode_video_to_mp4(src_video, dst_video, target_fps=self.fps, num_frames=num_frames)
+            self._transcode_video_to_mp4(
+                src_video,
+                dst_video,
+                target_fps=self.fps,
+                num_frames=num_frames,
+                slice_start=trim_info["f_start"],
+                slice_end=trim_info["f_end"],
+                prepend_hold_frames=prepend_approach_frames
+            )
 
             for f_idx in range(num_frames):
                 is_done = bool(f_idx == num_frames - 1)
@@ -328,19 +456,25 @@ class LeRobotExporter:
                 "mean": np.mean(concat_states, axis=0).tolist(),
                 "std": np.std(concat_states, axis=0).tolist(),
                 "min": np.min(concat_states, axis=0).tolist(),
-                "max": np.max(concat_states, axis=0).tolist()
+                "max": np.max(concat_states, axis=0).tolist(),
+                "q01": np.quantile(concat_states, 0.01, axis=0).tolist(),
+                "q99": np.quantile(concat_states, 0.99, axis=0).tolist()
             },
             "observation.ee_pose": {
                 "mean": np.mean(concat_ee, axis=0).tolist(),
                 "std": np.std(concat_ee, axis=0).tolist(),
                 "min": np.min(concat_ee, axis=0).tolist(),
-                "max": np.max(concat_ee, axis=0).tolist()
+                "max": np.max(concat_ee, axis=0).tolist(),
+                "q01": np.quantile(concat_ee, 0.01, axis=0).tolist(),
+                "q99": np.quantile(concat_ee, 0.99, axis=0).tolist()
             },
             "action": {
                 "mean": np.mean(concat_actions, axis=0).tolist(),
                 "std": np.std(concat_actions, axis=0).tolist(),
                 "min": np.min(concat_actions, axis=0).tolist(),
-                "max": np.max(concat_actions, axis=0).tolist()
+                "max": np.max(concat_actions, axis=0).tolist(),
+                "q01": np.quantile(concat_actions, 0.01, axis=0).tolist(),
+                "q99": np.quantile(concat_actions, 0.99, axis=0).tolist()
             }
         }
         with open(os.path.join(meta_dir, "stats.json"), "w") as f:

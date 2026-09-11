@@ -5,6 +5,7 @@ import MobileLogger from './pages/MobileLogger';
 import EKFTuningModal from './components/EKFTuningModal';
 import RobotSetupModal from './components/RobotSetupModal';
 import ConnectPhoneModal from './components/ConnectPhoneModal';
+import ExportLeRobotModal from './components/ExportLeRobotModal';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 
 class ErrorBoundary extends Component {
@@ -55,6 +56,7 @@ export default function App() {
   const [isRobotModalOpen, setIsRobotModalOpen] = useState(false);
   const [robotModalTab, setRobotModalTab] = useState('offset');
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [trajectoryMode, setTrajectoryMode] = useState('free_form'); // 'free_form' | 'initial_aware'
   const [robotConfig, setRobotConfig] = useState({
     robot_type: 'so_arm101_omni_kin',
@@ -72,10 +74,10 @@ export default function App() {
       enabled: true
     },
     initial_position: {
-      x: 0.15,
+      x: 0.24,
       y: 0.00,
       z: 0.20,
-      pitch: 0.0,
+      pitch: -20.0,
       roll: 0.0,
       yaw: 0.0,
       gripper: 100.0
@@ -154,21 +156,8 @@ export default function App() {
     }
   };
 
-  const handleExportLeRobot = async () => {
-    try {
-      const res = await fetch('/api/export_lerobot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trajectory_mode: trajectoryMode })
-      });
-      const data = await res.json();
-      const modeLabel = data.trajectory_mode === 'initial_aware'
-        ? 'Initial-Position Aware (Fine-Tuning)'
-        : 'Free-Form (Pretraining)';
-      alert(`LeRobot Dataset Exported Successfully!\n\nEmbodiment: ${data.robot_type.toUpperCase()}\nMode: ${modeLabel}\nPath: ${data.export_path}\nTotal Episodes: ${data.total_episodes}`);
-    } catch (err) {
-      console.error(err);
-    }
+  const handleExportLeRobot = () => {
+    setIsExportModalOpen(true);
   };
 
   const handleOpenRobotModal = (tab = 'offset') => {
@@ -244,6 +233,15 @@ export default function App() {
           <ConnectPhoneModal
             isOpen={isConnectModalOpen}
             onClose={() => setIsConnectModalOpen(false)}
+          />
+
+          <ExportLeRobotModal
+            isOpen={isExportModalOpen}
+            onClose={() => setIsExportModalOpen(false)}
+            episodes={episodes}
+            robotConfig={robotConfig}
+            trajectoryMode={trajectoryMode}
+            onTrajectoryModeChange={setTrajectoryMode}
           />
         </div>
       )}

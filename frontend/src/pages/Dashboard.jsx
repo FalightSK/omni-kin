@@ -34,7 +34,8 @@ import {
   Eye,
   Info,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  UploadCloud
 } from 'lucide-react';
 
 export default function Dashboard({
@@ -85,6 +86,50 @@ export default function Dashboard({
   const [overridePoses, setOverridePoses] = useState(null);
   const [overrideEePoses, setOverrideEePoses] = useState(null);
   const debouncedSmoothRef = useRef(null);
+
+  // Server-side Background Processing Queue Status & Auto-refresh
+  const [processingStatus, setProcessingStatus] = useState({
+    is_processing: false,
+    pending_count: 0,
+    completed_count: 0,
+    current_job: null
+  });
+  const prevCompletedCountRef = useRef(0);
+  const prevIsProcessingRef = useRef(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    const pollStatus = async () => {
+      try {
+        const res = await fetch('/api/processing/status');
+        const data = await res.json();
+        if (!isMounted || data.status !== 'success') return;
+
+        setProcessingStatus(data);
+
+        // Auto-refresh episode list when background worker completes an episode
+        if (
+          data.completed_count > prevCompletedCountRef.current ||
+          (prevIsProcessingRef.current && !data.is_processing)
+        ) {
+          prevCompletedCountRef.current = data.completed_count;
+          if (onRefreshEpisodes) {
+            onRefreshEpisodes();
+          }
+        }
+        prevIsProcessingRef.current = data.is_processing;
+      } catch (err) {
+        // Silently catch polling error
+      }
+    };
+
+    pollStatus();
+    const interval = setInterval(pollStatus, 2000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [onRefreshEpisodes]);
 
   const activeEp = episodes.find((e) => e.episode_index === selectedEpIdx) || episodes[0] || null;
   const poses = overridePoses || activeEp?.poses || [];
@@ -768,9 +813,20 @@ export default function Dashboard({
                     <span>🚀 Approach: Step {approachFrameIndex + 1} of {approachFramesCount} (Home → Start)</span>
                   </span>
                 ) : (
-                  <span>
-                    Frame {safeFrameIndex + 1} of {totalFrames}
-                    {isInitialAware && <span className="text-indigo-400 ml-1.5 font-sans font-medium">(Demo Phase)</span>}
+                  <span className="flex items-center gap-2">
+                    <span>
+                      Frame {safeFrameIndex + 1} of {totalFrames}
+                      {isInitialAware && <span className="text-indigo-400 ml-1.5 font-sans font-medium">(Demo Phase)</span>}
+                    </span>
+                    {activeEp?.feasible_window?.is_trimmed && (
+                      <span
+                        className="px-1.5 py-0.5 rounded text-[9.5px] font-sans font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1"
+                        title={`Physically reachable window: Frames ${activeEp.feasible_window.start}–${activeEp.feasible_window.end}. Out-of-reach boundary frames (< 17.6cm) are auto-trimmed on LeRobot export.`}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                        <span>Feasible: {activeEp.feasible_window.start}–{activeEp.feasible_window.end} ({activeEp.feasible_window.end - activeEp.feasible_window.start}f)</span>
+                      </span>
+                    )}
                   </span>
                 )}
                 <span>
@@ -1271,6 +1327,29 @@ export default function Dashboard({
             </div>
           </div>
 
+          {/* Background Processing Queue Monitor Banner */}
+          {(processingStatus.is_processing || processingStatus.pending_count > 0) && (
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex flex-col gap-1.5 animate-pulse">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-amber-400 flex items-center gap-1.5">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                  <span>Processing Demonstrations</span>
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-mono text-[10px] font-bold">
+                  {processingStatus.pending_count + (processingStatus.is_processing ? 1 : 0)} in queue
+                </span>
+              </div>
+              {processingStatus.current_job && (
+                <div className="text-[10px] text-amber-200/80 truncate font-mono">
+                  Active: {processingStatus.current_job.task}
+                </div>
+              )}
+              <div className="text-[9px] text-slate-400">
+                ArUco solvePnP + 100Hz EKF running in background...
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 overflow-y-auto flex flex-col gap-2 pr-1">
             {episodes.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-48 text-center gap-2 text-slate-500">
@@ -1313,6 +1392,22 @@ export default function Dashboard({
                       </span>
                       <span>{(ep.duration || 0).toFixed(1)}s</span>
                     </div>
+                    {ep.feasible_window && (
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        {ep.feasible_window.is_trimmed ? (
+                          <span
+                            className="px-1.5 py-0.5 rounded text-[9.5px] bg-amber-500/10 text-amber-300 border border-amber-500/30 flex items-center gap-1 font-mono"
+                            title={`Auto-trimmed ${ep.feasible_window.start} leading / ${ep.feasible_window.total - ep.feasible_window.end} trailing out-of-reach frames`}
+                          >
+                            <span>✂️ Feasible: {ep.feasible_window.start}–{ep.feasible_window.end} ({ep.feasible_window.end - ep.feasible_window.start}f)</span>
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 rounded text-[9.5px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1 font-mono">
+                            <span>✓ 100% Feasible</span>
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })
