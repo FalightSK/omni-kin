@@ -470,7 +470,7 @@ $$\mathbf{p}_{\text{closest}} = \mathbf{p}_{\text{elbow}} + t^* (\mathbf{p}_{\te
 $$d_{\text{clearance}} = \|\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{closest}}\|$$
 
 - If $d_{\text{clearance}} < 0.045\text{ m}$ ($4.5\text{ cm}$), the configuration is heavily penalized and clamped.
-- **Coordinate-Frame A健全ic**: This mathematical invariant is 100% independent of joint index numbers, axis signs, or mounting brackets.
+- **Coordinate-Frame Agnostic**: This mathematical invariant is 100% independent of joint index numbers, axis signs, or mounting brackets.
 
 ---
 
