@@ -1,4 +1,4 @@
-﻿# Practical User Guide — How to Actually Use OmniKin 🦾📱
+# Practical User Guide — How to Actually Use OmniKin 🦾📱
 
 Welcome to **OmniKin**! This guide walks you through the entire end-to-end workflow: from printing the ArUco marker board to recording 3D manipulation demonstrations on your phone and exporting LeRobot datasets for robot policy training.
 
@@ -20,21 +20,23 @@ Before you begin, ensure you have:
 
 The marker board serves as the physical $(0, 0, 0)$ world origin for all your demonstrations.
 
-```
-                  ┌──────────────────────────────────────────────────────────┐
-                  │                      WORKSTATION DESK                    │
-                  │                                                          │
-                  │                [ Robot Arm Base Location ]               │
-                  │                                                          │
-                  │              ┌─────────────┐       ┌───────┐             │
-                  │              │             │  5cm  │       │             │
-                  │              │    TAG A    │◄─────►│ TAG B │             │
-                  │              │   (10 cm)   │  gap  │ (5 cm)│             │
-                  │              │             │       │       │             │
-                  │              └─────────────┘       └───────┘             │
-                  │              ▲                                           │
-                  │              │ (0,0,0) Origin (Bottom-Left)              │
-                  └──────────────┴───────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Desk["Top View of Workstation Desk"]
+        direction TB
+        Base["🦾 Robot Arm Base Location<br/>X = 0.091m, Y = -0.410m, Yaw = 90°"]
+        Reach["↕️ Robot Reach Zone ↕️"]
+
+        subgraph Board["Physical Dual-ArUco Board Sheet"]
+            direction LR
+            TagA["🏷️ TAG A (10 cm)<br/>ID: 0 (Origin: 0, 0, 0)"]
+            Gap["◄ 5 cm Gap ►"]
+            TagB["🏷️ TAG B (5 cm)<br/>ID: 1 (Offset: 0.15m, 0, 0)"]
+            TagA --- Gap --- TagB
+        end
+
+        Base --- Reach --- Board
+    end
 ```
 
 1. Start the server (see Step 2) or open `http://localhost:8000/api/marker/print_dual` in your desktop browser.
@@ -86,17 +88,21 @@ Open **`http://localhost:8000`** in your desktop browser (Chrome, Edge, or Firef
 
 Modern mobile browsers strictly require **HTTPS** to allow access to the camera and motion sensors over a local network. OmniKin provides an automated HTTPS service on port `8443`.
 
-```
-          DESKTOP SCREEN                                SMARTPHONE SCREEN
-   ┌───────────────────────────┐                 ┌───────────────────────────┐
-   │ Click "Connect Phone"     │                 │ 1. Open Camera & Scan QR  │
-   │ ┌───────────────────────┐ │   Scan QR       │ 2. Bypass SSL Warning:    │
-   │ │  ████████   ████████  │ │ ─────────────►  │    - Android: Advanced -> │
-   │ │  ██ ▄▄ ██   ██ ▄▄ ██  │ │                 │      Proceed to IP        │
-   │ │  ████████   ████████  │ │                 │    - iOS: Show Details -> │
-   │ └───────────────────────┘ │                 │      visit this website   │
-   │ https://192.168.1.50:8443 │                 │ 3. Tap "Allow" Permissions│
-   └───────────────────────────┘                 └───────────────────────────┘
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 👤 Operator
+    participant Desktop as 🖥️ Desktop Dashboard (:8000)
+    participant Phone as 📱 Smartphone Browser (:8443)
+
+    User->>Desktop: Click "Connect Phone" button in Navbar
+    Desktop-->>User: Displays Modal with QR Code (pointing to https://IP:8443/mobile)
+    User->>Phone: Scan QR Code with Smartphone Camera
+    Phone->>Desktop: Request https://IP:8443/mobile
+    Desktop-->>Phone: Serve Mobile Web App over HTTPS
+    User->>Phone: Accept One-Time SSL Warning (Proceed / Visit Website)
+    User->>Phone: Grant Camera & Motion Sensor Permissions
+    Phone-->>User: Display Active Landscape Viewfinder & IMU HUD
 ```
 
 1. On your desktop dashboard, click the purple **"📱 Connect Phone"** button in the top navigation bar.
@@ -117,22 +123,20 @@ Modern mobile browsers strictly require **HTTPS** to allow access to the camera 
 
 Before recording, ensure your virtual robot model matches your physical setup. Click **"⚙️ Robot Setup"** in the top navigation bar.
 
-```
- ┌─────────────────────────────────────────────────────────────────────────────┐
- │ ROBOT CONFIGURATION & CALIBRATION MODAL                                     │
- ├──────────────┬──────────────┬──────────────┬──────────────┬─────────────────┤
- │  Embodiment  │  Workspace   │Camera Offset │ Wrist Safety │ Initial Position│
- ├──────────────┴──────────────┴──────────────┴──────────────┴─────────────────┤
- │                                                                             │
- │  1. Embodiment: Select preset (SO-ARM101-OMNI-KIN) or upload custom .urdf   │
- │  2. Workspace:  Base Offset X = 0.091m, Y = -0.410m, Z = 0.00m, Yaw = 90°   │
- │                 [ Click "Recommended" to auto-align reach envelope ]        │
- │  3. Camera:     Forward = 12.8cm, Height = 10.9cm, Pitch = 40.4°            │
- │  4. Safety:     q3 Safe Max = 5.0° (Prevents camera crashing into forearm)  │
- │  5. Home Pose:  X = 0.15m, Y = 0.00m, Z = 0.20m, Gripper = 100%             │
- │                                                                             │
- │                                                   [ Save Configuration ]    │
- └─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    Modal["⚙️ Robot Setup & Calibration Dialog"]
+    
+    subgraph Tabs["Configuration Tabs"]
+        T1["1. Embodiment<br/>• Select Preset (SO-ARM101-OMNI-KIN)<br/>• Upload custom .urdf file"]
+        T2["2. Workspace Calibration<br/>• Base Offsets: X=0.091m, Y=-0.410m, Z=0.00m<br/>• Base Yaw: 90.0°<br/>• Auto Align: Recommended / Optimal"]
+        T3["3. Camera Offset<br/>• Forward: 12.8cm, Height: 10.9cm<br/>• Lateral: 0.0cm, Pitch: 40.4°"]
+        T4["4. Wrist Safety<br/>• q3 Safe Max Ceiling: 5.0°<br/>• Prevents camera-forearm collision"]
+        T5["5. Initial Position<br/>• Home Pose: X=0.15m, Y=0.0m, Z=0.20m<br/>• Gripper: 100% (Open)"]
+    end
+    
+    Modal --- Tabs
+    Tabs --> Save["💾 Save Configuration<br/>(Persisted to robot_config.json)"]
 ```
 
 1. **Embodiment:** Keep the default `SO-ARM101-OMNI-KIN`, or upload your custom robot URDF.
@@ -150,18 +154,29 @@ Before recording, ensure your virtual robot model matches your physical setup. C
 
 ## 🔴 Step 5: Record Demonstration Trajectories
 
-```
- PHONE SCREEN HUD:
- ┌─────────────────────────────────────────────────────────────┐
- │ [● IMU: 105 Hz]  [Pitch: -12°]                 Battery: 92% │
- │                                                             │
- │                      ┌───────────────┐                      │
- │                      │  VIEWFINDER   │                      │
- │                      │  [TAGS LOCKED]│                      │
- │                      └───────────────┘                      │
- │                                                             │
- │  [ START RECORDING ]                     [ Toggle Gripper ] │
- └─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph PhoneUI["📱 Smartphone Capture HUD (Landscape)"]
+        direction TB
+        subgraph TopBar["Telemetry Status Bar"]
+            direction LR
+            IMU["● IMU: 105 Hz Active"]
+            Pitch["📐 Pitch Angle: -12°"]
+            Batt["🔋 Battery: 92%"]
+        end
+
+        subgraph View["Camera Viewfinder Area"]
+            VBox["🎯 Central Aiming Reticle<br/>[ Both ArUco Tags Locked ]"]
+        end
+
+        subgraph BottomBar["Control Actions"]
+            direction LR
+            Rec["🔴 START / STOP RECORDING"]
+            Grip["🤏 Toggle Gripper State"]
+        end
+
+        TopBar --> View --> BottomBar
+    end
 ```
 
 1. On your phone, tap the green **"START CAMERA & IMU"** button.
@@ -180,21 +195,28 @@ Before recording, ensure your virtual robot model matches your physical setup. C
 
 On your desktop dashboard (`http://localhost:8000`):
 
-```
- DESKTOP DASHBOARD LAYOUT (PiP Mode):
- ┌────────────────────────────────────────────────────────┬───────────────────┐
- │ 3D THREE.JS VIEWPORT (Interactive Orbit / Pan / Zoom)   │ EPISODE LIST      │
- │                                                        │ [x] Episode 000   │
- │         🦾 Virtual Robot Arm                           │ [x] Episode 001   │
- │            Following Demo Path                         │ [ ] Episode 002   │
- │                                                        ├───────────────────┤
- │         🟢 Trajectory Tube (Color-Coded Reachability)  │ SMOOTHING SLIDER  │
- │            Green: Reachable  Red: Collision/Limit      │ [===O======] 250ms│
- │                                                        ├───────────────────┤
- │                            ┌────────────────────────┐  │ EXPORT PANEL      │
- │                            │ Live Synced Video PiP  │  │ Mode: Initial-Aware│
- │                            │ [▶ Play] [Scrub Bar]   │  │ [ Export LeRobot] │
- └────────────────────────────┴────────────────────────┴──┴───────────────────┘
+```mermaid
+flowchart TB
+    subgraph Dashboard["🖥️ Desktop Dashboard Interface (Picture-in-Picture Layout)"]
+        direction LR
+
+        subgraph MainView["3D Viewport & Synced Playback (Left Pane)"]
+            direction TB
+            ThreeJS["🪐 Three.js 3D Interactive Viewport<br/>• Articulated Robot Arm Model<br/>• Trajectory Spline Tube (Color-Coded Reachability)<br/>• Workspace Dual-ArUco Table Board"]
+            PiP["📷 Picture-in-Picture Video Player<br/>• Live Synchronized Video Stream<br/>• Frame Scrub Bar & Play/Pause"]
+            ThreeJS --- PiP
+        end
+
+        subgraph SidePanel["Controls & Inspector (Right Sidebar)"]
+            direction TB
+            EpList["📁 Episode Management List<br/>• Episode Selection Checkboxes<br/>• Duration & Frame Count<br/>• Delete Trash Action"]
+            SmoothCtrl["🎛️ Reactive Smoothing Controls<br/>• Window Slider (50ms - 500ms)<br/>• Savitzky-Golay / Moving Average"]
+            ExportUI["📦 Dataset Export Panel<br/>• Mode: Free-Form / Initial-Aware<br/>• Export LeRobot Dataset Action"]
+            EpList --- SmoothCtrl --- ExportUI
+        end
+
+        MainView --- SidePanel
+    end
 ```
 
 ### 1. Synchronized Playback
