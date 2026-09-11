@@ -471,15 +471,11 @@ This over-determined system is solved via Levenberg-Marquardt optimization (`cv2
 To guarantee that the top-mounted phone camera never collides with the robot forearm link, the solver enforces an analytic point-to-segment distance check:
 
 $$
-t^* = \operatorname{clip}\left(\frac{(\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{elbow}}) \cdot (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}})}{\|\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}}\|^2}, 0, 1\right)
-$$
-
-$$
-\mathbf{p}_{\text{closest}} = \mathbf{p}_{\text{elbow}} + t^* (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}})
-$$
-
-$$
-d_{\text{clearance}} = \|\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{closest}}\|
+\begin{aligned}
+t^* &= \text{clip}\left(\frac{(\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{elbow}}) \cdot (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}})}{\|\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}}\|^2}, 0, 1\right) \\
+\mathbf{p}_{\text{closest}} &= \mathbf{p}_{\text{elbow}} + t^* (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}}) \\
+d_{\text{clearance}} &= \|\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{closest}}\|
+\end{aligned}
 $$
 
 - If $d_{\text{clearance}} < 0.045\text{ m}$ ($4.5\text{ cm}$), the configuration is heavily penalized and clamped.
