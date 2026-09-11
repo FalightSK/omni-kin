@@ -1,54 +1,135 @@
-﻿# OmniKin Mobile Dataset Collector
+﻿# OmniKin Mobile Dataset Collector 🦾📱
 
-A smartphone-powered robot demonstration capture system that records 3D hand trajectories via dual ArUco marker anchoring and exports them as [Hugging Face LeRobot](https://github.com/huggingface/lerobot) datasets — ready for imitation learning.
+**A high-precision, low-cost robot demonstration collection framework powered by an everyday smartphone.** Capture 3D manipulation demonstrations using Dual-ArUco optical anchoring and IMU sensor fusion, visualize real-time robot arm kinematics, and export directly into [Hugging Face LeRobot](https://github.com/huggingface/lerobot) format for imitation learning (ACT, Diffusion Policy).
 
 ```
-Phone Camera → ArUco PnP + EKF Fusion → Robot IK → LeRobot v2.0 Dataset
+   ┌──────────────────┐       Local Wi-Fi (HTTPS :8443)       ┌──────────────────────────────┐
+   │  Smartphone      │ ────────────────────────────────────► │  FastAPI Backend (:8000)     │
+   │  - 720p 30FPS    │   Video + 100Hz IMU Telemetry         │  - 8-Point Rigid Board PnP   │
+   │  - High-Freq IMU │                                       │  - 12-State EKF Fusion       │
+   └──────────────────┘                                       └──────────────┬───────────────┘
+                                                                             │
+           ┌─────────────────────────────────────────────────────────────────┴──────────────────────────┐
+           ▼                                                                                            ▼
+┌──────────────────────────────────────┐                                             ┌──────────────────────────────────────┐
+│  React + Three.js Desktop Dashboard  │                                             │  Hugging Face LeRobot v2.0 Dataset   │
+│  - 3D Robot Arm Kinematics Preview   │                                             │  - data/chunk-000/file-000.parquet   │
+│  - Reachability Color Coding (G/Y/R) │                                             │  - meta/info.json, meta/stats.json   │
+│  - Synchronized Dual-Pane Player     │                                             │  - videos/observation.images.phone/  │
+│  - Real-Time Trajectory Smoothing    │                                             │  - Direct Training with LeRobot ACT  │
+└──────────────────────────────────────┘                                             └──────────────────────────────────────┘
 ```
 
 ---
 
-## Features
+## 📑 Table of Contents
 
-- **Dual-ArUco rigid-board tracking** — 8-point over-determined PnP + 12-state EKF sensor fusion delivers sub-millimeter trajectory accuracy anchored to a physical table origin
-- **Universal robot embodiment** — supports SO-ARM100, SO-ARM101, SO-ARM101-OMNI-KIN, and any custom 5–6 DOF arm via URDF upload
-- **Camera crash prevention** — automatic wrist pitch safety clamping with 3D Euclidean forearm clearance invariant, generalized to any arm geometry
-- **Two trajectory modes** — `free_form` (pretraining) and `initial_aware` (fine-tuning with auto approach path via quintic C2 spline)
-- **LeRobot v2.0 export** — parquet + video + metadata, with joint names from URDF/DH table
-- **React + Three.js dashboard** — real-time 3D robot arm preview, IK solver, reachability coloring, episode management
+1. [Why OmniKin?](#-why-omnikin)
+2. [Key Features](#-key-features)
+3. [Hardware & Workspace Requirements](#-hardware--workspace-requirements)
+4. [Software Installation & Setup](#-software-installation--setup)
+5. [Step-by-Step Practical Usage Guide](#-step-by-step-practical-usage-guide)
+   - [Step 1: Print & Prepare the Dual-ArUco Board](#step-1-print--prepare-the-dual-aruco-board)
+   - [Step 2: Start the Backend Server](#step-2-start-the-backend-server)
+   - [Step 3: Connect Your Smartphone via QR Code](#step-3-connect-your-smartphone-via-qr-code)
+   - [Step 4: Configure Robot & Calibrate Workspace](#step-4-configure-robot--calibrate-workspace)
+   - [Step 5: Record Demonstration Trajectories](#step-5-record-demonstration-trajectories)
+   - [Step 6: Review, Filter & Smooth in Dashboard](#step-6-review-filter--smooth-in-dashboard)
+   - [Step 7: Choose Trajectory Mode (Pretraining vs Fine-Tuning)](#step-7-choose-trajectory-mode)
+   - [Step 8: Export to LeRobot Dataset Format](#step-8-export-to-lerobot-dataset-format)
+   - [Step 9: Train Imitation Learning Policies](#step-9-train-imitation-learning-policies)
+6. [Supported Robot Embodiments & Custom URDFs](#-supported-robot-embodiments--custom-urdfs)
+7. [Kinematics & Safety Architecture](#-kinematics--safety-architecture)
+8. [Dashboard Controls & Diagnostic Dev View](#-dashboard-controls--diagnostic-dev-view)
+9. [Configuration File Reference (`robot_config.json`)](#-configuration-file-reference)
+10. [API Reference](#-api-reference)
+11. [Testing & Verification](#-testing--verification)
+12. [Troubleshooting & FAQs](#-troubleshooting--faqs)
 
 ---
 
-## System Requirements
+## 💡 Why OmniKin?
 
-| Component | Requirement |
-|-----------|------------|
-| OS | Windows 10/11 |
-| Python | 3.10+ (conda `lerobot_collector` env) |
-| Node.js | 18+ (for frontend dev server) |
-| Phone | Any modern smartphone with Chrome/Safari |
-| Network | Phone and PC on the same local Wi-Fi |
+Collecting real-world robot manipulation demonstrations typically requires:
+- Expensive teleoperation puppet arms ($3,000 – $10,000)
+- Bulky VR controllers with external SteamVR base stations
+- High-end optical motion capture rooms (Vicon/OptiTrack)
+
+**OmniKin eliminates all specialized hardware.** By combining a standard sheet of paper printed with two ArUco markers and a smartphone you already own, OmniKin delivers **sub-millimeter 3D trajectory tracking**, transforms hand motion into collision-safe robot joint states, and exports clean, training-ready LeRobot datasets.
 
 ---
 
-## Installation
+## ✨ Key Features
 
-### 1. Clone the Repository
+- 🎯 **8-Point Dual-ArUco Rigid Board PnP**: Combines Tag A (10 cm, origin) and Tag B (5 cm, offset) into an over-determined 8-corner geometry. Eliminates planar flipping ambiguities common in single-marker setups.
+- 📐 **12-State Extended Kalman Filter (EKF)**: Fuses 30 FPS camera visual poses with 100 Hz+ phone IMU acceleration and angular velocity for drift-free, smooth 3D motion tracking.
+- 🦾 **Universal Multi-Embodiment Support**: Out-of-the-box presets for **SO-ARM101-OMNI-KIN**, **SO-ARM101**, and **SO-ARM100**, plus instant upload and parsing for any custom 5–6 DOF URDF manipulator.
+- 🛡️ **Universal Camera Mount Crash Prevention**: Computes 3D Euclidean clearance between phone camera and robot forearm link segment in real time. Automatically bounds wrist pitch $q_3$ to prevent damaging top-mounted camera brackets.
+- 🔀 **Two Trajectory Modes**:
+  - `free_form`: Unconstrained demonstrations starting at the first recorded frame (best for diverse pretraining).
+  - `initial_aware`: Automatically calculates a quintic $C^2$ minimum-jerk approach path with a 6 cm parabolic lift arc connecting the robot standby home pose to the demonstration starting point (best for fine-tuning).
+- 📊 **Synchronized Web Dashboard**:
+  - Real-time Three.js 3D viewport showing the robot arm executing the demonstration.
+  - Interactive reachability color coding (🟢 green = reachable, 🟡 yellow = near joint limits, 🔴 red = unreachable/collision).
+  - Synchronized video playback with Picture-in-Picture (PiP), horizontal, and vertical split layouts.
+  - Interactive Savitzky-Golay and Moving Average trajectory smoothing slider.
+  - Diagnostic Dev View with ArUco 3D axes, OpenCV Canny edge monitor, and live telemetry.
+- 📦 **Official LeRobot v2.0 Dataset Exporter**: Exports Parquet tables, MP4 video chunks, and JSON metadata (`info.json`, `stats.json`, `tasks.jsonl`, `episodes.jsonl`) fully compatible with Hugging Face `lerobot`.
+
+---
+
+## 🛠️ Hardware & Workspace Requirements
+
+| Item | Requirement | Notes |
+| :--- | :--- | :--- |
+| **PC Workstation** | Windows 10/11 or Linux | Runs backend server and Three.js dashboard |
+| **Smartphone** | iOS (Safari) or Android (Chrome) | Rear camera (720p 30fps) + IMU accelerometer/gyroscope |
+| **Local Network** | Wi-Fi (same LAN) | PC and phone must be able to ping each other |
+| **Printer** | Standard A4 printer | For printing the Dual-ArUco anchor sheet |
+| **Robot Arm** | SO-100 / SO-101 / Custom | Optional for physical execution; virtual kinematics run in software |
+| **Mounting / Grasp** | Handheld or 3D printed clamp | Hold the phone naturally or clamp it to an end-effector tool |
+
+---
+
+## 💻 Software Installation & Setup
+
+### 1. Prerequisites
+
+- [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda with Python 3.10
+- [Node.js](https://nodejs.org/) v18+ and npm (for building the frontend)
+- Git
+
+### 2. Clone Repository & Setup Python Environment
 
 ```bash
-git clone <repo-url>
-cd mobile_dataset_collector
-```
+# Clone the repository
+git clone https://github.com/FalightSK/omni-kin.git
+cd omni-kin
 
-### 2. Create the Conda Environment
-
-```bash
+# Create and activate conda environment
 conda create -n lerobot_collector python=3.10 -y
 conda activate lerobot_collector
+
+# Install Python dependencies
 pip install -r requirements.txt
 ```
 
-### 3. Build the Frontend (Production)
+**`requirements.txt` dependencies:**
+```text
+fastapi>=0.100.0
+uvicorn>=0.22.0
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+pyarrow>=12.0.0
+opencv-python>=4.8.0
+jinja2>=3.1.0
+python-multipart>=0.0.6
+```
+
+### 3. Build Desktop Frontend
+
+The desktop dashboard is a modern React + Vite + Tailwind CSS application located in `frontend/`.
 
 ```bash
 cd frontend
@@ -57,296 +138,347 @@ npm run build
 cd ..
 ```
 
-The built assets are served automatically by `server.py` from `frontend/dist/`.
+*Note: The pre-compiled assets in `frontend/dist/` are automatically served by `server.py` at `http://localhost:8000`.*
 
 ---
 
-## Running the System
+## 📖 Step-by-Step Practical Usage Guide
 
-### Option A — Production (Recommended)
+Follow this guide to set up your physical table, record your first episode, and export a dataset.
 
-Start only the backend. The built React app is served from `frontend/dist/`.
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│ 1. Print Sheet  │ ──► │ 2. Start Server │ ──► │ 3. Connect Phone│ ──► │ 4. Calibrate    │
+│ & Tape to Table │     │  python server  │     │   Scan QR Code  │     │ Workspace & Arm │
+└─────────────────┘     └─────────────────┘     └─────────────────┘     └─────────────────┘
+                                                                                 │
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐              ▼
+│ 8. Train Policy │ ◄── │ 7. LeRobot Export│ ◄── │ 6. Inspect &    │ ◄── ┌─────────────────┐
+│  with LeRobot   │     │  .parquet / mp4 │     │    Smooth Path  │     │ 5. Record Motion│
+└─────────────────┘     └─────────────────┘     └─────────────────┘     │ on Smartphone   │
+                                                                        └─────────────────┘
+```
+
+---
+
+### Step 1: Print & Prepare the Dual-ArUco Board
+
+The Dual-ArUco rigid board establishes the physical Cartesian world origin $(0, 0, 0)$ for all trajectories.
+
+1. Turn on your printer with standard A4 paper.
+2. Open `http://localhost:8000/api/marker/print_dual` in your desktop browser.
+3. In your browser's Print dialog:
+   - **Destination**: Your printer (or Save to PDF)
+   - **Layout**: Landscape
+   - **Scale**: **100% (Actual Size)** — *Do NOT select "Fit to Printable Area"*
+4. Measure the printed sheet with a physical ruler to verify accuracy:
+   - **Tag A (ID 0)**: Exactly $10.0\text{ cm} \times 10.0\text{ cm}$
+   - **Tag B (ID 1)**: Exactly $5.0\text{ cm} \times 5.0\text{ cm}$
+   - **Gap between Tag A and Tag B**: Exactly $5.0\text{ cm}$ (Tag B origin at $X = 0.15\text{ m}$)
+5. Tape the printed sheet flat onto your table with clear tape so it cannot slide.
+
+```
+  Top View of Workstation Table:
+  ──────────────────────────────────────────────────────────────────────────
+                [ Robot Arm Base: X = 0.091m, Y = -0.41m, Yaw = 90° ]
+                                     ▲
+                                     │  Robot Reach Zone
+                                     ▼
+        ┌──────────────────┐     ┌─────────┐
+        │                  │     │         │
+        │      TAG A       │     │  TAG B  │
+        │     (10 cm)      │     │ (5 cm)  │
+        │                  │     │         │
+        └──────────────────┘     └─────────┘
+        ▲ (0, 0, 0) Origin        ▲ X = 0.15m
+  ──────────────────────────────────────────────────────────────────────────
+```
+
+---
+
+### Step 2: Start the Backend Server
+
+Run `server.py` in your conda environment:
 
 ```bash
-C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe server.py
+conda activate lerobot_collector
+python server.py
 ```
 
-Access:
-- **Desktop dashboard**: `http://localhost:8000`
-- **Phone mobile logger**: `http://<YOUR_LOCAL_IP>:8000/mobile`
-- **Print ArUco board**: `http://localhost:8000/api/marker/print_dual`
+Console output will display:
+```text
+=================================================================
+ OmniKin 3D Trajectory Dataset Collector Server Started!
+=================================================================
+ Desktop Dashboard (HTTP):  http://localhost:8000
+ 📱 Mobile Logger  (HTTPS): https://192.168.1.50:8443/mobile
+ 📱 Mobile Logger  (HTTP):  http://192.168.1.50:8000/mobile
+ Print ArUco Marker:        http://localhost:8000/api/marker/print_dual
+ Mobile QR Code:            http://localhost:8000/api/mobile/qr
 
-### Option B — Development (Hot-reload frontend)
-
-```bash
-# Terminal 1 — Backend
-C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe server.py
-
-# Terminal 2 — Frontend dev server
-cd frontend
-npm run dev
+ [!] HTTPS Active on Port 8443 (Self-Signed SSL for Camera/IMU):
+     When opening on your mobile browser, tap:
+     - Android Chrome: 'Advanced' -> 'Proceed to 192.168.1.50 (unsafe)'
+     - iOS Safari:     'Show Details' -> 'visit this website' -> 'Visit Website'
+=================================================================
 ```
 
-Access the dashboard at `http://localhost:3000` (the Vite proxy forwards API calls to `:8000`).
+> **Why HTTPS on port 8443?** Modern mobile browsers (iOS Safari, Android Chrome) block camera access (`getUserMedia`) and motion sensor events (`DeviceMotionEvent`) over unencrypted HTTP. The server automatically spins up a background SSL daemon on port 8443 using pre-generated certificates (`cert.pem` / `key.pem`).
 
 ---
 
-## Physical Setup
+### Step 3: Connect Your Smartphone via QR Code
 
-### Print the ArUco Board
-
-1. Open `http://localhost:8000/api/marker/print_dual`
-2. Print on **A4 paper**, scale **100% (actual size)**
-3. Verify with a ruler:
-   - **Tag A** (ID 0): **10.0 cm** square — defines world origin (0,0,0)
-   - **Tag B** (ID 1): **5.0 cm** square — placed **5.0 cm to the right** of Tag A
-4. Tape the sheet flat onto your workstation table
-
-### Coordinate Frame
-
-```
-          +Y (forward, away from you)
-           |
- (0,0,0) --+-----------> +X (right, toward Tag B)
-   Tag A BL     Tag B BL at (0.15, 0, 0)
-           |
-        +Z (up, out of table)
-```
-
-All trajectories and robot base positions are in this frame.
+1. On your desktop, open `http://localhost:8000`.
+2. Click the purple **"📱 Connect Phone"** button in the top navigation bar.
+3. A modal appears displaying a large QR code pointing to `https://<YOUR_LAN_IP>:8443/mobile`.
+4. Open your smartphone camera app and scan the QR code.
+5. **Accept the One-Time Self-Signed SSL Warning**:
+   - **Android Chrome**: Tap **"Advanced"** ➔ **"Proceed to `<IP>` (unsafe)"**.
+   - **iOS Safari**: Tap **"Show Details"** ➔ **"visit this website"** ➔ confirm **"Visit Website"**.
+6. When prompted, tap **"Allow"** to grant camera and motion sensor permissions.
+7. Rotate your phone to **Landscape** orientation.
 
 ---
 
-## Robot Configuration
+### Step 4: Configure Robot & Calibrate Workspace
 
-Open the **Robot Setup** modal (gear icon in the navbar) before recording.
+Click the **"⚙️ Robot Setup"** button in the desktop dashboard navigation bar to open the configuration dialog.
 
-### Tab 1 — Robot Embodiment
+#### 1. Embodiment Tab
+- Choose your robot preset from the dropdown:
+  - `SO-ARM101-OMNI-KIN` *(Default)*
+  - `SO-ARM101`
+  - `SO-ARM100`
+- *Or upload your own custom URDF*: Click **"Upload URDF"** to drag-and-drop any `.urdf` file. The server automatically parses links, joints, limits, and builds the DH kinematic table.
 
-| Setting | Description |
-|---------|-------------|
-| **Robot Type** | Preset: `so_arm101_omni_kin` (default), `so101`, `so100` |
-| **Upload URDF** | Upload any 5-6 DOF URDF — DH table and joint names auto-parsed |
-| **DH Table** | Edit joint limits directly; changes apply immediately |
+#### 2. Workspace Calibration Tab
+Calibrates where the physical robot base sits relative to the ArUco marker origin $(0, 0, 0)$:
+- `Offset X (m)`: Default `0.091` (lateral table offset)
+- `Offset Y (m)`: Default `-0.410` (forward distance in front of marker)
+- `Offset Z (m)`: Default `0.000` (table surface level)
+- `Yaw (deg)`: Default `90.0°` (robot facing towards the marker board)
+- **Auto-Alignment**:
+  - Click **"Recommended"** to center the workspace based on the arm's reach envelope.
+  - Click **"Optimal"** to perform least-squares fitting against previously recorded trajectories.
 
-### Tab 2 — Workspace Calibration
+#### 3. Camera / Gripper Offset Tab
+Defines the translation and rotation from the robot gripper Tool Center Point (TCP) to the phone camera lens:
+- `Forward (cm)`: `12.8`
+- `Height (cm)`: `10.9`
+- `Lateral (cm)`: `0.0`
+- `Pitch (deg)`: `40.4°`
 
-Defines the robot base position relative to the ArUco origin:
+#### 4. Wrist Safety ($q_3$ Crash Prevention) Tab
+- `q3_safe_max_deg`: Max upward pitch limit (default: `5.0°`).
+- Prevents the camera bracket from rotating backwards into the robot forearm link during manipulation.
+- Downward flexion for picking up objects from the floor ($-20^\circ \dots -60^\circ$) remains completely unconstrained.
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `offset_x` | Robot base X offset (m) | 0.091 |
-| `offset_y` | Robot base Y offset (m) | -0.41 |
-| `offset_z` | Robot base Z offset (m) | 0.00 |
-| `yaw_deg` | Robot base rotation around Z (deg) | 90.0 |
+#### 5. Initial Position Tab
+- Defines the canonical standby/home pose $[X, Y, Z, \text{Roll}, \text{Pitch}, \text{Yaw}, \text{Gripper}]$ used by `initial_aware` mode.
+- Defaults: $X = 0.15\text{ m}, Y = 0.00\text{ m}, Z = 0.20\text{ m}, \text{Gripper} = 100\%$.
 
-Click **"Recommended"** to auto-compute the workspace center based on reachability, or **"Optimal"** for least-squares fit to recorded trajectories.
-
-### Tab 3 — Camera / Gripper Offset
-
-Defines where the phone camera is mounted relative to the gripper TCP:
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `forward_cm` | Distance forward from TCP | 12.8 |
-| `height_cm` | Height above TCP plane | 10.9 |
-| `lateral_cm` | Lateral offset | 0.0 |
-| `pitch_deg` | Camera mount pitch angle | 40.4 |
-
-### Tab 4 — Wrist Safety (Camera Crash Prevention)
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `q3_safe_max_deg` | Max wrist pitch angle (deg). Prevents camera from crushing into forearm. | 5.0 |
-
-> **Note**: For floor-pickup tasks, the wrist pitch is typically negative (-20 to -60 deg). This limit only prevents upward pitch into the forearm — it does not restrict downward motion.
-
-### Tab 5 — Initial Position (for `initial_aware` mode)
-
-Defines the robot home/standby pose from which the auto approach path starts:
-
-| Parameter | Default |
-|-----------|---------|
-| `x`, `y`, `z` | 0.15, 0.00, 0.20 m |
-| `pitch_deg`, `roll_deg`, `yaw_deg` | 0, 0, 0 deg |
-| `gripper` | 100% (fully open) |
+Click **"Save Configuration"**. Settings are persisted to `robot_config.json`.
 
 ---
 
-## Recording Demonstrations
+### Step 5: Record Demonstration Trajectories
 
-### Step 1 — Connect Phone
-
-1. Navigate to `http://<YOUR_LOCAL_IP>:8000/mobile` on your phone browser
-2. Tap **"START CAMERA & IMU"** — grant camera and motion permissions
-3. Hold the phone in **landscape** orientation, rear camera pointing at the ArUco board
-
-### Step 2 — Record
-
-1. Make sure both ArUco markers are visible in the viewfinder
-2. Tap **"START RECORDING"**
-3. Move your hand through the demonstration trajectory
-4. Tap **"STOP RECORDING"**
-
-The recording is automatically uploaded and processed (ArUco PnP + EKF fusion → 3D trajectory).
-
-### Step 3 — Review in Dashboard
-
-On the desktop at `http://localhost:8000`:
-- **Left pane**: 3D robot arm IK preview over the table, trajectory tube colored green/yellow/red (reachability)
-- **Right pane**: Synchronized phone video
-- **Timeline slider**: Scrub to any frame — both 3D pose and video stay synchronized
-- **Episode list**: All recorded episodes with duration and frame count
+1. On your phone screen, tap the green **"START CAMERA & IMU"** button.
+2. Aim the rear camera at the printed Dual-ArUco sheet from a comfortable distance ($25\text{ cm} – 50\text{ cm}$).
+3. Verify that the HUD shows active IMU readings and that the green bounding box locks onto the markers.
+4. Tap the red **"START RECORDING"** button.
+5. Move your phone smoothly to perform the demonstration task (e.g., reaching toward an object, grasping, lifting, and placing).
+6. Tap **"STOP RECORDING"**.
+7. The phone automatically compresses the video and sends it alongside the high-rate IMU telemetry to the server. Within 2–3 seconds, the new episode appears in the desktop dashboard.
 
 ---
 
-## Trajectory Modes
+### Step 6: Review, Filter & Smooth in Dashboard
 
-### Free-Form (Pretraining)
+In the desktop dashboard (`http://localhost:8000`):
 
-```
-Recording start  -->  demonstration frames  -->  Recording end
-```
-
-No approach path prepended. Best for large, diverse pretraining datasets.
-
-### Initial-Position Aware (Fine-Tuning)
-
-```
-Home pose  -->  [quintic approach spline, ~45 frames]  -->  Demo start  -->  ...  -->  Demo end
-```
-
-A smooth C2 minimum-jerk spline is automatically prepended from the configured home pose to the first demonstration waypoint. Includes a parabolic lift arc (6 cm clearance) to avoid table collisions during approach.
-
-Best for fine-tuning datasets requiring a consistent robot start state.
+1. **Synchronized Playback**:
+   - Scrub the master timeline slider or click **"Play"** (Spacebar) to inspect the 3D trajectory and recorded camera video simultaneously.
+2. **Reachability Color Diagnostics**:
+   - **🟢 Green**: Waypoint fully within physical robot arm reach; IK solved with high margin.
+   - **🟡 Yellow**: Waypoint approaching joint limits or high-torque wrist extension.
+   - **🔴 Red**: Waypoint unreachable or in violation of camera collision clearance.
+3. **Reactive Trajectory Smoothing**:
+   - Adjust the **Smoothing Window** slider ($50\text{ ms} – 500\text{ ms}$) in the right sidebar.
+   - Switch between **Savitzky-Golay** (preserves acceleration peaks) and **Moving Average** (maximizes smoothness).
+   - The 3D spline and joint angles re-calculate interactively.
+4. **Dev View Diagnostic Overlay**:
+   - Click **"Dev View"** to toggle between Raw Video, ArUco 3D Coordinate Axes Overlay (+X Red, +Y Green, +Z Blue), and OpenCV Canny Edge Detection.
+5. **Quality Control**:
+   - If a demonstration had tracking glitches or an accidental drop, click **"Delete Episode"** to purge it before exporting.
 
 ---
 
-## Exporting to LeRobot Format
+### Step 7: Choose Trajectory Mode
 
-### From the Dashboard
-
-1. Select the episodes to export (checkboxes in episode list)
-2. Choose **Trajectory Mode**: `free_form` or `initial_aware`
-3. Click **"Export LeRobot"**
-4. Dataset is saved to `lerobot_exports/<dataset_name>/`
-
-### Output Structure
+In the export panel on the desktop dashboard, select your desired trajectory paradigm:
 
 ```
-lerobot_exports/<dataset_name>/
+Mode 1: Free-Form (Pretraining)
+[Demo Frame 0] ────────────────► [Demo Frame 1] ────────────────► [Demo End]
+
+Mode 2: Initial-Position Aware (Fine-Tuning)
+[Robot Home Pose] ───(Quintic Minimum-Jerk Lift Arc)───► [Demo Frame 0] ────────► [Demo End]
+```
+
+| Mode | Key in API | Characteristics | When to Use |
+| :--- | :--- | :--- | :--- |
+| **Free-Form** | `free_form` | Trajectory starts immediately from the human's first hand motion. No added approach path. | Pretraining foundation models; capturing unstructured human demonstrations. |
+| **Initial-Position Aware** | `initial_aware` | Automatically prepends a smooth $C^2$ minimum-jerk approach path (~45 frames) starting from `initial_position` with a 6 cm parabolic clearance lift arc. | Fine-tuning policies on physical robots requiring predictable start/docking positions. |
+
+---
+
+### Step 8: Export to LeRobot Dataset Format
+
+1. In the episode table, check the boxes for the episodes you wish to include (or click **"Select All"**).
+2. Enter your dataset name (e.g., `pick_apple_omnikin_v1`).
+3. Select the **Trajectory Mode** (`free_form` or `initial_aware`).
+4. Click **"📦 Export LeRobot Dataset"**.
+5. The dataset is exported under `lerobot_exports/<dataset_name>/`.
+
+#### Exported Directory Structure
+```
+lerobot_exports/pick_apple_omnikin_v1/
 ├── data/
 │   └── chunk-000/
-│       └── file-000.parquet          <- all frames (all episodes)
+│       └── file-000.parquet               <-- Full tabular data (states, poses, actions)
 ├── meta/
-│   ├── info.json                     <- schema, FPS, feature names from DH table
-│   ├── stats.json                    <- mean/std/min/max per feature
-│   ├── tasks.jsonl
-│   ├── episodes.jsonl
-│   └── episodes/file-000.parquet
+│   ├── info.json                          <-- LeRobot schema, FPS, dynamic DH joint names
+│   ├── stats.json                         <-- Mean, std, min, max per feature
+│   ├── tasks.jsonl                        <-- Task mapping
+│   ├── episodes.jsonl                     <-- Episode index, duration, frame counts
+│   └── episodes/
+│       └── file-000.parquet
 └── videos/
     └── observation.images.phone/
         └── chunk-000/
-            └── episode_000000.mp4, ...
+            ├── episode_000000.mp4         <-- Transcoded demonstration video
+            ├── episode_000001.mp4
+            └── ...
 ```
 
-### Parquet Schema
-
+#### Parquet Dataset Schema
 | Column | Dtype | Description |
-|--------|-------|-------------|
-| `index` | int64 | Global monotonic frame index |
-| `episode_index` | int64 | Episode number (0-based) |
-| `frame_index` | int64 | Frame within episode (resets to 0 each episode) |
-| `timestamp` | float32 | Seconds from episode start |
-| `next.done` | bool | True only at last frame of each episode |
-| `task_index` | int64 | Task label index |
-| `observation.state` | float32[N] | Joint angles (degrees) + gripper (0-100%) |
-| `observation.ee_pose` | float32[6] | End-effector pose [x,y,z,roll,pitch,yaw] in robot base frame |
-| `action` | float32[N] | Next-frame joint targets (shifted by 1; last frame = copy) |
+| :--- | :--- | :--- |
+| `index` | `int64` | Global monotonic frame index across all episodes |
+| `episode_index` | `int64` | 0-based sequential episode index |
+| `frame_index` | `int64` | Frame index within the episode (resets to 0 for each episode) |
+| `timestamp` | `float32` | Elapsed time in seconds from episode start |
+| `next.done` | `bool` | `True` only on the terminal frame of an episode; `False` otherwise |
+| `task_index` | `int64` | Numerical task identifier corresponding to `meta/tasks.jsonl` |
+| `task` | `string` | Natural language task description (e.g. `"reach to object"`) |
+| `observation.state` | `float32[N]` | Robot joint angles in degrees + gripper percentage `[0, 100]` |
+| `observation.ee_pose` | `float32[6]` | 6-DOF Cartesian pose `[x, y, z, roll, pitch, yaw]` in robot base frame |
+| `action` | `float32[N]` | Next-frame target joint angles ($\mathbf{a}_t = \mathbf{q}_{t+1}$, last frame copies $\mathbf{q}_T$) |
 
-N = number of arm joints + 1 gripper column. Joint names match the active URDF/DH table.
-
-### Using the Exported Dataset
-
-```python
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-
-dataset = LeRobotDataset("lerobot_exports/my_dataset")
-print(dataset[0])   # first frame dict
-```
+*Note: $N$ matches the number of revolute joints plus 1 for the gripper. Joint names in `info.json` are dynamically loaded from your active URDF/DH table.*
 
 ---
 
-## API Reference
+### Step 9: Train Imitation Learning Policies
 
-### Robot Configuration
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/robot/config` | Full robot config (type, offsets, safety, wrist_pitch_idx) |
-| `POST` | `/api/robot/config` | Update robot type, workspace offsets, q3_safe_max_deg |
-| `GET` | `/api/robot/initial_position` | Read home pose for initial_aware mode |
-| `POST` | `/api/robot/initial_position` | Update home pose |
-| `POST` | `/api/robot/gripper_offset` | Update camera extrinsics |
-| `POST` | `/api/upload_urdf` | Upload and activate a custom URDF |
-
-### Episodes & Recording
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/episodes` | List all recorded episodes |
-| `POST` | `/api/recordings/save` | Process video + IMU -> 3D trajectory |
-| `POST` | `/api/recordings/sample` | Generate a synthetic demo trajectory |
-| `DELETE` | `/api/episodes/{id}` | Delete an episode |
-| `POST` | `/api/episodes/clear` | Clear all episodes |
-
-### Trajectory & Export
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/trajectory/plan_approach` | Compute quintic approach path to episode start |
-| `POST` | `/api/export_lerobot` | Export selected episodes to LeRobot v2.0 format |
-| `POST` | `/api/robot/solve_ik` | Solve IK for a batch of 6-DOF Cartesian poses |
-
-### Utilities
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/` | Desktop React dashboard |
-| `GET` | `/mobile` | Phone data logger |
-| `GET` | `/api/marker/print_dual` | Printable dual ArUco board (A4, 1:1 scale) |
-| `GET` | `/api/marker/image` | ArUco marker PNG |
-
----
-
-## Testing
+You can directly pass the exported dataset into the official [Hugging Face LeRobot](https://github.com/huggingface/lerobot) training pipeline.
 
 ```bash
-# ArUco PnP + EKF pipeline
-C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_aruco_pipeline.py
+# Clone official LeRobot repository
+git clone https://github.com/huggingface/lerobot.git
+cd lerobot
+pip install -e .
 
-# Robot kinematics (IK, generalization, wrist safety)
-C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_robot_kinematics.py
+# Train an Action Chunking Transformer (ACT) policy
+python lerobot/scripts/train.py \
+    --dataset_path ../mobile_dataset_collector/lerobot_exports/pick_apple_omnikin_v1 \
+    --policy act \
+    --env so100 \
+    --batch_size 16 \
+    --num_workers 4 \
+    --training_steps 100000
+```
 
-# LeRobot export pipeline
-C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_pipeline.py
-
-# URDF parsing
-C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_urdf_converter.py
+To train a Diffusion Policy:
+```bash
+python lerobot/scripts/train.py \
+    --dataset_path ../mobile_dataset_collector/lerobot_exports/pick_apple_omnikin_v1 \
+    --policy diffusion \
+    --env so100
 ```
 
 ---
 
-## Configuration File
+## 🤖 Supported Robot Embodiments & Custom URDFs
 
-`robot_config.json` is auto-saved on every config change:
+OmniKin comes pre-configured with the following manipulators:
+
+| Preset Identifier | Robot Name | DOF | Default Wrist Joint | Reach | Payload |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `so_arm101_omni_kin` | **SO-ARM101-OMNI-KIN** *(Default)* | 5 + Gripper | Joint 3 (`wrist_pitch_joint`) | 38.5 cm | 500 g |
+| `so101` | **SO-ARM101** | 5 + Gripper | Joint 3 (`q3_wrist_pitch`) | 38.5 cm | 500 g |
+| `so100` | **SO-ARM100** | 5 + Gripper | Joint 3 (`q3_wrist_pitch`) | 35.0 cm | 400 g |
+| `custom` | **Uploaded URDF** | 5–6 + Gripper | *Auto-detected dynamically* | *Auto* | *Auto* |
+
+### Uploading a Custom Robot URDF
+1. Click **"Robot Setup"** in the top navbar.
+2. In the **Embodiment** tab, click **"Upload URDF"**.
+3. Select your `.urdf` file.
+4. The system automatically:
+   - Identifies the kinematic chain from base link to end-effector flange.
+   - Computes standard Denavit-Hartenberg (DH) parameters ($d, a, \alpha, \theta$).
+   - Dynamically discovers the wrist pitch joint using semantic token matching (`wrist`, `pitch`, `flex`, `tilt`).
+   - Determines joint limit ranges and maps them to the 3D visualizer and IK engine.
+
+---
+
+## 📐 Kinematics & Safety Architecture
+
+### 1. Dual-ArUco Over-Determined PnP
+Rather than tracking a single marker, OmniKin treats the 8 corners of Tag A and Tag B as a single rigid body:
+$$\mathbf{P}_{\text{world}} = \begin{bmatrix} \mathbf{C}_A^{(0)} & \mathbf{C}_A^{(1)} & \mathbf{C}_A^{(2)} & \mathbf{C}_A^{(3)} & \mathbf{C}_B^{(0)} & \mathbf{C}_B^{(1)} & \mathbf{C}_B^{(2)} & \mathbf{C}_B^{(3)} \end{bmatrix} \in \mathbb{R}^{3 \times 8}$$
+This over-determined system is solved via Levenberg-Marquardt optimization (`cv2.solvePnP` with iterative refinement), completely eliminating planar axis flips when the camera approaches normal incidence.
+
+### 2. Universal 3D Euclidean Clearance Invariant
+To guarantee that the top-mounted phone camera never collides with the robot forearm link, the solver enforces an analytic point-to-segment distance check:
+
+$$t^* = \text{clip}\left(\frac{(\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{elbow}}) \cdot (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}})}{\|\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}}\|^2}, 0, 1\right)$$
+$$\mathbf{p}_{\text{closest}} = \mathbf{p}_{\text{elbow}} + t^* (\mathbf{p}_{\text{wrist}} - \mathbf{p}_{\text{elbow}})$$
+$$d_{\text{clearance}} = \|\mathbf{p}_{\text{cam}} - \mathbf{p}_{\text{closest}}\|$$
+
+- If $d_{\text{clearance}} < 0.045\text{ m}$ ($4.5\text{ cm}$), the configuration is heavily penalized and clamped.
+- **Coordinate-Frame A健全ic**: This mathematical invariant is 100% independent of joint index numbers, axis signs, or mounting brackets.
+
+---
+
+## 🖥️ Dashboard Controls & Diagnostic Dev View
+
+### Master Viewport Layouts
+Use the layout buttons in the upper-right corner of the dashboard:
+- **PiP (Picture-in-Picture)** *(Default)*: Full-screen 3D Three.js trajectory viewport with a floating video monitor anchored in the bottom-right corner.
+- **Vertical Split**: Side-by-side 50/50 dual-pane display with draggable splitter bar.
+- **Horizontal Split**: Stacked 3D viewport above the video player.
+
+### Dev View Vision Monitor
+Toggle the **"Dev View"** button to access computer vision diagnostics:
+- **ArUco Diagnostic Overlay**: Renders detected 2D corner circles, Corner 0 origin indicators, tag ID badges, and 3D coordinate frame axes directly over the live canvas.
+- **OpenCV Canny Edge View**: Displays high-contrast edge gradients used by the feature tracking backend.
+- **Telemetry HUD**: Displays real-time 3D tracking error ($\text{cm}$), visual velocity ($\text{m/s}$), and EKF covariance health.
+
+---
+
+## ⚙️ Configuration File Reference
+
+All calibration parameters are saved in `robot_config.json`:
 
 ```json
 {
   "robot_type": "so_arm101_omni_kin",
   "offset_x": 0.091,
-  "offset_y": -0.41,
-  "offset_z": 0.0,
+  "offset_y": -0.410,
+  "offset_z": 0.000,
   "yaw_deg": 90.0,
   "q3_safe_max_deg": 5.0,
   "gripper_offset": {
@@ -359,43 +491,104 @@ C:\Users\SK\miniconda3\envs\lerobot_collector\python.exe test_urdf_converter.py
     "enabled": true
   },
   "initial_position": {
-    "x": 0.15, "y": 0.0, "z": 0.2,
-    "pitch_deg": 0.0, "roll_deg": 0.0, "yaw_deg": 0.0,
-    "gripper": 100.0, "enabled": true
+    "x": 0.15,
+    "y": 0.00,
+    "z": 0.20,
+    "pitch_deg": 0.0,
+    "roll_deg": 0.0,
+    "yaw_deg": 0.0,
+    "gripper": 100.0,
+    "enabled": true
   }
 }
 ```
 
 ---
 
-## Key Source Files
+## 📡 API Reference
 
-| File | Role |
-|------|------|
-| `server.py` | FastAPI backend — all API endpoints, singleton lifecycle |
-| `robot_kinematics.py` | DH IK engine, URDF parser, trajectory planner, workspace calibrator |
-| `lerobot_exporter.py` | LeRobot v2.0 dataset export |
-| `visual_tracker.py` | ArUco PnP + 12-state EKF sensor fusion |
-| `robot_config.json` | Persisted robot configuration |
-| `frontend/src/pages/Dashboard.jsx` | Main desktop UI |
-| `frontend/src/pages/MobileLogger.jsx` | Phone capture interface |
-| `frontend/src/components/Viewport3D.jsx` | Three.js 3D robot arm + trajectory preview |
-| `frontend/src/components/RobotSetupModal.jsx` | Robot setup UI |
-| `SO-ARM101-OMNI-KIN.urdf` | Default robot URDF |
+The FastAPI backend exposes the following REST endpoints:
+
+### Robot Configuration & Calibration
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/robot/config` | Returns current embodiment, DH table, workspace calibration, and wrist safety index |
+| `POST` | `/api/robot/config` | Updates robot type, workspace offsets ($X, Y, Z, \text{Yaw}$), and safety limits |
+| `GET` | `/api/robot/initial_position` | Returns the canonical standby/home pose configuration |
+| `POST` | `/api/robot/initial_position` | Updates the standby/home pose for `initial_aware` mode |
+| `POST` | `/api/robot/gripper_offset` | Updates camera-to-gripper extrinsic translation and rotation |
+| `POST` | `/api/upload_urdf` | Uploads and parses a custom robot URDF XML |
+| `POST` | `/api/robot/solve_ik` | Solves inverse kinematics for arbitrary 6-DOF Cartesian poses |
+
+### Episode Management & Recording
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/episodes` | Returns a list of all recorded demonstration episodes |
+| `POST` | `/api/recordings/save` | Multipart upload for mobile phone video + IMU telemetry |
+| `POST` | `/api/recordings/sample` | Generates a synthetic 3D demonstration path for testing |
+| `DELETE`| `/api/episodes/{id}` | Deletes a specific episode and its video files from disk |
+| `POST` | `/api/episodes/clear` | Purges all recorded episodes |
+
+### Trajectory Planning & Dataset Export
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/trajectory/plan_approach` | Generates a quintic minimum-jerk approach path connecting home to start waypoint |
+| `POST` | `/api/export_lerobot` | Exports selected episodes into Hugging Face LeRobot format |
+
+### Diagnostic Utilities
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/mobile/qr` | Generates an SVG QR code pointing to the phone logger HTTPS URL |
+| `GET` | `/api/marker/print_dual` | Dedicated 1:1 physical scale printable A4 HTML sheet |
+| `GET` | `/api/marker/image` | Returns high-resolution ArUco marker image |
 
 ---
 
-## Known Limitations
+## 🧪 Testing & Verification
 
-| Limitation | Details |
-|-----------|---------|
-| Camera path differs from demo path | Expected: 5-DOF cannot track 6-DOF trajectory; IK targets TCP, camera is on a 17 cm lever arm |
-| Video codec | Exported MP4 uses mp4v (OpenCV); re-encode with `ffmpeg -vcodec libx264` for browser playback |
-| URDF parsing | 6-DOF URDFs are mapped to a 5-DOF DH structure |
-| Table tilt | Workspace calibration assumes a flat table |
+Execute the test suite to verify pipeline functionality:
+
+```bash
+# Test 1: ArUco 8-point PnP & 12-state EKF fusion pipeline
+python test_aruco_pipeline.py
+
+# Test 2: Multi-embodiment robot kinematics and 3D clearance safety
+python test_robot_kinematics.py
+
+# Test 3: URDF parser and DH parameter generator
+python test_urdf_converter.py
+
+# Test 4: End-to-end LeRobot dataset exporter
+python test_pipeline.py
+```
+
+All test scripts verify mathematical invariants, joint bounds, and schema conformance.
 
 ---
 
-## License
+## ❓ Troubleshooting & FAQs
 
-MIT License.
+### 1. The phone shows a "Connection refused" or cannot open the page
+- Ensure your phone and PC are connected to the **same local Wi-Fi network**.
+- Check Windows Firewall: ensure Python is allowed to accept incoming connections on ports `8000` and `8443`.
+- Verify that your PC has not changed its local IP address (run `ipconfig` on Windows or `ifconfig` on Linux).
+
+### 2. Camera or motion sensors are blocked on mobile browser
+- Mobile browsers strictly prohibit sensor access on plain HTTP over LAN.
+- Ensure you opened the **HTTPS** address (`https://<IP>:8443/mobile`).
+- On iOS Safari: navigate to **Settings > Safari > Motion & Orientation Access** and ensure it is turned **ON**.
+
+### 3. ArUco markers are not detected or jump randomly
+- Verify that your printout is at **100% scale** (Tag A must measure exactly $10.0\text{ cm}$, Tag B exactly $5.0\text{ cm}$).
+- Avoid direct glare from overhead fluorescent lamps on the paper surface; use diffuse lighting.
+- Ensure the phone camera lens is clean and unobstructed.
+
+### 4. Trajectory displays red segments in the 3D viewer
+- Red indicates that the desired waypoint is outside the arm's physical reach envelope, or causes a camera mount collision.
+- In **Robot Setup > Workspace Calibration**, click **"Recommended"** or adjust `offset_y` so the table workspace is comfortably within reach of the robot base.
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
