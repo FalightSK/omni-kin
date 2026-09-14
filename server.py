@@ -2078,6 +2078,18 @@ if __name__ == "__main__":
     ssl_cert = os.path.join(BASE_DIR, "cert.pem")
     ssl_key = os.path.join(BASE_DIR, "key.pem")
     has_certs = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
+
+    # Auto-generate SSL certificates if missing to support mobile camera/sensor access
+    if not has_certs and ("--no-ssl" not in sys.argv):
+        try:
+            from generate_cert import generate_ssl_certificate
+            print("[*] SSL certificates missing. Auto-generating self-signed cert.pem and key.pem...")
+            generate_ssl_certificate(cert_path=ssl_cert, key_path=ssl_key)
+            has_certs = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
+        except Exception as e:
+            print(f"[!] Note: Could not auto-generate SSL certificates ({e}).")
+            print("    Run 'python generate_cert.py' or 'pip install cryptography' to enable HTTPS.")
+
     use_ssl = ("--ssl" in sys.argv or "-s" in sys.argv or has_certs) and ("--no-ssl" not in sys.argv)
 
     http_port = 8000

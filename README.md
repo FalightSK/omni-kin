@@ -239,7 +239,20 @@ Console output will display:
 =================================================================
 ```
 
-> **Why HTTPS on port 8443?** Modern mobile browsers (iOS Safari, Android Chrome) block camera access (`getUserMedia`) and motion sensor events (`DeviceMotionEvent`) over unencrypted HTTP. The server automatically spins up a background SSL daemon on port 8443 using pre-generated certificates (`cert.pem` / `key.pem`).
+> **Why HTTPS on port 8443?** Modern mobile browsers (iOS Safari, Android Chrome) strictly block camera access (`getUserMedia`) and motion sensor events (`DeviceMotionEvent`) over unencrypted HTTP. The server automatically spins up a background SSL daemon on port 8443.
+>
+> **SSL Certificate Setup for New Installations:**
+> - When you start `python server.py`, it automatically detects if `cert.pem` and `key.pem` exist. If missing, it **auto-generates** self-signed certificates for your local machine and LAN IPs.
+> - You can also manually generate or re-sign certificates at any time with custom IPs:
+>   ```bash
+>   python generate_cert.py
+>   # Or with explicit IP:
+>   python generate_cert.py --ip 192.168.1.52
+>   ```
+> - *Alternative with OpenSSL (Linux/macOS)*:
+>   ```bash
+>   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes -subj "/CN=OmniKin"
+>   ```
 
 ---
 
@@ -247,13 +260,16 @@ Console output will display:
 
 1. On your desktop, open `http://localhost:8000`.
 2. Click the purple **"📱 Connect Phone"** button in the top navigation bar.
-3. A modal appears displaying a large QR code pointing to `https://<YOUR_LAN_IP>:8443/mobile`.
-4. Open your smartphone camera app and scan the QR code.
+3. A modal appears displaying a large vector QR code generated directly in your browser, pointing to `https://<YOUR_LAN_IP>:8443/mobile`.
+4. Open your smartphone camera app and scan the QR code (or copy the HTTPS URL).
 5. **Accept the One-Time Self-Signed SSL Warning**:
    - **Android Chrome**: Tap **"Advanced"** ➔ **"Proceed to `<IP>` (unsafe)"**.
    - **iOS Safari**: Tap **"Show Details"** ➔ **"visit this website"** ➔ confirm **"Visit Website"**.
 6. When prompted, tap **"Allow"** to grant camera and motion sensor permissions.
-7. Rotate your phone to **Landscape** orientation.
+7. **Select Camera Lens**:
+   - Tap the **"📷 Lens"** selector button at the bottom left to choose your preferred camera lens (e.g. `🔭 Ultra-Wide 0.5x`, `📷 Standard Wide 1x`, `🔍 Telephoto`, or `🤳 Front`).
+   - Tap the **Switch Camera** icon for quick lens flipping.
+8. Rotate your phone to **Landscape** orientation.
 
 ---
 
