@@ -8,52 +8,84 @@ export default function VideoPlayer({
   setIsDevView,
   devTelemetry,
   isPlaying,
+  isApproachPhase = false,
   currentFrameIndex = 0,
   totalFrames = 0,
   fps = 30,
   onTimeUpdate,
+  onEnded,
   showBadge = true
 }) {
   const videoRef = useRef(null);
+  const pendingSeekRef = useRef(null);
   const [videoDims, setVideoDims] = useState(null);
+  const [videoError, setVideoError] = useState(false);
 
-  const activeVideoUrl = isDevView && devVideoUrl ? devVideoUrl : videoUrl;
-
-  // Reset dimensions and reload video cleanly on URL switch
+  // Reset error when source URLs or dev view toggles
   useEffect(() => {
-    setVideoDims(null);
-    const video = videoRef.current;
-    if (video) {
-      video.currentTime = 0;
-      video.load();
-    }
-  }, [activeVideoUrl]);
+    setVideoError(false);
+  }, [videoUrl, devVideoUrl, isDevView]);
 
+  // Fallback to raw videoUrl if devVideoUrl fails to load
+  const activeVideoUrl = isDevView && devVideoUrl && !videoError ? devVideoUrl : videoUrl;
+
+  // Handle Play / Pause & Approach Phase freezing
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+
+    if (isApproachPhase) {
+      video.pause();
+      if (video.readyState >= 1) {
+        video.currentTime = 0;
+      } else {
+        pendingSeekRef.current = 0;
+      }
+      return;
+    }
 
     if (isPlaying) {
       video.play().catch(() => {});
     } else {
       video.pause();
     }
-  }, [isPlaying]);
+  }, [isPlaying, isApproachPhase]);
 
+  // Frame-accurate seeking and drift correction
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !totalFrames || totalFrames <= 0) return;
-    if (isPlaying) return; // CRITICAL: Never seek while playing to avoid decoder thrashing
+
+    if (isApproachPhase) {
+      if (video.readyState >= 1) {
+        video.currentTime = 0;
+      } else {
+        pendingSeekRef.current = 0;
+      }
+      return;
+    }
 
     const targetTime = Math.max(0, currentFrameIndex / (fps || 30));
-    if (Number.isFinite(targetTime) && Math.abs(video.currentTime - targetTime) > 0.05) {
-      video.currentTime = targetTime;
+    if (!Number.isFinite(targetTime)) return;
+
+    if (video.readyState >= 1) {
+      const diff = Math.abs(video.currentTime - targetTime);
+      // When paused, seek accurately. When playing, only re-sync on noticeable drift (>0.35s)
+      if (!isPlaying && diff > 0.03) {
+        video.currentTime = targetTime;
+      } else if (isPlaying && diff > 0.35) {
+        video.currentTime = targetTime;
+      }
+    } else {
+      pendingSeekRef.current = targetTime;
     }
-  }, [currentFrameIndex, fps, totalFrames, isPlaying]);
+  }, [currentFrameIndex, fps, totalFrames, isPlaying, isApproachPhase]);
 
   const handleLoadedMetadata = () => {
     const video = videoRef.current;
-    if (video && video.videoWidth && video.videoHeight) {
+    if (!video) return;
+
+    if (video.videoWidth && video.videoHeight) {
       const w = video.videoWidth;
       const h = video.videoHeight;
       const ratio = (w / h).toFixed(2);
@@ -63,8 +95,13 @@ export default function VideoPlayer({
       else if (Math.abs(w / h - 9 / 16) < 0.05) aspectLabel += ' (9:16)';
       else aspectLabel += ` (${ratio}:1)`;
       setVideoDims(aspectLabel);
+    }
 
-      // Seek to current frame on initial metadata load if needed
+    // Apply any pending seeks once metadata is available
+    if (pendingSeekRef.current !== null) {
+      video.currentTime = pendingSeekRef.current;
+      pendingSeekRef.current = null;
+    } else if (!isApproachPhase && currentFrameIndex > 0) {
       const targetTime = Math.max(0, currentFrameIndex / (fps || 30));
       if (Number.isFinite(targetTime) && targetTime > 0) {
         video.currentTime = targetTime;
@@ -85,6 +122,13 @@ export default function VideoPlayer({
           muted
           preload="auto"
           onLoadedMetadata={handleLoadedMetadata}
+          onError={() => {
+            console.warn('Video failed to load for:', activeVideoUrl);
+            setVideoError(true);
+          }}
+          onEnded={() => {
+            if (onEnded) onEnded();
+          }}
           className="w-full h-full object-contain max-w-full max-h-full transition-all"
           onTimeUpdate={() => {
             if (videoRef.current && onTimeUpdate) {
@@ -93,17 +137,17 @@ export default function VideoPlayer({
           }}
         />
       ) : (
-        <div className="flex flex-col items-center gap-2 text-slate-500">
-          <Video className="w-8 h-8 stroke-1" />
-          <span className="text-xs">No video recording loaded</span>
+        <div className="flex flex-col items-center gap-2 text-slate-500 py-12">
+          <Video className="w-8 h-8 stroke-1 text-slate-600" />
+          <span className="text-xs font-medium">No video recording loaded</span>
         </div>
       )}
 
       {/* Top Left: Stream Badge & Dev View Mode Toggle */}
       {showBadge && (
-        <div className="absolute top-3 left-3 bg-slate-900/90 backdrop-blur-md border border-slate-700/70 p-1 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2 z-20 shadow-lg">
+        <div className="absolute top-3 left-3 bg-slate-900/90 backdrop-blur-md border border-slate-800 px-2 py-1 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2 z-20 shadow-lg">
           {devVideoUrl && setIsDevView ? (
-            <div className="flex items-center gap-1 bg-slate-950/80 p-0.5 rounded-lg border border-slate-800">
+            <div className="flex items-center gap-1 bg-slate-950/80 p-0.5 rounded-lg border border-slate-800/80">
               <button
                 type="button"
                 onClick={() => setIsDevView(false)}
@@ -146,7 +190,7 @@ export default function VideoPlayer({
 
       {/* Top Right: Real-time Anchor Status Badge when in Dev View */}
       {isDevView && currTelemetry && (
-        <div className="absolute top-3 right-3 bg-slate-950/90 backdrop-blur-md border border-amber-500/40 px-3 py-1.5 rounded-xl text-[11px] font-sans text-amber-300 flex items-center gap-2 z-20 shadow-xl pointer-events-none">
+        <div className="absolute top-3 right-3 bg-slate-950/90 backdrop-blur-md border border-amber-500/30 px-3 py-1.5 rounded-xl text-[11px] font-sans text-amber-300 flex items-center gap-2 z-20 shadow-xl pointer-events-none">
           <span
             className={`w-2.5 h-2.5 rounded-full animate-pulse ${
               currTelemetry.source === 'dual_aruco' || currTelemetry.source === 'single_aruco'

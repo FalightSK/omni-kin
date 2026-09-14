@@ -26,12 +26,15 @@ export default function DevVisionMonitor({
   totalFrames = 0,
   fps = 30,
   isPlaying = false,
+  isApproachPhase = false,
   onTogglePlay,
-  onSeekFrame
+  onSeekFrame,
+  onEnded
 }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
+  const pendingSeekRef = useRef(null);
 
   // Vision view mode: 'dev' (ArUco + SLAM overlay), 'canny' (OpenCV Canny Edge View), 'raw' (Original Video)
   const [visionMode, setVisionMode] = useState('dev');
@@ -57,28 +60,56 @@ export default function DevVisionMonitor({
     usePreRenderedCanny = true;
   }
 
-  // Sync play/pause with parent timeline
+  // Sync play/pause with parent timeline & Approach Phase
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+
+    if (isApproachPhase) {
+      video.pause();
+      if (video.readyState >= 1) {
+        video.currentTime = 0;
+      } else {
+        pendingSeekRef.current = 0;
+      }
+      return;
+    }
+
     if (isPlaying) {
       video.play().catch(() => {});
     } else {
       video.pause();
     }
-  }, [isPlaying]);
+  }, [isPlaying, isApproachPhase]);
 
-  // Sync current frame index with parent timeline when paused
+  // Sync current frame index with parent timeline
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !totalFrames || totalFrames <= 0) return;
-    if (isPlaying) return; // CRITICAL: Never seek while playing to avoid decoder thrashing
+
+    if (isApproachPhase) {
+      if (video.readyState >= 1) {
+        video.currentTime = 0;
+      } else {
+        pendingSeekRef.current = 0;
+      }
+      return;
+    }
 
     const targetTime = Math.max(0, currentFrameIndex / (fps || 30));
-    if (Number.isFinite(targetTime) && Math.abs(video.currentTime - targetTime) > 0.05) {
-      video.currentTime = targetTime;
+    if (!Number.isFinite(targetTime)) return;
+
+    if (video.readyState >= 1) {
+      const diff = Math.abs(video.currentTime - targetTime);
+      if (!isPlaying && diff > 0.03) {
+        video.currentTime = targetTime;
+      } else if (isPlaying && diff > 0.35) {
+        video.currentTime = targetTime;
+      }
+    } else {
+      pendingSeekRef.current = targetTime;
     }
-  }, [currentFrameIndex, fps, totalFrames, isPlaying]);
+  }, [currentFrameIndex, fps, totalFrames, isPlaying, isApproachPhase]);
 
   // Draw ArUco bounding boxes, corner points, tag name badges, and 3D coordinate frame axes
   const drawBoundingBoxes = useCallback((ctx, width, height) => {
@@ -310,6 +341,15 @@ export default function DevVisionMonitor({
         renderDevOverlays();
       }
     }
+    if (pendingSeekRef.current !== null && video) {
+      video.currentTime = pendingSeekRef.current;
+      pendingSeekRef.current = null;
+    } else if (!isApproachPhase && currentFrameIndex > 0 && video) {
+      const targetTime = Math.max(0, currentFrameIndex / (fps || 30));
+      if (Number.isFinite(targetTime) && targetTime > 0) {
+        video.currentTime = targetTime;
+      }
+    }
   };
 
   // Extract active frame telemetry
@@ -447,6 +487,9 @@ export default function DevVisionMonitor({
             setVideoError(true);
           }}
           onLoadedMetadata={handleLoadedMetadata}
+          onEnded={() => {
+            if (onEnded) onEnded();
+          }}
           onLoadedData={() => {
             if (visionMode === 'dev' && !usePreRenderedDev) renderDevOverlays();
           }}
