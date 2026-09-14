@@ -2051,7 +2051,21 @@ async def get_mobile_qr(request: Request, host: str = None):
         img = qrcode.make(mobile_url, image_factory=factory)
         svg_content = img.to_string()
         return Response(content=svg_content, media_type="image/svg+xml")
+    except ImportError:
+        import traceback
+        traceback.print_exc()
+        svg_err = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220" viewBox="0 0 220 220">'
+            '<rect width="220" height="220" fill="#f8fafc" rx="12"/>'
+            '<text x="110" y="90" font-family="sans-serif" font-size="13" font-weight="bold" fill="#ef4444" text-anchor="middle">qrcode library missing</text>'
+            '<text x="110" y="120" font-family="monospace" font-size="11" fill="#475569" text-anchor="middle">pip install qrcode</text>'
+            '<text x="110" y="145" font-family="sans-serif" font-size="10" fill="#64748b" text-anchor="middle">Use URL link below to connect</text>'
+            '</svg>'
+        )
+        return Response(content=svg_err, media_type="image/svg+xml", status_code=200)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
 
 if __name__ == "__main__":
