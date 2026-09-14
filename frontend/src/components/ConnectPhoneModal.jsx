@@ -1,15 +1,15 @@
 import React, { useState, useEffect } from 'react';
+import QRCode from 'qrcode';
 import { X, QrCode, Copy, Check, ExternalLink, ShieldCheck, Smartphone, AlertTriangle, RefreshCw } from 'lucide-react';
 
 export default function ConnectPhoneModal({ isOpen, onClose }) {
   const [serverInfo, setServerInfo] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [qrSvg, setQrSvg] = useState('');
   const [qrError, setQrError] = useState(false);
-  const [qrKey, setQrKey] = useState(0);
 
   useEffect(() => {
     if (isOpen) {
-      setQrError(false);
       fetch('/api/server/info')
         .then((res) => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -42,7 +42,24 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
       : serverInfo.mobile_url
     : `https://${currentHost}:8443/mobile`;
 
-  const qrSrc = `/api/mobile/qr?host=${encodeURIComponent(currentHost)}&t=${qrKey}`;
+  useEffect(() => {
+    if (mobileUrl) {
+      setQrError(false);
+      QRCode.toString(mobileUrl, {
+        type: 'svg',
+        margin: 1,
+        color: {
+          dark: '#0f172a',
+          light: '#ffffff'
+        }
+      })
+        .then((svg) => setQrSvg(svg))
+        .catch((err) => {
+          console.error('Failed to generate client QR code', err);
+          setQrError(true);
+        });
+    }
+  }, [mobileUrl]);
 
   const handleCopy = () => {
     if (navigator.clipboard) {
@@ -54,7 +71,19 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
 
   const retryQr = () => {
     setQrError(false);
-    setQrKey((k) => k + 1);
+    QRCode.toString(mobileUrl, {
+      type: 'svg',
+      margin: 1,
+      color: {
+        dark: '#0f172a',
+        light: '#ffffff'
+      }
+    })
+      .then((svg) => setQrSvg(svg))
+      .catch((err) => {
+        console.error('Failed to retry client QR code', err);
+        setQrError(true);
+      });
   };
 
   return (
@@ -83,10 +112,16 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
         <div className="p-5 flex flex-col items-center gap-4">
           {/* QR Code Container */}
           <div className="relative p-3 bg-white rounded-2xl shadow-xl flex flex-col items-center justify-center min-w-[216px] min-h-[216px]">
-            {qrError ? (
+            {qrSvg ? (
+              <div
+                className="w-48 h-48 rounded-lg overflow-hidden flex items-center justify-center [&>svg]:w-full [&>svg]:h-full"
+                dangerouslySetInnerHTML={{ __html: qrSvg }}
+              />
+            ) : qrError ? (
               <div className="w-48 h-48 flex flex-col items-center justify-center p-4 text-center">
                 <AlertTriangle className="w-8 h-8 text-amber-500 mb-2" />
-                <p className="text-xs text-slate-700 font-medium mb-2">QR Code unavailable</p>
+                <p className="text-xs text-slate-700 font-medium mb-1">QR Code unavailable</p>
+                <p className="text-[10px] text-slate-500 mb-2">Use the direct link below</p>
                 <button
                   onClick={retryQr}
                   className="px-2.5 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-800 text-[11px] font-semibold flex items-center gap-1 transition-all"
@@ -95,15 +130,9 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
                 </button>
               </div>
             ) : (
-              <img
-                key={qrKey}
-                src={qrSrc}
-                alt="Mobile Camera QR Code"
-                className="w-48 h-48 rounded-lg object-contain"
-                onError={() => {
-                  setQrError(true);
-                }}
-              />
+              <div className="w-48 h-48 flex items-center justify-center">
+                <div className="w-6 h-6 border-2 border-slate-300 border-t-indigo-600 rounded-full animate-spin" />
+              </div>
             )}
           </div>
 
