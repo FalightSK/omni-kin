@@ -1995,12 +1995,32 @@ async def export_lerobot(request: Request = None):
             "message": f"LeRobot export failed: {str(err)}"
         }, status_code=500)
 
+def _resolve_client_host(request: Request, override_host: str = None) -> str:
+    """
+    Resolves client host preference:
+    1. override_host query parameter if supplied.
+    2. Incoming Host / X-Forwarded-Host header if valid non-loopback.
+    3. Server's detected local LAN IP.
+    """
+    if override_host and override_host.strip():
+        cand = override_host.strip().split(":")[0]
+        if cand and cand.lower() not in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+            return cand
+
+    host_header = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    if host_header:
+        cand = host_header.strip().split(":")[0]
+        if cand and cand.lower() not in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+            return cand
+
+    return get_local_ip()
+
 @app.get("/api/server/info")
-async def get_server_info():
+async def get_server_info(request: Request):
     """
     Returns server network configuration, local IP, and mobile URLs.
     """
-    local_ip = get_local_ip()
+    local_ip = _resolve_client_host(request)
     ssl_cert = os.path.join(BASE_DIR, "cert.pem")
     ssl_key = os.path.join(BASE_DIR, "key.pem")
     has_ssl = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
@@ -2013,16 +2033,15 @@ async def get_server_info():
     })
 
 @app.get("/api/mobile/qr")
-async def get_mobile_qr():
+async def get_mobile_qr(request: Request, host: str = None):
     """
     Generates an SVG QR code pointing directly to the mobile camera URL.
     """
     try:
         import qrcode
         import qrcode.image.svg
-        from fastapi.responses import Response
 
-        local_ip = get_local_ip()
+        local_ip = _resolve_client_host(request, override_host=host)
         ssl_cert = os.path.join(BASE_DIR, "cert.pem")
         ssl_key = os.path.join(BASE_DIR, "key.pem")
         has_ssl = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
