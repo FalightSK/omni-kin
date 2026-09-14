@@ -168,17 +168,26 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
           </div>
 
           {/* SSL Bypass Instructions Card */}
-          <div className="w-full bg-indigo-950/30 border border-indigo-500/30 rounded-xl p-3 text-[11px] text-slate-300 space-y-1.5">
-            <div className="flex items-center gap-1.5 text-indigo-300 font-semibold">
-              <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
-              <span>One-Time SSL Acceptance</span>
+          <div className="w-full bg-indigo-950/30 border border-indigo-500/30 rounded-xl p-3 text-[11px] text-slate-300 space-y-2">
+            <div className="flex items-center justify-between text-indigo-300 font-semibold">
+              <div className="flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+                <span>One-Time SSL Acceptance</span>
+              </div>
+              <span className="text-[9px] bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded-full border border-indigo-500/30 font-mono">
+                Port 8443
+              </span>
             </div>
             <p className="text-slate-400 leading-relaxed text-[10px]">
-              Mobile browsers require HTTPS for camera and motion sensors. Because this server uses a local self-signed certificate, your phone browser will show a warning:
+              Mobile browsers strictly require HTTPS for camera and motion sensor APIs. On first connection, tap:
             </p>
             <div className="bg-slate-900/80 p-2 rounded-lg border border-slate-800 space-y-1 font-mono text-[10px] text-slate-300">
-              <p>• <strong>Android Chrome:</strong> Tap "Advanced" ➔ "Proceed to {serverInfo?.local_ip || 'IP'} (unsafe)"</p>
+              <p>• <strong>Android Chrome:</strong> Tap "Advanced" ➔ "Proceed to {currentHost} (unsafe)"</p>
               <p>• <strong>iOS Safari:</strong> Tap "Show Details" ➔ "visit this website" ➔ "Visit Website"</p>
+            </div>
+            <div className="text-[9px] text-slate-400 border-t border-slate-800/80 pt-1.5 flex items-center justify-between">
+              <span>💡 Need new SSL certs? Run <code className="text-indigo-300 bg-slate-900 px-1 py-0.5 rounded font-mono">python generate_cert.py</code></span>
+              <span className="text-slate-500">Auto-saved to cert.pem</span>
             </div>
           </div>
         </div>

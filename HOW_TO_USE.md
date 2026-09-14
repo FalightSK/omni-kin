@@ -88,6 +88,13 @@ Open **`http://localhost:8000`** in your desktop browser (Chrome, Edge, or Firef
 
 Modern mobile browsers strictly require **HTTPS** to allow access to the camera and motion sensors over a local network. OmniKin provides an automated HTTPS service on port `8443`.
 
+> 💡 **SSL Certificate Setup**: `server.py` automatically generates `cert.pem` and `key.pem` on its first run. You can also re-generate them at any time with custom IP addresses:
+> ```bash
+> python generate_cert.py
+> # Or for a specific IP:
+> python generate_cert.py --ip 192.168.1.52
+> ```
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -102,6 +109,7 @@ sequenceDiagram
     Desktop-->>Phone: Serve Mobile Web App over HTTPS
     User->>Phone: Accept One-Time SSL Warning (Proceed / Visit Website)
     User->>Phone: Grant Camera & Motion Sensor Permissions
+    User->>Phone: Choose Preferred Camera Lens (0.5x Ultra-Wide, 1x Wide, etc.)
     Phone-->>User: Display Active Landscape Viewfinder & IMU HUD
 ```
 
@@ -115,7 +123,11 @@ sequenceDiagram
 6. When prompted:
    - Tap **"Allow"** for Camera access.
    - Tap **"Allow"** for Motion & Orientation access.
-7. Rotate your phone to **Landscape (horizontal)** orientation.
+7. **Select Your Camera Lens**:
+   - Tap the **"📷 Lens"** button in the bottom left of the mobile screen to open the Camera Selector.
+   - Select your preferred lens (e.g., `🔭 Ultra-Wide 0.5x` for maximum table visibility, or `📷 Standard Wide 1x`).
+   - You can also tap the **Switch Camera** icon to cycle between front and rear lenses quickly.
+8. Rotate your phone to **Landscape (horizontal)** orientation.
 
 ---
 
