@@ -82,14 +82,15 @@ Collecting real-world robot manipulation demonstrations typically requires:
 - 🛡️ **Universal Camera Mount Crash Prevention**: Computes 3D Euclidean clearance between phone camera and robot forearm link segment in real time. Automatically bounds wrist pitch $q_3$ to prevent damaging top-mounted camera brackets.
 - 🔀 **Two Trajectory Modes**:
   - `free_form`: Unconstrained demonstrations starting at the first recorded frame (best for diverse pretraining).
-  - `initial_aware`: Automatically calculates a quintic $C^2$ minimum-jerk approach path with a 6 cm parabolic lift arc connecting the robot standby home pose to the demonstration starting point (best for fine-tuning).
+  - `initial_aware`: Automatically calculates a MoveJ joint-space $C^2$ minimum-jerk approach path connecting the canonical robot standby home pose ($X=0.24\,\text{m}, Y=0.00\,\text{m}, Z=0.20\,\text{m}, \text{pitch}=-20.0^\circ$) to the demonstration start point with zero reach errors and guaranteed collision safety (best for fine-tuning).
+- ✂️ **Automated Feasible Workspace Trimming**: Automatically detects and trims out-of-reach boundary frames ($r < 17.6\,\text{cm}$) where the human operator holds the phone near their chest before or after the demonstration, while preserving exact 1:1 video-to-parquet frame synchronization.
 - 📊 **Synchronized Web Dashboard**:
   - Real-time Three.js 3D viewport showing the robot arm executing the demonstration.
   - Interactive reachability color coding (🟢 green = reachable, 🟡 yellow = near joint limits, 🔴 red = unreachable/collision).
   - Synchronized video playback with Picture-in-Picture (PiP), horizontal, and vertical split layouts.
   - Interactive Savitzky-Golay and Moving Average trajectory smoothing slider.
   - Diagnostic Dev View with ArUco 3D axes, OpenCV Canny edge monitor, and live telemetry.
-- 📦 **Official LeRobot v2.0 Dataset Exporter**: Exports Parquet tables, MP4 video chunks, and JSON metadata (`info.json`, `stats.json`, `tasks.jsonl`, `episodes.jsonl`) fully compatible with Hugging Face `lerobot`.
+- 📦 **Official LeRobot v2.1 Dataset Exporter**: Exports Parquet tables, MP4 video chunks, and JSON metadata (`info.json`, `stats.json`, `tasks.jsonl`, `episodes.jsonl`) fully compatible with Hugging Face `lerobot`.
 
 ---
 
@@ -343,24 +344,26 @@ flowchart TD
 
     subgraph Mode2["Mode 2: Initial-Position Aware (Fine-Tuning)"]
         direction LR
-        Home["Robot Standby Home Pose"] -->|"Quintic C² Minimum-Jerk Lift Arc (+6cm)"| D0["Demo Frame 0"]
-        D0 --> D1["Demo Frame 1"] --> DEnd["Demo End Waypoint"]
+        Home["Robot Standby Home Pose<br/>X=0.24m, Pitch=-20°"] -->|"MoveJ Joint-Space C² Minimum-Jerk Spline"| D0["Demo Feasible Start"]
+        D0 --> D1["Demo Waypoint 1"] --> DEnd["Demo End Waypoint"]
     end
 ```
 
 | Mode | Key in API | Characteristics | When to Use |
 | :--- | :--- | :--- | :--- |
 | **Free-Form** | `free_form` | Trajectory starts immediately from the human's first hand motion. No added approach path. | Pretraining foundation models; capturing unstructured human demonstrations. |
-| **Initial-Position Aware** | `initial_aware` | Automatically prepends a smooth $C^2$ minimum-jerk approach path (~45 frames) starting from `initial_position` with a 6 cm parabolic clearance lift arc. | Fine-tuning policies on physical robots requiring predictable start/docking positions. |
+| **Initial-Position Aware** | `initial_aware` | Automatically prepends a MoveJ joint-space $C^2$ minimum-jerk spline (~45 frames) starting from canonical home ($X=0.24, Y=0.00, Z=0.20, \text{pitch}=-20^\circ$) to the first feasible demonstration frame with zero reach errors and guaranteed collision safety. | Fine-tuning policies on physical robots requiring predictable start/docking positions. |
 
 ---
 
 ### Step 8: Export to LeRobot Dataset Format
 
-1. In the episode table, check the boxes for the episodes you wish to include (or click **"Select All"**).
-2. Enter your dataset name (e.g., `pick_apple_omnikin_v1`).
-3. Select the **Trajectory Mode** (`free_form` or `initial_aware`).
-4. Click **"📦 Export LeRobot Dataset"**.
+1. Click **"📦 Export LeRobot"** in the top navigation bar to open the **Export LeRobot Modal**.
+2. Select your desired **Trajectory Alignment Mode** (`Free-Form` or `Initial-Aware`).
+3. **Auto-Trim Out-of-Reach Boundary Frames** *(Checked by default)*:
+   - Evaluates inverse kinematics across the demonstration and slices off leading and trailing frames where the operator held the phone against their chest ($r < 17.6\,\text{cm}$) before or after the task.
+   - Automatically maintains strict 1:1 frame count parity between exported Parquet rows and transcoded MP4 video chunks.
+4. Click **"Export LeRobot Dataset"**.
 5. The dataset is exported under `lerobot_exports/<dataset_name>/`.
 
 #### Exported Directory Structure
@@ -590,6 +593,9 @@ python test_urdf_converter.py
 
 # Test 4: End-to-end LeRobot dataset exporter
 python test_pipeline.py
+
+# Test 5: End-to-end Auto-Trim, MoveJ approach planning, & 1:1 Video-Parquet sync
+python verify_export_and_kinematics.py
 ```
 
 All test scripts verify mathematical invariants, joint bounds, and schema conformance.
@@ -616,6 +622,10 @@ All test scripts verify mathematical invariants, joint bounds, and schema confor
 ### 4. Trajectory displays red segments in the 3D viewer
 - Red indicates that the desired waypoint is outside the arm's physical reach envelope, or causes a camera mount collision.
 - In **Robot Setup > Workspace Calibration**, click **"Recommended"** or adjust `offset_y` so the table workspace is comfortably within reach of the robot base.
+
+### 5. Abnormal joint positions or elbow clamp at start / end of recording
+- When holding the smartphone against your chest before or after demonstrating, the distance to the robot base is often $r < 17.6\,\text{cm}$ (closer than the physical arm folding limit), causing the elbow $q_2$ to clamp at its mechanical stop ($-150.0^\circ$).
+- Enable **Auto-Trim Out-of-Reach Boundary Frames** (checked by default in the Export dialog). It automatically detects the active reachable window and trims out-of-reach boundary frames while guaranteeing strict 1:1 video-to-parquet frame synchronization.
 
 ---
 

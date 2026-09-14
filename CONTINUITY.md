@@ -194,8 +194,8 @@ All user calibrations are persisted to `robot_config.json`. On server boot, `loa
 ```json
 {
   "robot_type": "so_arm101_omni_kin",
-  "offset_x": 0.091,
-  "offset_y": -0.410,
+  "offset_x": 0.103,
+  "offset_y": -0.411,
   "offset_z": 0.000,
   "yaw_deg": 90.0,
   "q3_safe_max_deg": 5.0,
@@ -209,10 +209,10 @@ All user calibrations are persisted to `robot_config.json`. On server boot, `loa
     "enabled": true
   },
   "initial_position": {
-    "x": 0.15,
+    "x": 0.24,
     "y": 0.00,
     "z": 0.20,
-    "pitch_deg": 0.0,
+    "pitch_deg": -20.0,
     "roll_deg": 0.0,
     "yaw_deg": 0.0,
     "gripper": 100.0,
@@ -238,6 +238,9 @@ python test_urdf_converter.py
 
 # 4. LeRobot Exporter Schema & Parquet Test
 python test_pipeline.py
+
+# 5. End-to-End Auto-Trim, MoveJ Approach, & Video Parquet Sync Test
+python verify_export_and_kinematics.py
 ```
 
 ---
