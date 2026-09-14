@@ -126,8 +126,9 @@ trajectory_planner = TrajectoryPlanner(
 )
 
 FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
-if os.path.exists(os.path.join(FRONTEND_DIST_DIR, "assets")):
-    app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST_DIR, "assets")), name="assets")
+FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
+os.makedirs(FRONTEND_ASSETS_DIR, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="assets")
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 app.mount("/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
