@@ -14,10 +14,7 @@ import {
   Minimize2,
   RotateCw,
   Hand,
-  UploadCloud,
-  Check,
-  ChevronDown,
-  X
+  UploadCloud
 } from 'lucide-react';
 
 const TASK_MODES = [
@@ -62,16 +59,6 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   // Camera devices
   const [devices, setDevices] = useState([]);
   const [currentDeviceIdx, setCurrentDeviceIdx] = useState(0);
-  const [selectedDeviceId, setSelectedDeviceId] = useState('');
-  const [showCameraModal, setShowCameraModal] = useState(false);
-
-  const getDeviceLabel = (dev, idx) => {
-    if (!dev) return `Camera ${idx + 1}`;
-    let lbl = dev.label || '';
-    if (!lbl) return `Camera ${idx + 1}`;
-    lbl = lbl.replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)/i, '');
-    return lbl;
-  };
 
   const mediaRecorderRef = useRef(null);
   const recordedChunksRef = useRef([]);
@@ -233,7 +220,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         await videoRef.current.play();
       }
 
-      // Re-enumerate devices now that camera permission is granted (populates device labels)
+      // Re-enumerate devices now that camera permission is granted
       try {
         const allDevs = await navigator.mediaDevices.enumerateDevices();
         const videoDevs = allDevs.filter((d) => d.kind === 'videoinput');
@@ -242,12 +229,11 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         const [track] = stream.getVideoTracks();
         const activeId = track?.getSettings()?.deviceId || selectedId;
         if (activeId) {
-          setSelectedDeviceId(activeId);
           const idx = videoDevs.findIndex((d) => d.deviceId === activeId);
           if (idx !== -1) setCurrentDeviceIdx(idx);
         }
       } catch (enumErr) {
-        console.log('Post-stream enumeration error:', enumErr);
+        console.log('Device enumeration error:', enumErr);
       }
 
       setIsCameraActive(true);
@@ -260,10 +246,11 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   };
 
   const switchCamera = async () => {
-    if (devices.length < 2) return;
+    if (!devices || devices.length < 2) return;
     const nextIdx = (currentDeviceIdx + 1) % devices.length;
     setCurrentDeviceIdx(nextIdx);
-    setSelectedDeviceId(devices[nextIdx].deviceId);
+    setStatusMsg(`Switched to Camera ${nextIdx + 1}`);
+    setTimeout(() => setStatusMsg(''), 1500);
     await startCamera(devices[nextIdx].deviceId);
   };
 
@@ -676,29 +663,16 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
                 <Activity className="w-4 h-4" />
               </button>
 
-              <button
-                onClick={() => setShowCameraModal(true)}
-                className="h-10 px-3 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1.5 text-white active:scale-95 transition-all shadow-lg text-xs"
-                title="Select Camera Lens"
-              >
-                <Camera className="w-4 h-4 text-indigo-400" />
-                <span className="max-w-[70px] truncate font-medium text-[10px]">
-                  {devices.find((d) => d.deviceId === selectedDeviceId)
-                    ? getDeviceLabel(devices.find((d) => d.deviceId === selectedDeviceId), currentDeviceIdx)
-                    : devices.length > 0
-                    ? `Cam (${devices.length})`
-                    : 'Lens'}
-                </span>
-                <ChevronDown className="w-3 h-3 text-slate-400" />
-              </button>
-
               {devices.length > 1 && (
                 <button
                   onClick={switchCamera}
-                  className="w-10 h-10 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center justify-center text-white active:scale-90 transition-all shadow-lg"
-                  title="Quick Flip Camera"
+                  className="h-10 px-3 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1.5 text-white active:scale-90 transition-all shadow-lg text-xs"
+                  title="Switch Camera"
                 >
-                  <SwitchCamera className="w-4 h-4" />
+                  <SwitchCamera className="w-4 h-4 text-indigo-400" />
+                  <span className="font-mono text-[11px] font-semibold">
+                    {currentDeviceIdx + 1}/{devices.length}
+                  </span>
                 </button>
               )}
             </div>
@@ -814,12 +788,25 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
                 </div>
               )}
 
-              <button
-                onClick={toggleFullscreen}
-                className="w-10 h-10 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center justify-center text-white"
-              >
-                {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-              </button>
+              <div className="flex items-center gap-2">
+                {devices.length > 1 && (
+                  <button
+                    onClick={switchCamera}
+                    className="h-10 px-2.5 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1 text-white active:scale-90 transition-all text-xs"
+                    title="Switch Camera"
+                  >
+                    <SwitchCamera className="w-4 h-4 text-indigo-400" />
+                    <span className="font-mono text-[10px]">{currentDeviceIdx + 1}/{devices.length}</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={toggleFullscreen}
+                  className="w-10 h-10 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center justify-center text-white"
+                >
+                  {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+                </button>
+              </div>
             </div>
 
             {/* Rotation Hint Banner */}
@@ -877,105 +864,6 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
                       : 'w-full h-full rounded-full bg-rose-600'
                   }`}
                 />
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* CAMERA SELECTOR MODAL */}
-      {showCameraModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in pointer-events-auto">
-          <div className="bg-slate-900 border border-slate-700/80 rounded-2xl p-5 max-w-sm w-full shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2 text-white font-semibold text-sm">
-                <div className="w-7 h-7 rounded-lg bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
-                  <Camera className="w-4 h-4" />
-                </div>
-                <div>
-                  <div className="text-white text-xs font-bold">Select Camera Lens</div>
-                  <div className="text-[10px] text-slate-400 font-normal">
-                    {devices.length} {devices.length === 1 ? 'camera' : 'cameras'} detected
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowCameraModal(false)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {devices.length === 0 ? (
-                <div className="p-4 text-center text-slate-400 text-xs">
-                  No cameras detected. Ensure camera permissions are granted.
-                </div>
-              ) : (
-                devices.map((d, idx) => {
-                  const isCurrent =
-                    d.deviceId === selectedDeviceId ||
-                    (!selectedDeviceId && idx === currentDeviceIdx);
-                  const label = getDeviceLabel(d, idx);
-                  const lower = label.toLowerCase();
-                  const isWide = lower.includes('wide') || lower.includes('ultra') || lower.includes('0.5');
-                  const isFront = lower.includes('front') || lower.includes('selfie');
-                  const isTele = lower.includes('tele') || lower.includes('2x') || lower.includes('3x');
-
-                  return (
-                    <button
-                      key={d.deviceId || idx}
-                      onClick={async () => {
-                        setSelectedDeviceId(d.deviceId);
-                        setCurrentDeviceIdx(idx);
-                        setShowCameraModal(false);
-                        await startCamera(d.deviceId);
-                      }}
-                      className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition-all ${
-                        isCurrent
-                          ? 'bg-indigo-600/25 border-indigo-500 text-white font-semibold shadow-md shadow-indigo-500/10'
-                          : 'bg-slate-800/60 border-slate-700/60 text-slate-300 hover:bg-slate-800 hover:text-white'
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="text-lg">
-                          {isWide ? '🔭' : isTele ? '🔍' : isFront ? '🤳' : '📷'}
-                        </span>
-                        <div>
-                          <div className="text-xs font-semibold">{label}</div>
-                          <div className="text-[10px] text-slate-400 font-mono">
-                            {isWide
-                              ? 'Ultra-Wide / Fisheye'
-                              : isTele
-                              ? 'Telephoto Zoom'
-                              : isFront
-                              ? 'Front / Selfie Camera'
-                              : 'Standard Main Lens'}
-                          </div>
-                        </div>
-                      </div>
-                      {isCurrent && <Check className="w-4 h-4 text-indigo-400" />}
-                    </button>
-                  );
-                })
-              )}
-            </div>
-
-            <div className="flex justify-between items-center pt-2 border-t border-slate-800">
-              <button
-                onClick={async () => {
-                  await refreshDevices();
-                }}
-                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] flex items-center gap-1.5 transition-colors"
-              >
-                <RefreshCw className="w-3 h-3" /> Refresh
-              </button>
-              <button
-                onClick={() => setShowCameraModal(false)}
-                className="px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs text-white font-medium shadow-md shadow-indigo-600/20 transition-all"
-              >
-                Done
               </button>
             </div>
           </div>

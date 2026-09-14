@@ -629,10 +629,10 @@ export default function Dashboard({
               <div
                 className={`absolute bottom-3 right-3 z-30 transition-all duration-200 rounded-2xl overflow-hidden border border-slate-700/80 bg-slate-950/95 backdrop-blur-xl shadow-2xl flex flex-col ${
                   pipSize === 'large'
-                    ? 'w-96 md:w-[420px] h-60 md:h-64'
+                    ? 'w-96 md:w-[420px]'
                     : pipSize === 'medium'
-                    ? 'w-72 md:w-80 h-44 md:h-52'
-                    : 'w-56 h-36'
+                    ? 'w-72 md:w-80'
+                    : 'w-56'
                 }`}
               >
                 {/* Inset Header Bar */}
@@ -665,7 +665,7 @@ export default function Dashboard({
                 </div>
 
                 {/* Video Frame with preserved native aspect ratio */}
-                <div className="flex-1 min-h-0 relative bg-black flex items-center justify-center overflow-hidden">
+                <div className="w-full aspect-video relative bg-black flex items-center justify-center overflow-hidden">
                   <VideoPlayer
                     videoUrl={activeEp?.video_url}
                     devVideoUrl={activeEp?.dev_video_url}
@@ -673,9 +673,11 @@ export default function Dashboard({
                     setIsDevView={setIsDevView}
                     devTelemetry={activeEp?.dev_telemetry}
                     isPlaying={isPlaying}
+                    isApproachPhase={isApproachPhase}
                     currentFrameIndex={safeFrameIndex}
                     totalFrames={totalFrames}
                     fps={activeEp?.fps || 30}
+                    onEnded={() => setIsPlaying(false)}
                     showBadge={false}
                   />
                 </div>
@@ -768,9 +770,11 @@ export default function Dashboard({
                 setIsDevView={setIsDevView}
                 devTelemetry={activeEp?.dev_telemetry}
                 isPlaying={isPlaying}
+                isApproachPhase={isApproachPhase}
                 currentFrameIndex={safeFrameIndex}
                 totalFrames={totalFrames}
                 fps={activeEp?.fps || 30}
+                onEnded={() => setIsPlaying(false)}
               />
             </div>
           </div>
@@ -997,11 +1001,14 @@ export default function Dashboard({
               totalFrames={totalFrames}
               fps={activeEp?.fps || 30}
               isPlaying={isPlaying}
+              isApproachPhase={isApproachPhase}
               onTogglePlay={() => setIsPlaying(!isPlaying)}
               onSeekFrame={(idx) => {
                 setIsPlaying(false);
-                setCurrentFrameIndex(idx);
+                const frameOffset = isInitialAware ? approachFramesCount : 0;
+                setCombinedSliderIndex(frameOffset + idx);
               }}
+              onEnded={() => setIsPlaying(false)}
             />
 
             {/* OpenCV Scene Anchoring & Real-World Calibration Details */}
