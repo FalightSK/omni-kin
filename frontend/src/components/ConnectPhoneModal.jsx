@@ -20,8 +20,6 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
     }
   }, [isOpen]);
 
-  if (!isOpen) return null;
-
   const currentHost =
     typeof window !== 'undefined' &&
     window.location.hostname &&
@@ -43,7 +41,7 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
     : `https://${currentHost}:8443/mobile`;
 
   useEffect(() => {
-    if (mobileUrl) {
+    if (isOpen && mobileUrl) {
       setQrError(false);
       QRCode.toString(mobileUrl, {
         type: 'svg',
@@ -59,7 +57,9 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
           setQrError(true);
         });
     }
-  }, [mobileUrl]);
+  }, [isOpen, mobileUrl]);
+
+  if (!isOpen) return null;
 
   const handleCopy = () => {
     if (navigator.clipboard) {
