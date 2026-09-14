@@ -1,14 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { X, QrCode, Copy, Check, ExternalLink, ShieldCheck, Smartphone, AlertTriangle } from 'lucide-react';
+import { X, QrCode, Copy, Check, ExternalLink, ShieldCheck, Smartphone, AlertTriangle, RefreshCw } from 'lucide-react';
 
 export default function ConnectPhoneModal({ isOpen, onClose }) {
   const [serverInfo, setServerInfo] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [qrError, setQrError] = useState(false);
+  const [qrKey, setQrKey] = useState(0);
 
   useEffect(() => {
     if (isOpen) {
+      setQrError(false);
       fetch('/api/server/info')
-        .then((res) => res.json())
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
         .then((data) => setServerInfo(data))
         .catch((err) => console.error('Failed to load server info', err));
     }
@@ -16,9 +22,27 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
 
   if (!isOpen) return null;
 
-  const mobileUrl =
-    serverInfo?.mobile_url ||
-    `https://${typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1'}:8443/mobile`;
+  const currentHost =
+    typeof window !== 'undefined' &&
+    window.location.hostname &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1'
+      ? window.location.hostname
+      : serverInfo?.local_ip || '127.0.0.1';
+
+  const mobileUrl = serverInfo?.mobile_url
+    ? typeof window !== 'undefined' &&
+      window.location.hostname &&
+      window.location.hostname !== 'localhost' &&
+      window.location.hostname !== '127.0.0.1'
+      ? serverInfo.mobile_url.replace(
+          /https?:\/\/[^:/]+/,
+          (match) => match.split('://')[0] + '://' + window.location.hostname
+        )
+      : serverInfo.mobile_url
+    : `https://${currentHost}:8443/mobile`;
+
+  const qrSrc = `/api/mobile/qr?host=${encodeURIComponent(currentHost)}&t=${qrKey}`;
 
   const handleCopy = () => {
     if (navigator.clipboard) {
@@ -26,6 +50,11 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
+  };
+
+  const retryQr = () => {
+    setQrError(false);
+    setQrKey((k) => k + 1);
   };
 
   return (
@@ -53,15 +82,29 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
         {/* Content */}
         <div className="p-5 flex flex-col items-center gap-4">
           {/* QR Code Container */}
-          <div className="relative p-3 bg-white rounded-2xl shadow-xl flex items-center justify-center">
-            <img
-              src="/api/mobile/qr"
-              alt="Mobile Camera QR Code"
-              className="w-48 h-48 rounded-lg object-contain"
-              onError={(e) => {
-                e.target.style.display = 'none';
-              }}
-            />
+          <div className="relative p-3 bg-white rounded-2xl shadow-xl flex flex-col items-center justify-center min-w-[216px] min-h-[216px]">
+            {qrError ? (
+              <div className="w-48 h-48 flex flex-col items-center justify-center p-4 text-center">
+                <AlertTriangle className="w-8 h-8 text-amber-500 mb-2" />
+                <p className="text-xs text-slate-700 font-medium mb-2">QR Code unavailable</p>
+                <button
+                  onClick={retryQr}
+                  className="px-2.5 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-800 text-[11px] font-semibold flex items-center gap-1 transition-all"
+                >
+                  <RefreshCw className="w-3 h-3" /> Retry
+                </button>
+              </div>
+            ) : (
+              <img
+                key={qrKey}
+                src={qrSrc}
+                alt="Mobile Camera QR Code"
+                className="w-48 h-48 rounded-lg object-contain"
+                onError={() => {
+                  setQrError(true);
+                }}
+              />
+            )}
           </div>
 
           <p className="text-xs text-slate-300 text-center font-medium">
