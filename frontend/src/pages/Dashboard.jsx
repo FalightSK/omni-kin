@@ -65,8 +65,8 @@ export default function Dashboard({
   const [smoothingWindowMs, setSmoothingWindowMs] = useState(250);
   const [isSmoothingApplying, setIsSmoothingApplying] = useState(false);
 
-  // Dev View Diagnostic Overlay (ArUco + Virtual SLAM)
-  const [isDevView, setIsDevView] = useState(true);
+  // Dev View Diagnostic Overlay (ArUco + Virtual SLAM) - Default OFF for clean minimalist view
+  const [isDevView, setIsDevView] = useState(false);
   const [showRawTelemetry, setShowRawTelemetry] = useState(false);
   const [showAnchoringGuide, setShowAnchoringGuide] = useState(true);
 
@@ -99,7 +99,15 @@ export default function Dashboard({
 
   useEffect(() => {
     let isMounted = true;
+    let timerId = null;
+
     const pollStatus = async () => {
+      // Pause polling if the tab is hidden
+      if (document.hidden) {
+        timerId = setTimeout(pollStatus, 5000);
+        return;
+      }
+
       try {
         const res = await fetch('/api/processing/status');
         const data = await res.json();
@@ -118,16 +126,32 @@ export default function Dashboard({
           }
         }
         prevIsProcessingRef.current = data.is_processing;
+
+        // Adaptive polling interval: 2.5s if active/queued, 10s if idle
+        const nextInterval = (data.is_processing || data.pending_count > 0) ? 2500 : 10000;
+        if (isMounted) {
+          timerId = setTimeout(pollStatus, nextInterval);
+        }
       } catch (err) {
-        // Silently catch polling error
+        if (isMounted) {
+          timerId = setTimeout(pollStatus, 10000);
+        }
       }
     };
 
     pollStatus();
-    const interval = setInterval(pollStatus, 2000);
+
+    const handleVisibility = () => {
+      if (!document.hidden) {
+        pollStatus();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
       isMounted = false;
-      clearInterval(interval);
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [onRefreshEpisodes]);
 
@@ -213,9 +237,9 @@ export default function Dashboard({
     setOverrideEePoses(null);
   }, [activeEp?.episode_index]);
 
-  // Ensure dev_video_url and canny_video_url are generated for the active episode if requested
+  // Ensure dev_video_url and canny_video_url are generated for the active episode only if Dev Mode is ON
   useEffect(() => {
-    if (activeEp && (!activeEp.dev_video_url || !activeEp.canny_video_url) && activeEp.video_path && onRefreshEpisodes) {
+    if (isDevView && activeEp && (!activeEp.dev_video_url || !activeEp.canny_video_url) && activeEp.video_path && onRefreshEpisodes) {
       fetch(`/api/episodes/${activeEp.episode_index}/dev_video`, { method: 'POST' })
         .then((r) => r.json())
         .then((data) => {
@@ -225,7 +249,7 @@ export default function Dashboard({
         })
         .catch(() => {});
     }
-  }, [activeEp?.episode_index, activeEp?.dev_video_url, activeEp?.canny_video_url, activeEp?.video_path, onRefreshEpisodes]);
+  }, [isDevView, activeEp?.episode_index, activeEp?.dev_video_url, activeEp?.canny_video_url, activeEp?.video_path, onRefreshEpisodes]);
 
   // Reset playback and frame position whenever active episode, video URL, or mode changes
   useEffect(() => {
@@ -1306,11 +1330,11 @@ export default function Dashboard({
 
       {/* Right Sidebar: Episode Storage Drawer (Collapsible & Sticky) */}
       {isSidebarOpen && (
-        <div className="glass-card p-4 rounded-2xl flex flex-col gap-3 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100vh-2rem)] overflow-hidden text-left transition-all">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div className="glass-card p-3 rounded-2xl flex flex-col gap-2.5 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100vh-2rem)] overflow-hidden text-left transition-all">
+          <div className="flex items-center justify-between border-b border-slate-800/80 pb-2 px-1">
             <div className="flex items-center gap-2">
-              <Layers className="w-4 h-4 text-indigo-400" />
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-200">
+              <Layers className="w-3.5 h-3.5 text-slate-400" />
+              <h2 className="text-xs font-semibold text-slate-200">
                 Episodes ({episodes.length})
               </h2>
             </div>
@@ -1318,49 +1342,46 @@ export default function Dashboard({
               {episodes.length > 0 && onClearAllEpisodes && (
                 <button
                   onClick={onClearAllEpisodes}
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                  className="p-1 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
                   title="Clear All Episodes"
                 >
-                  <Trash2 className="w-4 h-4" />
+                  <Trash2 className="w-3.5 h-3.5" />
                 </button>
               )}
               <button
                 onClick={onRefreshEpisodes}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+                className="p-1 rounded-lg text-slate-500 hover:text-slate-300 hover:bg-slate-800 transition-colors"
                 title="Refresh Episodes"
               >
-                <RefreshCw className="w-4 h-4" />
+                <RefreshCw className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
 
           {/* Background Processing Queue Monitor Banner */}
           {(processingStatus.is_processing || processingStatus.pending_count > 0) && (
-            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex flex-col gap-1.5 animate-pulse">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-bold text-amber-400 flex items-center gap-1.5">
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                  <span>Processing Demonstrations</span>
+            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex flex-col gap-1">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="font-semibold text-amber-300 flex items-center gap-1.5">
+                  <RefreshCw className="w-3 h-3 animate-spin text-amber-400" />
+                  <span>Processing Demo</span>
                 </span>
-                <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-mono text-[10px] font-bold">
+                <span className="px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-200 font-mono text-[10px] font-bold">
                   {processingStatus.pending_count + (processingStatus.is_processing ? 1 : 0)} in queue
                 </span>
               </div>
               {processingStatus.current_job && (
-                <div className="text-[10px] text-amber-200/80 truncate font-mono">
+                <div className="text-[10px] text-amber-200/70 truncate font-mono">
                   Active: {processingStatus.current_job.task}
                 </div>
               )}
-              <div className="text-[9px] text-slate-400">
-                ArUco solvePnP + 100Hz EKF running in background...
-              </div>
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto flex flex-col gap-2 pr-1">
+          <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 pr-1">
             {episodes.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-48 text-center gap-2 text-slate-500">
-                <Compass className="w-8 h-8 stroke-1" />
+                <Compass className="w-7 h-7 stroke-1 text-slate-600" />
                 <p className="text-xs">No episodes recorded yet.</p>
               </div>
             ) : (
@@ -1370,51 +1391,53 @@ export default function Dashboard({
                   <div
                     key={ep.episode_index}
                     onClick={() => setSelectedEpIdx(ep.episode_index)}
-                    className={`p-3 rounded-xl border transition-all cursor-pointer flex flex-col gap-1.5 ${
+                    className={`px-3 py-2 rounded-xl border transition-all cursor-pointer flex items-center justify-between group ${
                       isSelected
-                        ? 'bg-indigo-600/20 border-indigo-500/80 shadow-lg shadow-indigo-500/10'
-                        : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                        ? 'bg-indigo-600/15 border-indigo-500/50 shadow-sm text-white'
+                        : 'bg-slate-900/40 border-slate-800/80 hover:bg-slate-900/80 hover:border-slate-700 text-slate-300'
                     }`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-200">Episode #{ep.episode_index}</span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDeleteEpisode(ep.episode_index);
-                        }}
-                        className="text-slate-500 hover:text-rose-400 p-1 transition-colors"
-                        title="Delete Episode"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                    <div className="text-[11px] text-slate-400 flex items-center gap-1">
-                      <MoveUpRight className="w-3 h-3 text-indigo-400" />
-                      <span className="truncate">{ep.task}</span>
-                    </div>
-                    <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono">
-                      <span>
-                        {ep.num_frames} frames ({ep.fps} FPS)
-                      </span>
-                      <span>{(ep.duration || 0).toFixed(1)}s</span>
-                    </div>
-                    {ep.feasible_window && (
-                      <div className="flex items-center gap-1.5 mt-0.5">
-                        {ep.feasible_window.is_trimmed ? (
-                          <span
-                            className="px-1.5 py-0.5 rounded text-[9.5px] bg-amber-500/10 text-amber-300 border border-amber-500/30 flex items-center gap-1 font-mono"
-                            title={`Auto-trimmed ${ep.feasible_window.start} leading / ${ep.feasible_window.total - ep.feasible_window.end} trailing out-of-reach frames`}
-                          >
-                            <span>✂️ Feasible: {ep.feasible_window.start}–{ep.feasible_window.end} ({ep.feasible_window.end - ep.feasible_window.start}f)</span>
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      <div
+                        className={`w-1.5 h-6 rounded-full shrink-0 transition-colors ${
+                          isSelected ? 'bg-indigo-500' : 'bg-transparent'
+                        }`}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-slate-200 shrink-0">
+                            #{ep.episode_index}
                           </span>
-                        ) : (
-                          <span className="px-1.5 py-0.5 rounded text-[9.5px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1 font-mono">
-                            <span>✓ 100% Feasible</span>
+                          <span className="text-xs text-slate-400 truncate">
+                            {ep.task || 'Demonstration'}
                           </span>
-                        )}
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-500 mt-0.5">
+                          <span>{(ep.duration || 0).toFixed(1)}s</span>
+                          <span>·</span>
+                          <span>{ep.num_frames}f</span>
+                          {ep.feasible_window?.is_trimmed && (
+                            <>
+                              <span>·</span>
+                              <span className="text-amber-400 font-sans text-[9px] px-1 py-0.2 rounded bg-amber-500/10 border border-amber-500/20">
+                                trimmed
+                              </span>
+                            </>
+                          )}
+                        </div>
                       </div>
-                    )}
+                    </div>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteEpisode(ep.episode_index);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-rose-400 p-1.5 rounded-lg hover:bg-slate-800 transition-all ml-1 shrink-0"
+                      title="Delete Episode"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 );
               })

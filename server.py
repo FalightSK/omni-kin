@@ -2072,6 +2072,32 @@ if __name__ == "__main__":
     import uvicorn
     import sys
     import threading
+    import logging
+    import copy
+
+    class EndpointLogFilter(logging.Filter):
+        """Filter out noisy polling endpoints (e.g. /api/processing/status) from uvicorn access logs."""
+        def filter(self, record: logging.LogRecord) -> bool:
+            if hasattr(record, "args") and isinstance(record.args, tuple) and len(record.args) >= 3:
+                req_path = str(record.args[2])
+                if any(noisy in req_path for noisy in [
+                    "/api/processing/status",
+                    "/api/mobile/qr",
+                    "/favicon.ico"
+                ]):
+                    return False
+            msg = record.getMessage()
+            if any(noisy in msg for noisy in ["/api/processing/status", "/api/mobile/qr", "/favicon.ico"]):
+                return False
+            return True
+
+    clean_log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+    clean_log_config["filters"] = {
+        "endpoint_filter": {
+            "()": EndpointLogFilter,
+        }
+    }
+    clean_log_config["handlers"]["access"]["filters"] = ["endpoint_filter"]
 
     local_ip = get_local_ip()
 
@@ -2122,7 +2148,8 @@ if __name__ == "__main__":
                 port=https_port,
                 ssl_keyfile=ssl_key,
                 ssl_certfile=ssl_cert,
-                log_level="warning"
+                log_level="warning",
+                log_config=clean_log_config
             )
             server_ssl = uvicorn.Server(config_ssl)
             server_ssl.run()
@@ -2131,8 +2158,8 @@ if __name__ == "__main__":
         ssl_thread.start()
 
         # Run HTTP on port 8000 in the main thread
-        uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
+        uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info", log_config=clean_log_config)
     else:
-        uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info")
+        uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info", log_config=clean_log_config)
 
 
