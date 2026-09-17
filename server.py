@@ -148,6 +148,15 @@ lerobot_exporter = LeRobotExporter(
     workspace_calibrator=workspace_calibrator
 )
 
+def safe_to_list(arr, fallback=None):
+    if arr is None:
+        arr = fallback
+    if arr is None:
+        return []
+    if hasattr(arr, 'tolist'):
+        return arr.tolist()
+    return list(arr)
+
 def save_episode_meta(ep_data):
     try:
         ep_uid = ep_data.get('episode_id')
@@ -214,7 +223,7 @@ def load_episodes_from_disk():
                     ep_data = {
                         'episode_index': len(loaded),
                         'episode_id': item,
-                        'task': 'reach to apple',
+                        'task': 'demonstration',
                         'video_path': video_path,
                         'video_url': f'/recordings/{item}/{video_filename}',
                         'dev_video_url': f'/recordings/{item}/dev_visualization.mp4',
@@ -226,7 +235,7 @@ def load_episodes_from_disk():
                         'anchor': 'aruco_feature_imu_fusion',
                         'marker_size_cm': 10.0,
                         'poses': poses.tolist(),
-                        'raw_poses': getattr(visual_tracker, 'last_raw_trajectory', poses).tolist(),
+                        'raw_poses': safe_to_list(getattr(visual_tracker, 'last_raw_trajectory', None), poses),
                         'ee_poses': poses.tolist(),
                         'gripper_states': [100.0] * len(poses),
                         'actions': actions.tolist(),
@@ -296,11 +305,50 @@ def _sync_execute_processing_job(job):
     ep_dir = job["ep_dir"]
     video_path = job["video_path"]
     video_url = job["video_url"]
-    task = job.get("task", "reach to apple")
+    task = job.get("task", "demonstration")
     parsed_imu = job.get("parsed_imu", [])
     raw_gripper_list = job.get("parsed_gripper", [])
 
     print(f"\n[{time.strftime('%H:%M:%S')}] ⚙️ Executing Server-Side Sensory Fusion for {ep_uid} ('{task}')...")
+
+    # 0. Ensure video is standardized H.264 MP4 for universal HTML5 playback and frame-accurate seeking
+    standard_mp4_path = os.path.join(ep_dir, "recording.mp4")
+    if not video_path.lower().endswith(".mp4") or not os.path.exists(standard_mp4_path):
+        try:
+            cap_trans = cv2.VideoCapture(video_path)
+            if cap_trans.isOpened():
+                trans_w = int(cap_trans.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
+                trans_h = int(cap_trans.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+                trans_fps = cap_trans.get(cv2.CAP_PROP_FPS) or 30.0
+                if trans_fps <= 0 or trans_fps > 120 or np.isnan(trans_fps):
+                    trans_fps = 30.0
+
+                tmp_trans = standard_mp4_path + ".tmp.mp4"
+                fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                trans_writer = cv2.VideoWriter(tmp_trans, fourcc, trans_fps, (trans_w, trans_h))
+                if not trans_writer.isOpened():
+                    trans_writer = cv2.VideoWriter(tmp_trans, cv2.VideoWriter_fourcc(*'mp4v'), trans_fps, (trans_w, trans_h))
+
+                trans_count = 0
+                while True:
+                    ret_f, f_data = cap_trans.read()
+                    if not ret_f:
+                        break
+                    trans_writer.write(f_data)
+                    trans_count += 1
+
+                cap_trans.release()
+                trans_writer.release()
+
+                if os.path.exists(tmp_trans) and os.path.getsize(tmp_trans) > 100:
+                    if os.path.exists(standard_mp4_path):
+                        os.remove(standard_mp4_path)
+                    os.replace(tmp_trans, standard_mp4_path)
+                    video_path = standard_mp4_path
+                    video_url = f"/recordings/{ep_uid}/recording.mp4"
+                    print(f"[{time.strftime('%H:%M:%S')}] 🎬 Transcoded {os.path.basename(job['video_path'])} to standard H.264 recording.mp4 ({trans_count} frames)")
+        except Exception as trans_err:
+            print(f"Warning transcoding uploaded video: {trans_err}")
 
     # 1. Inspect video frame count and FPS
     cap = cv2.VideoCapture(video_path)
@@ -393,7 +441,7 @@ def _sync_execute_processing_job(job):
         'anchor': 'aruco_feature_imu_fusion',
         'marker_size_cm': 10.0,
         'poses': anchored_poses.tolist(),
-        'raw_poses': getattr(visual_tracker, 'last_raw_trajectory', anchored_poses).tolist(),
+        'raw_poses': safe_to_list(getattr(visual_tracker, 'last_raw_trajectory', None), anchored_poses),
         'ee_poses': ee_poses.tolist(),
         'gripper_states': gripper_states,
         'actions': actions.tolist(),
@@ -955,7 +1003,7 @@ async def save_recording(
     video: UploadFile = File(...),
     imu_data: str = Form("[]"),
     gripper_data: str = Form("[]"),
-    task: str = Form("reach to apple")
+    task: str = Form("demonstration")
 ):
     """
     Receives raw sensor recording (video stream + high-frequency IMU telemetry) from mobile phone,
@@ -1032,7 +1080,7 @@ async def upload_recording_async(
     video: UploadFile = File(...),
     imu_data: str = Form("[]"),
     gripper_data: str = Form("[]"),
-    task: str = Form("reach to apple"),
+    task: str = Form("demonstration"),
     client_take_id: str = Form(None)
 ):
     """
@@ -1133,7 +1181,7 @@ async def get_processing_status():
     })
 
 @app.post("/api/recordings/sample")
-async def generate_sample_recording(task: str = "reach to apple", shape: str = "circle"):
+async def generate_sample_recording(task: str = "draw 3d circle", shape: str = "circle"):
     """
     Generates a synthetic 3D shape demonstration (e.g. 3D circle floating 20cm above ArUco marker).
     """
@@ -1383,7 +1431,7 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
     ee_poses = camera_gripper_calibrator.transform_trajectory(new_poses, to_gripper=True)
 
     target_ep['poses'] = new_poses.tolist()
-    target_ep['raw_poses'] = getattr(visual_tracker, 'last_raw_trajectory', new_poses).tolist()
+    target_ep['raw_poses'] = safe_to_list(getattr(visual_tracker, 'last_raw_trajectory', None), new_poses)
     target_ep['ee_poses'] = ee_poses.tolist()
     actions = np.roll(ee_poses, -1, axis=0)
     actions[-1] = ee_poses[-1]
@@ -1495,6 +1543,30 @@ async def generate_episode_dev_video(episode_index: int):
         "dev_video_url": dev_video_url,
         "canny_video_url": canny_video_url,
         "dev_telemetry": target_ep.get('dev_telemetry', [])
+    })
+
+@app.patch("/api/episodes/{episode_index}/task")
+async def update_episode_task(episode_index: int, payload: dict = Body(...)):
+    """
+    Updates the natural language task instruction for an episode, saving it to disk
+    in episode_meta.json and updating the in-memory database.
+    """
+    global EPISODES_DB
+    new_task = str(payload.get("task", "")).strip()
+    if not new_task:
+        return JSONResponse({"status": "error", "message": "Task prompt cannot be empty"}, status_code=400)
+
+    target_ep = next((e for e in EPISODES_DB if e['episode_index'] == episode_index), None)
+    if not target_ep:
+        return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+
+    target_ep['task'] = new_task
+    save_episode_meta(target_ep)
+    print(f"[{time.strftime('%H:%M:%S')}] 🏷️ Updated Episode #{episode_index} task prompt to: '{new_task}'")
+    return JSONResponse({
+        "status": "success",
+        "episode_index": episode_index,
+        "task": new_task
     })
 
 @app.get("/api/robot/config")
@@ -1638,6 +1710,143 @@ async def update_gripper_offset_endpoint(request: Request):
         return JSONResponse({
             "status": "error",
             "message": f"Failed to update gripper offset: {str(err)}"
+        }, status_code=400)
+
+@app.post("/api/robot/recalculate_trajectory")
+async def recalculate_trajectory_endpoint(request: Request):
+    """
+    Recalculates 3D end-effector TCP trajectories, action vectors, and inverse kinematics
+    feasibility for recorded episodes based on the latest active robot setup (placement offset,
+    gripper extrinsic calibration, initial standby position, and robot model DH specs).
+    """
+    global ROBOT_CONFIG, EPISODES_DB
+    try:
+        payload = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    except Exception:
+        payload = {}
+
+    try:
+        # 1. Optionally apply updated config from payload if provided
+        new_config = payload.get("robot_config") or payload.get("config")
+        if new_config and isinstance(new_config, dict):
+            if "robot_type" in new_config:
+                from robot_kinematics import normalize_robot_type
+                r_type = normalize_robot_type(new_config["robot_type"])
+                if r_type in ROBOT_PRESETS:
+                    ROBOT_CONFIG["robot_type"] = r_type
+            if "offset_x" in new_config:
+                ROBOT_CONFIG["offset_x"] = float(new_config["offset_x"])
+            if "offset_y" in new_config:
+                ROBOT_CONFIG["offset_y"] = float(new_config["offset_y"])
+            if "offset_z" in new_config:
+                ROBOT_CONFIG["offset_z"] = float(new_config["offset_z"])
+            if "yaw_deg" in new_config:
+                ROBOT_CONFIG["yaw_deg"] = float(new_config["yaw_deg"])
+            if "q3_safe_max_deg" in new_config:
+                ROBOT_CONFIG["q3_safe_max_deg"] = float(new_config["q3_safe_max_deg"])
+            if "initial_position" in new_config:
+                ROBOT_CONFIG["initial_position"] = new_config["initial_position"]
+            if "gripper_offset" in new_config and isinstance(new_config["gripper_offset"], dict):
+                if "gripper_offset" not in ROBOT_CONFIG:
+                    ROBOT_CONFIG["gripper_offset"] = {}
+                ROBOT_CONFIG["gripper_offset"].update(new_config["gripper_offset"])
+                camera_gripper_calibrator.update_config(**new_config["gripper_offset"])
+
+            save_robot_config(ROBOT_CONFIG)
+
+            workspace_calibrator.update_config(
+                offset_x=ROBOT_CONFIG["offset_x"],
+                offset_y=ROBOT_CONFIG["offset_y"],
+                offset_z=ROBOT_CONFIG["offset_z"],
+                yaw_deg=ROBOT_CONFIG["yaw_deg"]
+            )
+
+            lerobot_exporter.set_robot_config(
+                robot_type=ROBOT_CONFIG["robot_type"],
+                offset_x=ROBOT_CONFIG["offset_x"],
+                offset_y=ROBOT_CONFIG["offset_y"],
+                offset_z=ROBOT_CONFIG["offset_z"],
+                yaw_deg=ROBOT_CONFIG["yaw_deg"],
+                q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
+            )
+
+        # 2. Determine target episodes to recalculate
+        ep_idx = payload.get("episode_index")
+        target_episodes = []
+        if ep_idx is not None and not payload.get("all_episodes", False):
+            for ep in EPISODES_DB:
+                if ep.get("episode_index") == int(ep_idx):
+                    target_episodes.append(ep)
+                    break
+        if not target_episodes:
+            target_episodes = list(EPISODES_DB)
+
+        if not target_episodes:
+            return JSONResponse({
+                "status": "success",
+                "message": "No episodes to recalculate",
+                "episodes_updated": 0,
+                "config": ROBOT_CONFIG
+            })
+
+        # 3. Solver for IK evaluation
+        r_solver = get_robot_solver(
+            ROBOT_CONFIG.get("robot_type", "so101"),
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
+        )
+
+        updated_count = 0
+        for ep in target_episodes:
+            # Use raw_poses if available or poses
+            base_poses = ep.get("raw_poses") or ep.get("poses", [])
+            if not base_poses or len(base_poses) == 0:
+                continue
+
+            # Transform camera trajectory to Gripper TCP frame
+            ee_poses = camera_gripper_calibrator.transform_trajectory(base_poses, to_gripper=True)
+            ep['ee_poses'] = ee_poses.tolist()
+
+            # Next-step action waypoints
+            actions = np.roll(ee_poses, -1, axis=0)
+            actions[-1] = ee_poses[-1]
+            ep['actions'] = actions.tolist()
+            ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
+
+            # Compute IK feasibility metrics in robot base frame
+            poses_arr = np.asarray(ee_poses, dtype=np.float64)
+            robot_poses = workspace_calibrator.transform_trajectory(poses_arr, to_robot=True)
+            feasible_count = 0
+            errors = []
+            for p in robot_poses:
+                res = r_solver.solve_feasible_ik(p)
+                if res.get("is_feasible"):
+                    feasible_count += 1
+                errors.append(res.get("error_distance_cm", 0.0))
+
+            feasibility_pct = round(feasible_count / max(1, len(robot_poses)) * 100.0, 1)
+            avg_err_cm = round(float(np.mean(errors)) if errors else 0.0, 2)
+            ep['ik_feasibility'] = {
+                "feasible_percent": feasibility_pct,
+                "avg_error_cm": avg_err_cm
+            }
+
+            save_episode_meta(ep)
+            updated_count += 1
+
+        print(f"[{time.strftime('%H:%M:%S')}] 🔄 Recalculated trajectories for {updated_count} episode(s) based on active robot setup: {ROBOT_CONFIG.get('robot_type')} @ ({ROBOT_CONFIG.get('offset_x')}m, {ROBOT_CONFIG.get('offset_y')}m, Yaw={ROBOT_CONFIG.get('yaw_deg')}°)")
+
+        return JSONResponse({
+            "status": "success",
+            "message": f"Successfully recalculated trajectory for {updated_count} episode(s)",
+            "episodes_updated": updated_count,
+            "config": ROBOT_CONFIG,
+            "episodes": EPISODES_DB
+        })
+    except Exception as err:
+        print(f"[{time.strftime('%H:%M:%S')}] ❌ Error recalculating trajectory: {err}")
+        return JSONResponse({
+            "status": "error",
+            "message": f"Failed to recalculate trajectory: {str(err)}"
         }, status_code=400)
 
 @app.post("/api/robot/auto_align")

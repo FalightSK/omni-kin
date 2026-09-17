@@ -34,6 +34,7 @@ def find_feasible_window(ee_poses_robot, solver, max_err_cm=1.5):
     Evaluates inverse kinematics across Cartesian EE waypoints (in Robot Base Frame)
     and determines the contiguous active manipulation window [f_start, f_end] where
     the arm is physically reachable and not jammed against mechanical stops (r >= 17.6cm).
+    Uses robust contiguous segment detection to reject isolated boundary blips.
     """
     n = len(ee_poses_robot)
     if n == 0:
@@ -44,18 +45,18 @@ def find_feasible_window(ee_poses_robot, solver, max_err_cm=1.5):
         is_ok = res['is_feasible'] and res['error_distance_cm'] <= max_err_cm
         feasible.append(is_ok)
 
-    if not any(feasible):
+    arr = np.asarray(feasible, dtype=bool)
+    if not np.any(arr):
         return 0, n
 
-    f_start = 0
-    while f_start < n and not feasible[f_start]:
-        f_start += 1
-
-    f_end = n
-    while f_end > f_start and not feasible[f_end - 1]:
-        f_end -= 1
-
-    return f_start, f_end
+    # Find the longest contiguous block of feasible manipulation frames
+    padded = np.concatenate([[False], arr, [False]])
+    diffs = np.diff(padded.astype(int))
+    starts = np.where(diffs == 1)[0]
+    ends = np.where(diffs == -1)[0]
+    lengths = ends - starts
+    best_idx = np.argmax(lengths)
+    return int(starts[best_idx]), int(ends[best_idx])
 
 
 class LeRobotExporter:
@@ -103,7 +104,7 @@ class LeRobotExporter:
         When trajectory_mode == 'initial_aware', prepends a smooth quintic minimum-jerk
         approach trajectory from the canonical Initial Position (Home) to the start waypoint.
         """
-        raw_poses = ep.get('ee_poses') or ep.get('poses')
+        raw_poses = ep.get('ee_poses') if ep.get('ee_poses') is not None else ep.get('poses')
         gripper_states = ep.get('gripper_states')
         raw_joints = ep.get('joint_states')
 
@@ -179,6 +180,11 @@ class LeRobotExporter:
             joint_states = np.array(computed_joints, dtype=np.float32)
             joint_states[:, -1] = grippers
 
+        # 4b. Apply Universal Robot-Agnostic Joint Trajectory Smoother
+        # Smooths joint velocities, eliminates boundary vibration and hard-limit chatter across all DOF
+        if hasattr(self.ik_solver, "smooth_joint_trajectory") and len(joint_states) > 0:
+            joint_states = self.ik_solver.smooth_joint_trajectory(joint_states, fps=self.fps)
+
         # 5. Resolve Actions (Next-frame target joints)
         raw_actions = ep.get('actions')
         if raw_actions is not None and len(raw_actions) == orig_num_frames:
@@ -189,26 +195,11 @@ class LeRobotExporter:
                 actions = raw_act_arr
             if actions.shape[1] > 0 and np.max(actions[:, -1]) > 1.0 + 1e-3:
                 actions[:, -1] = np.clip(actions[:, -1] / 100.0, 0.0, 1.0)
+            if hasattr(self.ik_solver, "smooth_joint_trajectory") and len(actions) > 0:
+                actions = self.ik_solver.smooth_joint_trajectory(actions, fps=self.fps)
         else:
             actions = np.roll(joint_states, -1, axis=0)
             actions[-1] = joint_states[-1]
-
-        # 5b. Enforce Universal Camera Safe Ceiling on Wrist Pitch Joint
-        wrist_idx = getattr(self.ik_solver, "wrist_pitch_idx", 3)
-        collision_sign = getattr(self.ik_solver, "wrist_collision_sign", 1)
-        if len(joint_states) > 0 and joint_states.shape[1] > wrist_idx:
-            if collision_sign > 0:
-                wrist_violations = np.sum(joint_states[:, wrist_idx] > self.q3_safe_max_deg + 1e-2)
-                if wrist_violations > 0:
-                    print(f"[LeRobot Exporter] 🛡️ Clamping {wrist_violations}/{num_frames} frames on joint {wrist_idx} to <= {self.q3_safe_max_deg}° (Camera crash prevention)")
-                    joint_states[:, wrist_idx] = np.minimum(joint_states[:, wrist_idx], float(self.q3_safe_max_deg))
-                    actions[:, wrist_idx] = np.minimum(actions[:, wrist_idx], float(self.q3_safe_max_deg))
-            else:
-                wrist_violations = np.sum(joint_states[:, wrist_idx] < -self.q3_safe_max_deg - 1e-2)
-                if wrist_violations > 0:
-                    print(f"[LeRobot Exporter] 🛡️ Clamping {wrist_violations}/{num_frames} frames on joint {wrist_idx} to >= {-self.q3_safe_max_deg}° (Camera crash prevention)")
-                    joint_states[:, wrist_idx] = np.maximum(joint_states[:, wrist_idx], -float(self.q3_safe_max_deg))
-                    actions[:, wrist_idx] = np.maximum(actions[:, wrist_idx], -float(self.q3_safe_max_deg))
 
         # 6. Resolve Timestamps
         timestamps = np.linspace(0, num_frames / self.fps, num_frames, dtype=np.float32)

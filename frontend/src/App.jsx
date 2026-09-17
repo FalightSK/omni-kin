@@ -25,17 +25,17 @@ class ErrorBoundary extends Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="fixed inset-0 bg-slate-950 text-white flex flex-col items-center justify-center p-6 text-center z-50">
-          <div className="w-16 h-16 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 mb-4">
-            <AlertCircle className="w-8 h-8" />
+        <div className="fixed inset-0 bg-black text-white flex flex-col items-center justify-center p-6 text-center z-50">
+          <div className="w-14 h-14 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-200 mb-4 shadow-xl">
+            <AlertCircle className="w-6 h-6 text-rose-400" />
           </div>
-          <h2 className="text-lg font-bold mb-1">Application Error</h2>
-          <p className="text-xs text-slate-400 max-w-md mb-4">
-            {this.state.error?.message || 'An unexpected rendering error occurred.'}
+          <h2 className="text-base font-semibold text-neutral-100 mb-1 font-mono">Application Error</h2>
+          <p className="text-xs text-neutral-400 max-w-md mb-3 font-mono bg-neutral-950 p-2.5 rounded-lg border border-neutral-800 text-left overflow-auto max-h-36">
+            {this.state.error?.toString()}
           </p>
           <button
             onClick={() => window.location.reload()}
-            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs flex items-center gap-2"
+            className="px-4 py-2 rounded-xl bg-white hover:bg-neutral-200 text-black font-semibold text-xs flex items-center gap-2 transition-all shadow-sm"
           >
             <RefreshCw className="w-3.5 h-3.5" />
             <span>Reload Application</span>
@@ -149,7 +149,7 @@ export default function App() {
 
   const handleAddSample = async () => {
     try {
-      await fetch('/api/recordings/sample?shape=circle', { method: 'POST' });
+      await fetch('/api/recordings/sample?task=draw%203d%20circle&shape=circle', { method: 'POST' });
       fetchEpisodes();
     } catch (err) {
       console.error(err);
@@ -175,17 +175,36 @@ export default function App() {
     );
   };
 
+  const handleUpdateEpisodeTask = async (episodeIndex, newTask) => {
+    try {
+      const res = await fetch(`/api/episodes/${episodeIndex}/task`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: newTask })
+      });
+      if (res.ok) {
+        setEpisodes((prev) =>
+          prev.map((ep) =>
+            ep.episode_index === episodeIndex ? { ...ep, task: newTask } : ep
+          )
+        );
+      }
+    } catch (err) {
+      console.error('Failed to update episode task prompt', err);
+    }
+  };
+
   return (
     <ErrorBoundary>
       {currentView === 'mobile' ? (
-        <div className="w-screen h-[100dvh] bg-black text-gray-100 font-sans overflow-hidden select-none">
+        <div className="w-screen h-[100dvh] bg-black text-neutral-100 font-sans overflow-hidden select-none">
           <MobileLogger
             onUploadSuccess={fetchEpisodes}
             onExit={() => setCurrentView('dashboard')}
           />
         </div>
       ) : (
-        <div className="min-h-screen bg-[#060911] text-gray-100 flex flex-col font-sans">
+        <div className="min-h-screen bg-black text-neutral-200 flex flex-col font-sans">
           <Navbar
             currentView={currentView}
             setCurrentView={setCurrentView}
@@ -207,9 +226,11 @@ export default function App() {
               onDeleteEpisode={handleDeleteEpisode}
               onClearAllEpisodes={handleClearAllEpisodes}
               onUpdateEpisodePoses={handleReprocessComplete}
+              onUpdateEpisodeTask={handleUpdateEpisodeTask}
               robotConfig={robotConfig}
               onUpdateRobotConfig={(newCfg) => setRobotConfig(newCfg)}
               onOpenRobotModal={handleOpenRobotModal}
+              onOpenEkfModal={() => setIsEkfModalOpen(true)}
               trajectoryMode={trajectoryMode}
               setTrajectoryMode={setTrajectoryMode}
             />
@@ -227,7 +248,10 @@ export default function App() {
             onClose={() => setIsRobotModalOpen(false)}
             robotConfig={robotConfig}
             initialTab={robotModalTab}
-            onConfigSaved={(newConfig) => setRobotConfig(newConfig)}
+            onConfigSaved={(newConfig) => {
+              setRobotConfig(newConfig);
+              fetchEpisodes();
+            }}
           />
 
           <ConnectPhoneModal

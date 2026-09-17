@@ -2014,6 +2014,7 @@ class VisualInertialTracker:
         num_frames = frame_idx
         if num_frames == 0:
             synth = self.generate_synthetic_anchored_trajectory()
+            self.last_raw_trajectory = synth.copy()
             if return_dev_info:
                 return synth, []
             return synth

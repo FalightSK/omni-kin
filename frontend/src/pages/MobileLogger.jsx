@@ -14,15 +14,17 @@ import {
   Minimize2,
   RotateCw,
   Hand,
-  UploadCloud
+  UploadCloud,
+  Scan
 } from 'lucide-react';
 
-const TASK_MODES = [
-  { id: 'draw 3d circle', label: 'CIRCLE' },
-  { id: 'reach to apple', label: 'APPLE' },
-  { id: 'reach to banana', label: 'BANANA' },
-  { id: 'pick up cup', label: 'PICK CUP' },
-  { id: 'custom', label: 'CUSTOM' }
+const QUICK_TASK_SUGGESTIONS = [
+  'pick cup',
+  'wipe table',
+  'open drawer',
+  'draw 3d circle',
+  'insert peg',
+  'fold cloth'
 ];
 
 export default function MobileLogger({ onUploadSuccess, onExit }) {
@@ -30,8 +32,20 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const containerRef = useRef(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [activeModeIdx, setActiveModeIdx] = useState(0);
-  const [customTask, setCustomTask] = useState('');
+  const [taskPrompt, setTaskPrompt] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('omnikin_task_prompt') || 'pick cup';
+    }
+    return 'pick cup';
+  });
+
+  const handleTaskPromptChange = (val) => {
+    setTaskPrompt(val);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('omnikin_task_prompt', val);
+    }
+  };
+
   const [statusMsg, setStatusMsg] = useState('');
   const [recTime, setRecTime] = useState('00:00.0');
   const [imuHz, setImuHz] = useState(0);
@@ -39,6 +53,24 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const [accelData, setAccelData] = useState([0, 0, 9.81]);
   const [focusPoint, setFocusPoint] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Preview Framing Mode: 'fit' = 100% full sensor FOV (letterbox, zero crop); 'fill' = screen cover (cropped edges)
+  const [previewMode, setPreviewMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('omnikin_preview_mode') || 'fit';
+    }
+    return 'fit';
+  });
+
+  const togglePreviewMode = () => {
+    setPreviewMode((prev) => {
+      const next = prev === 'fit' ? 'fill' : 'fit';
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('omnikin_preview_mode', next);
+      }
+      return next;
+    });
+  };
 
   // 1-Hand Gripper State & Telemetry Logging
   const [gripperOpen, setGripperOpen] = useState(true); // true = 100% open, false = 0% closed
@@ -217,7 +249,13 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        videoRef.current.muted = true;
+        videoRef.current.playsInline = true;
+        try {
+          await videoRef.current.play();
+        } catch (playErr) {
+          console.warn('Video play deferred until user interaction:', playErr);
+        }
       }
 
       // Re-enumerate devices now that camera permission is granted
@@ -346,21 +384,36 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
       formData.append('task', item.task);
       formData.append('client_take_id', item.id);
 
-      try {
-        const res = await fetch('/api/recordings/upload', {
-          method: 'POST',
-          body: formData
-        });
-        const data = await res.json();
-        if (data.status === 'queued') {
-          console.log(`[OmniKin] Take ${item.id} enqueued on server at position ${data.queue_position}`);
-          if (onUploadSuccess) onUploadSuccess();
+      let success = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const res = await fetch('/api/recordings/upload', {
+            method: 'POST',
+            body: formData
+          });
+          const data = await res.json();
+          if (res.ok && data.status === 'queued') {
+            console.log(`[OmniKin] Take ${item.id} enqueued on server at position ${data.queue_position}`);
+            if (onUploadSuccess) onUploadSuccess();
+            success = true;
+            break;
+          } else {
+            console.warn(`[OmniKin] Server returned non-queued status on attempt ${attempt + 1}:`, data);
+          }
+        } catch (err) {
+          console.warn(`[OmniKin] Upload attempt ${attempt + 1} failed:`, err);
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
         }
-      } catch (err) {
-        console.error('Failed uploading take to server:', err);
-      } finally {
+      }
+
+      if (success) {
         uploadQueueRef.current.shift();
         setQueueCount(uploadQueueRef.current.length);
+      } else {
+        console.error(`[OmniKin] Take ${item.id} failed after 3 attempts. Will retry later.`);
+        setUploadStatus('Upload paused, retrying soon...');
+        await new Promise((r) => setTimeout(r, 3000));
+        break;
       }
     }
 
@@ -368,9 +421,12 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     setUploadStatus('');
   };
 
+  const activeTakeChunksRef = useRef([]);
+
   const startRecording = () => {
     if (!videoRef.current || !videoRef.current.srcObject) return;
-    recordedChunksRef.current = [];
+    const sessionChunks = [];
+    activeTakeChunksRef.current = sessionChunks;
     imuDataRef.current = [];
     gripperDataRef.current = [{ t: 0.0, val: gripperValRef.current }];
     startTimeRef.current = performance.timeOrigin + performance.now();
@@ -398,7 +454,9 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     mediaRecorderRef.current = mediaRecorder;
 
     mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+      if (e.data && e.data.size > 0) {
+        sessionChunks.push(e.data);
+      }
     };
 
     // 1000ms timeslice allows mobile hardware encoders to produce coherent GOP blocks without stalling the main thread
@@ -424,17 +482,17 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     const mediaRecorder = mediaRecorderRef.current;
     if (!mediaRecorder) return;
 
-    // Snapshot current sensor logs
+    // Snapshot current sensor logs and session chunk array
     const currentImu = [...imuDataRef.current];
     const currentGripper = [...gripperDataRef.current];
-    const selectedMode = TASK_MODES[activeModeIdx];
-    const currentTask = selectedMode?.id === 'custom' ? customTask || 'custom motion' : (selectedMode?.id || 'reach to object');
+    const currentTask = taskPrompt.trim() || 'demonstration';
+    const currentChunks = activeTakeChunksRef.current;
 
     mediaRecorder.stop();
     mediaRecorder.onstop = () => {
-      const mimeType = recordedChunksRef.current[0]?.type || 'video/webm';
+      const mimeType = currentChunks[0]?.type || mediaRecorder.mimeType || 'video/webm';
       const ext = mimeType.includes('mp4') ? '.mp4' : '.webm';
-      const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+      const blob = new Blob(currentChunks, { type: mimeType });
 
       const takeItem = {
         id: `take_${Date.now()}`,
@@ -477,7 +535,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isRecording, isCameraActive, activeModeIdx, customTask]);
+  }, [isRecording, isCameraActive, taskPrompt]);
 
   const handleTapViewfinder = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -492,17 +550,19 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
       ref={containerRef}
       className="fixed inset-0 w-screen h-[100dvh] bg-black select-none overflow-hidden touch-manipulation z-50 flex flex-col justify-between"
     >
-      {/* Background Fullscreen Edge-to-Edge Video Feed */}
+      {/* Background Fullscreen Video Feed (Supports 'fit' for 100% full sensor FOV or 'fill' for screen crop) */}
       <div
         onClick={handleTapViewfinder}
-        className="absolute inset-0 w-full h-full bg-black overflow-hidden cursor-crosshair z-0"
+        className="absolute inset-0 w-full h-full bg-black overflow-hidden cursor-crosshair z-0 flex items-center justify-center"
       >
         <video
           ref={videoRef}
           autoPlay
           playsInline
           muted
-          className="w-full h-full object-cover"
+          className={`w-full h-full transition-all duration-300 ${
+            previewMode === 'fit' ? 'object-contain' : 'object-cover'
+          }`}
         />
 
         {/* Tap-to-Focus Reticle Effect */}
@@ -512,29 +572,43 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
             className="absolute w-14 h-14 border-2 border-amber-400 rounded-lg pointer-events-none animate-ping"
           />
         )}
+
+        {/* Framing border indicator when in 100% FOV Fit mode */}
+        {previewMode === 'fit' && isCameraActive && (
+          <div className="absolute inset-2 border border-white/10 rounded-xl pointer-events-none flex flex-col justify-between p-2">
+            <div className="flex justify-between text-[9px] font-mono text-neutral-500 uppercase tracking-widest">
+              <span>┌ FOV 100%</span>
+              <span>┐</span>
+            </div>
+            <div className="flex justify-between text-[9px] font-mono text-neutral-500 uppercase tracking-widest">
+              <span>└ FULL SENSOR</span>
+              <span>┘</span>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Floating Status / Notification Toast */}
       {statusMsg && (
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 px-4 py-1.5 bg-slate-900/90 backdrop-blur-md border border-indigo-500/50 rounded-full text-xs font-semibold text-indigo-200 shadow-2xl flex items-center gap-2 animate-fade-in">
-          <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 px-4 py-1.5 bg-[#0a0a0a]/95 backdrop-blur-md border border-neutral-700 rounded-full text-xs font-semibold text-neutral-200 shadow-2xl flex items-center gap-2 animate-fade-in font-mono">
+          <Sparkles className="w-3.5 h-3.5 text-neutral-300" />
           <span>{statusMsg}</span>
         </div>
       )}
 
       {/* Real-time Telemetry Floating HUD (Toggled via Activity button) */}
       {showTelemetry && (
-        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-40 bg-black/80 backdrop-blur-md border border-white/20 rounded-xl p-2.5 text-[10px] font-mono text-slate-300 flex gap-4 shadow-xl">
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-40 bg-black/85 backdrop-blur-md border border-neutral-700 rounded-xl p-2.5 text-[10px] font-mono text-neutral-300 flex gap-4 shadow-xl">
           <div>
-            <span className="text-slate-500 block uppercase text-[8px]">IMU Rate</span>
+            <span className="text-neutral-500 block uppercase text-[8px]">IMU Rate</span>
             <span className="text-emerald-400 font-bold">{imuHz} Hz</span>
           </div>
           <div>
-            <span className="text-slate-500 block uppercase text-[8px]">Accel X (Horizontal Gravity)</span>
+            <span className="text-neutral-500 block uppercase text-[8px]">Accel X (Horizontal Gravity)</span>
             <span className="text-amber-400 font-bold">{accelData[0].toFixed(2)} m/s²</span>
           </div>
           <div>
-            <span className="text-slate-500 block uppercase text-[8px]">Accel Y, Z</span>
+            <span className="text-neutral-500 block uppercase text-[8px]">Accel Y, Z</span>
             <span>
               {accelData[1].toFixed(1)}, {accelData[2].toFixed(1)}
             </span>
@@ -545,46 +619,50 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
       {/* Initial Camera Permission Splash (If camera not active) */}
       {!isCameraActive && (
         <div className="absolute inset-0 z-50 bg-black/95 backdrop-blur-xl flex flex-col items-center justify-center p-6 text-center gap-5">
-          <div className="w-20 h-20 rounded-3xl bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center shadow-2xl shadow-indigo-600/40">
-            <Camera className="w-10 h-10 text-white" />
+          <div className="w-16 h-16 rounded-2xl bg-neutral-900 border border-neutral-800 flex items-center justify-center text-white shadow-2xl">
+            <Camera className="w-8 h-8 text-neutral-300" />
           </div>
 
           <div className="max-w-xs">
-            <h2 className="text-lg font-bold text-white tracking-wide">3D Motion Camera</h2>
-            <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+            <h2 className="text-sm font-semibold text-white uppercase tracking-wider font-mono">3D Motion Camera</h2>
+            <p className="text-xs text-neutral-400 mt-1.5 leading-relaxed">
               Hold horizontally over your workspace. Aligned for 16:9 table manipulation capture (Ax ≈ ±9.8 m/s²).
             </p>
           </div>
 
           {typeof window !== 'undefined' && !window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' ? (
-            <div className="w-full max-w-xs bg-amber-500/15 border border-amber-500/40 rounded-2xl p-4 text-xs text-amber-200 text-left flex flex-col gap-3 shadow-xl">
-              <div className="flex items-center gap-2 text-amber-300 font-bold text-sm">
-                <AlertCircle className="w-5 h-5 text-amber-400 shrink-0" />
+            <div className="w-full max-w-xs bg-neutral-950/90 border border-neutral-800 rounded-2xl p-4 text-xs text-neutral-200 text-left flex flex-col gap-3 shadow-xl">
+              <div className="flex items-center gap-2 text-neutral-200 font-semibold text-xs font-mono uppercase">
+                <AlertCircle className="w-4 h-4 text-neutral-400 shrink-0" />
                 <span>HTTPS Required for Camera</span>
               </div>
-              <p className="text-slate-300 text-[11px] leading-relaxed">
-                Mobile browsers (iOS Safari / Android Chrome) block camera and sensors on HTTP. Tap below to switch to encrypted HTTPS (Port 8443):
+              <p className="text-neutral-400 text-[11px] leading-relaxed">
+                Mobile browsers block camera and sensors on HTTP. Switch to encrypted HTTPS (Port 8443):
               </p>
               <a
                 href={`https://${window.location.hostname}:8443/mobile`}
-                className="w-full py-3 px-4 bg-gradient-to-r from-amber-500 to-orange-500 text-black font-bold rounded-xl text-center text-xs tracking-wide shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2"
+                className="w-full py-2.5 px-4 bg-white hover:bg-neutral-200 text-black font-semibold rounded-xl text-center text-xs tracking-wide shadow-md active:scale-95 transition-all flex items-center justify-center gap-2 uppercase font-mono"
               >
-                <Sparkles className="w-4 h-4" />
-                <span>SWITCH TO SECURE CAMERA</span>
+                <span>Switch to Secure HTTPS</span>
               </a>
-              <div className="bg-black/50 rounded-xl p-3 border border-amber-500/20 text-[11px] text-slate-300 space-y-1">
-                <p className="font-semibold text-amber-300">Self-Signed Cert Steps:</p>
-                <p>• <strong>Chrome:</strong> Tap "Advanced" &gt; "Proceed to {window.location.hostname} (unsafe)"</p>
-                <p>• <strong>Safari:</strong> Tap "Show Details" &gt; "visit this website" &gt; "Visit Website"</p>
+              <div className="bg-neutral-900 rounded-xl p-2.5 border border-neutral-800 text-[10px] text-neutral-400 space-y-1">
+                <p className="font-semibold text-neutral-300">Self-Signed Cert Steps:</p>
+                <p>• <strong>Chrome:</strong> Tap "Advanced" &gt; "Proceed (unsafe)"</p>
+                <p>• <strong>Safari:</strong> Tap "Show Details" &gt; "visit this website"</p>
               </div>
             </div>
           ) : (
-            <button
-              onClick={() => startCamera()}
-              className="w-full max-w-xs py-4 rounded-2xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-sm shadow-xl shadow-indigo-600/40 active:scale-95 transition-all flex items-center justify-center gap-2"
-            >
-              <span>LAUNCH CAMERA & FULLSCREEN</span>
-            </button>
+            <div className="w-full max-w-xs flex flex-col gap-2">
+              <button
+                onClick={() => startCamera()}
+                className="w-full py-3.5 rounded-xl bg-white hover:bg-neutral-200 text-black font-semibold text-xs tracking-wide shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2 uppercase font-mono"
+              >
+                <span>Launch Camera</span>
+              </button>
+              <p className="text-[10px] text-neutral-500 font-mono text-center">
+                💡 Tip: Tap "Add to Home Screen" in Safari/Chrome to run in 100% native fullscreen without browser bars.
+              </p>
+            </div>
           )}
 
           {statusMsg && (
@@ -610,7 +688,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         >
           {/* LEFT EDGE: STATUS & SECONDARY CONTROLS */}
           <div className="w-20 h-full flex flex-col justify-between items-center py-2 pointer-events-auto select-none">
-            {/* Top Left: Exit & Fullscreen */}
+            {/* Top Left: Exit, Fullscreen & Preview Fit/Fill Mode */}
             <div className="flex flex-col items-center gap-2">
               <button
                 onClick={onExit}
@@ -627,6 +705,19 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
               >
                 {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
               </button>
+
+              <button
+                onClick={togglePreviewMode}
+                className={`h-7 px-2 rounded-full backdrop-blur-md border flex items-center gap-1 text-[10px] font-mono transition-all shadow-lg ${
+                  previewMode === 'fit'
+                    ? 'bg-white text-black border-white font-semibold'
+                    : 'bg-black/60 text-white/80 border-white/20'
+                }`}
+                title={previewMode === 'fit' ? 'Showing 100% full sensor FOV (Fit). Tap for Fill Screen.' : 'Showing Fill Screen (Cropped). Tap for 100% full sensor FOV.'}
+              >
+                <Scan className="w-3 h-3" />
+                <span>{previewMode === 'fit' ? 'FIT' : 'FILL'}</span>
+              </button>
             </div>
 
             {/* Center Left: Recording Timer, Status Badge & Upload Queue */}
@@ -638,15 +729,15 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
                 </div>
               ) : (
                 <div className="bg-black/60 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/15 flex items-center gap-1.5">
-                  <span className={`w-2 h-2 rounded-full ${isCameraActive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+                  <span className={`w-2 h-2 rounded-full ${isCameraActive ? 'bg-emerald-400 animate-pulse' : 'bg-neutral-600'}`} />
                   <span className="text-[10px] font-semibold text-white/90 font-mono">{imuHz} Hz</span>
                 </div>
               )}
 
               {queueCount > 0 && (
-                <div className="bg-indigo-950/90 backdrop-blur-md px-2.5 py-1 rounded-full border border-indigo-500/40 flex items-center gap-1.5 shadow-lg animate-pulse">
-                  <UploadCloud className="w-3.5 h-3.5 text-indigo-400" />
-                  <span className="text-[10px] font-mono text-indigo-200 font-bold">{queueCount} in queue</span>
+                <div className="bg-[#0a0a0a]/90 backdrop-blur-md px-2.5 py-1 rounded-full border border-neutral-700 flex items-center gap-1.5 shadow-lg animate-pulse">
+                  <UploadCloud className="w-3.5 h-3.5 text-neutral-300" />
+                  <span className="text-[10px] font-mono text-neutral-200 font-bold">{queueCount} in queue</span>
                 </div>
               )}
             </div>
@@ -656,7 +747,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
               <button
                 onClick={() => setShowTelemetry(!showTelemetry)}
                 className={`w-10 h-10 rounded-full backdrop-blur-md border flex items-center justify-center transition-all ${
-                  showTelemetry ? 'bg-indigo-600 text-white border-indigo-400' : 'bg-black/60 text-white/80 border-white/20'
+                  showTelemetry ? 'bg-white text-black border-white shadow-sm' : 'bg-black/60 text-white/80 border-white/20'
                 }`}
                 title="Toggle Sensor HUD"
               >
@@ -669,7 +760,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
                   className="h-10 px-3 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1.5 text-white active:scale-90 transition-all shadow-lg text-xs"
                   title="Switch Camera"
                 >
-                  <SwitchCamera className="w-4 h-4 text-indigo-400" />
+                  <SwitchCamera className="w-4 h-4 text-neutral-300" />
                   <span className="font-mono text-[11px] font-semibold">
                     {currentDeviceIdx + 1}/{devices.length}
                   </span>
@@ -678,44 +769,49 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
             </div>
           </div>
 
-          {/* CENTER TOP: CUSTOM TASK PROMPT INPUT */}
-          {TASK_MODES[activeModeIdx]?.id === 'custom' && (
-            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 pointer-events-auto w-72">
+          {/* CENTER TOP: TASK PROMPT INPUT & QUICK SUGGESTIONS */}
+          <div className="absolute top-2.5 left-1/2 -translate-x-1/2 z-30 pointer-events-auto flex flex-col items-center gap-1.5 max-w-[420px] w-full px-4">
+            <div className="w-full relative flex items-center bg-black/80 backdrop-blur-md border border-neutral-700 rounded-full px-3.5 py-1.5 shadow-2xl focus-within:border-white transition-colors">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 mr-2 shrink-0">TASK:</span>
               <input
                 type="text"
-                placeholder="Type task prompt..."
-                value={customTask}
-                onChange={(e) => setCustomTask(e.target.value)}
-                className="w-full bg-black/80 backdrop-blur-md border border-white/30 rounded-full px-4 py-1.5 text-xs text-white placeholder-slate-400 outline-none text-center shadow-xl focus:border-indigo-400 transition-colors"
+                placeholder="e.g. pick up cup, wipe table..."
+                value={taskPrompt}
+                onChange={(e) => handleTaskPromptChange(e.target.value)}
+                disabled={isRecording}
+                className="w-full bg-transparent text-xs text-white placeholder-neutral-500 outline-none font-medium"
               />
-            </div>
-          )}
-
-          {/* RIGHT EDGE: THUMB ERGONOMIC STRIP (MODES + CIRCULAR SHUTTER) */}
-          <div className="w-28 h-full flex flex-col justify-center items-center gap-3 py-2 pointer-events-auto select-none">
-            {/* Task Mode Carousel Tabs (Right Next to Thumb) */}
-            <div className="flex flex-col items-center gap-1.5 bg-black/40 backdrop-blur-md p-1.5 rounded-2xl border border-white/10">
-              {TASK_MODES.map((mode, idx) => {
-                const isSelected = idx === activeModeIdx;
-                return (
-                  <button
-                    key={mode.id}
-                    onClick={() => {
-                      if (!isRecording) setActiveModeIdx(idx);
-                    }}
-                    disabled={isRecording}
-                    className={`px-2 py-0.5 rounded-lg text-[10px] font-bold tracking-wider transition-all whitespace-nowrap ${
-                      isSelected
-                        ? 'bg-amber-500/90 text-black shadow-md shadow-amber-500/30 font-extrabold'
-                        : 'text-slate-300 hover:text-white hover:bg-white/10'
-                    }`}
-                  >
-                    {mode.label}
-                  </button>
-                );
-              })}
+              {taskPrompt && !isRecording && (
+                <button
+                  onClick={() => handleTaskPromptChange('')}
+                  className="text-neutral-500 hover:text-white text-xs px-1"
+                >
+                  ×
+                </button>
+              )}
             </div>
 
+            {/* Quick Suggestion Chips */}
+            <div className="flex items-center gap-1.5 overflow-x-auto max-w-full py-0.5 no-scrollbar">
+              {QUICK_TASK_SUGGESTIONS.map((sug) => (
+                <button
+                  key={sug}
+                  onClick={() => handleTaskPromptChange(sug)}
+                  disabled={isRecording}
+                  className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono transition-all whitespace-nowrap border ${
+                    taskPrompt.toLowerCase() === sug.toLowerCase()
+                      ? 'bg-white text-black font-semibold border-white'
+                      : 'bg-black/60 text-neutral-400 hover:text-white border-neutral-800 hover:border-neutral-600'
+                  }`}
+                >
+                  {sug}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* RIGHT EDGE: THUMB ERGONOMIC STRIP (GRIPPER + CIRCULAR SHUTTER) */}
+          <div className="w-28 h-full flex flex-col justify-center items-center gap-4 py-2 pointer-events-auto select-none">
             {/* Thumb Gripper Toggle Button (1-Handed Manipulation) */}
             <button
               onClick={toggleGripper}
@@ -780,29 +876,42 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
                     ArUco Ready ({imuHz} Hz)
                   </div>
                   {queueCount > 0 && (
-                    <div className="bg-indigo-950/90 px-2.5 py-1 rounded-full border border-indigo-500/40 text-[10px] font-mono text-indigo-300 flex items-center gap-1 animate-pulse">
-                      <UploadCloud className="w-3 h-3 text-indigo-400" />
+                    <div className="bg-[#0a0a0a]/90 px-2.5 py-1 rounded-full border border-neutral-700 text-[10px] font-mono text-neutral-200 flex items-center gap-1 animate-pulse">
+                      <UploadCloud className="w-3 h-3 text-neutral-300" />
                       <span>{queueCount}</span>
                     </div>
                   )}
                 </div>
               )}
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={togglePreviewMode}
+                  className={`h-9 px-2.5 rounded-full backdrop-blur-md border flex items-center gap-1 text-[10px] font-mono transition-all ${
+                    previewMode === 'fit'
+                      ? 'bg-white text-black border-white font-semibold'
+                      : 'bg-black/60 text-white/80 border-white/20'
+                  }`}
+                  title={previewMode === 'fit' ? 'Showing 100% full sensor FOV (Fit). Tap for Fill Screen.' : 'Showing Fill Screen (Cropped). Tap for 100% full sensor FOV.'}
+                >
+                  <Scan className="w-3.5 h-3.5" />
+                  <span>{previewMode === 'fit' ? '100% FOV' : 'FILL'}</span>
+                </button>
+
                 {devices.length > 1 && (
                   <button
                     onClick={switchCamera}
-                    className="h-10 px-2.5 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1 text-white active:scale-90 transition-all text-xs"
+                    className="h-9 px-2 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center gap-1 text-white active:scale-90 transition-all text-xs"
                     title="Switch Camera"
                   >
-                    <SwitchCamera className="w-4 h-4 text-indigo-400" />
+                    <SwitchCamera className="w-3.5 h-3.5 text-neutral-300" />
                     <span className="font-mono text-[10px]">{currentDeviceIdx + 1}/{devices.length}</span>
                   </button>
                 )}
 
                 <button
                   onClick={toggleFullscreen}
-                  className="w-10 h-10 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center justify-center text-white"
+                  className="w-9 h-9 rounded-full bg-black/60 backdrop-blur-md border border-white/20 flex items-center justify-center text-white"
                 >
                   {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
                 </button>
@@ -810,29 +919,55 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
             </div>
 
             {/* Rotation Hint Banner */}
-            <div className="bg-amber-500/20 backdrop-blur-md border border-amber-500/40 rounded-xl px-3 py-1.5 flex items-center justify-center gap-2 text-[11px] text-amber-200">
-              <RotateCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+            <div className="bg-neutral-900/90 backdrop-blur-md border border-neutral-800 rounded-xl px-3 py-1.5 flex items-center justify-center gap-2 text-[11px] text-neutral-300">
+              <RotateCw className="w-3.5 h-3.5 animate-spin text-neutral-400" />
               <span>Rotate phone horizontally for 16:9 table capture</span>
+            </div>
+
+            {/* Task Prompt Input & Quick Suggestions (Portrait) */}
+            <div className="flex flex-col items-center gap-1.5 w-full mt-1">
+              <div className="w-full relative flex items-center bg-black/80 backdrop-blur-md border border-neutral-700 rounded-full px-3.5 py-1 shadow-xl focus-within:border-white transition-colors">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 mr-2 shrink-0">TASK:</span>
+                <input
+                  type="text"
+                  placeholder="e.g. pick up cup, wipe table..."
+                  value={taskPrompt}
+                  onChange={(e) => handleTaskPromptChange(e.target.value)}
+                  disabled={isRecording}
+                  className="w-full bg-transparent text-xs text-white placeholder-neutral-500 outline-none font-medium"
+                />
+                {taskPrompt && !isRecording && (
+                  <button
+                    onClick={() => handleTaskPromptChange('')}
+                    className="text-neutral-500 hover:text-white text-xs px-1"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+
+              {/* Quick Suggestion Chips */}
+              <div className="flex items-center gap-1.5 overflow-x-auto max-w-full py-0.5 no-scrollbar">
+                {QUICK_TASK_SUGGESTIONS.map((sug) => (
+                  <button
+                    key={sug}
+                    onClick={() => handleTaskPromptChange(sug)}
+                    disabled={isRecording}
+                    className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono transition-all whitespace-nowrap border ${
+                      taskPrompt.toLowerCase() === sug.toLowerCase()
+                        ? 'bg-white text-black font-semibold border-white'
+                        : 'bg-black/60 text-neutral-400 hover:text-white border-neutral-800 hover:border-neutral-600'
+                    }`}
+                  >
+                    {sug}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
           {/* Bottom Portrait Shutter Bar */}
           <div className="pb-6 flex flex-col items-center gap-3 pointer-events-auto">
-            {/* Mode Tabs */}
-            <div className="flex gap-2 text-xs font-bold">
-              {TASK_MODES.map((mode, idx) => (
-                <button
-                  key={mode.id}
-                  onClick={() => setActiveModeIdx(idx)}
-                  className={`px-2.5 py-1 rounded-full ${
-                    idx === activeModeIdx ? 'bg-amber-400 text-black font-extrabold' : 'text-slate-400'
-                  }`}
-                >
-                  {mode.label}
-                </button>
-              ))}
-            </div>
-
             {/* Controls: Gripper Toggle + Circular Shutter */}
             <div className="flex items-center gap-4">
               <button

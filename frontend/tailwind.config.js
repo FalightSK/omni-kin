@@ -8,9 +8,9 @@ export default {
     extend: {
       colors: {
         dark: {
-          bg: '#060911',
-          card: 'rgba(15, 23, 42, 0.85)',
-          border: 'rgba(255, 255, 255, 0.1)',
+          bg: '#000000',
+          card: 'rgba(10, 10, 10, 0.92)',
+          border: 'rgba(255, 255, 255, 0.08)',
         }
       },
       fontFamily: {

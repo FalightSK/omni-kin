@@ -8,6 +8,7 @@ import os
 import numpy as np
 import xml.etree.ElementTree as ET
 from scipy.spatial.transform import Rotation as R
+import scipy.signal
 
 R_CAM_TO_PHONE = np.diag([1.0, -1.0, -1.0])
 
@@ -224,6 +225,48 @@ def dh_transform(theta_rad, d, a, alpha_rad):
         [0.0,    sin_a,          cos_a,         d        ],
         [0.0,    0.0,            0.0,           1.0      ]
     ], dtype=np.float64)
+
+
+def universal_soft_saturation(val, lower, upper, margin=None, margin_ratio=0.08):
+    """
+    Universal C^2-continuous soft-barrier clamping for arbitrary robot joints.
+    
+    Replaces sharp non-differentiable piecewise clipping (min/max/clip) which causes 
+    infinite acceleration spikes and motor buzzing/chattering at mechanical limits.
+    
+    Guarantees:
+      - 100% identity mapping f(q) = q in the interior safe working zone.
+      - Smooth C^2 hyperbolic tangent deceleration into boundaries.
+      - Absolute mathematical containment strictly within [lower, upper].
+      - Continuous velocity and bounded acceleration across limits.
+      - Fully embodiment-agnostic: works across arbitrary DOF counts, joint ranges,
+        units (rad/deg), and coordinate conventions.
+    """
+    val_arr = np.asarray(val, dtype=np.float64)
+    span = float(upper - lower)
+    if span <= 1e-6:
+        return np.full_like(val_arr, lower) if isinstance(val, np.ndarray) else float(lower)
+
+    delta = float(margin) if margin is not None else max(1e-4, span * margin_ratio)
+    delta = min(delta, span * 0.45)  # Margin cannot exceed half the allowable span
+
+    # Upper boundary soft compression
+    u_thresh = upper - delta
+    val_clamped = np.where(
+        val_arr > u_thresh,
+        u_thresh + delta * np.tanh((val_arr - u_thresh) / max(1e-6, delta)),
+        val_arr
+    )
+
+    # Lower boundary soft compression
+    l_thresh = lower + delta
+    val_clamped = np.where(
+        val_clamped < l_thresh,
+        l_thresh - delta * np.tanh((l_thresh - val_clamped) / max(1e-6, delta)),
+        val_clamped
+    )
+
+    return val_clamped if isinstance(val, np.ndarray) else float(val_clamped)
 
 
 # ==============================================================================
@@ -521,10 +564,14 @@ class DHKinematics:
         # Downward plunge angles FIRST (prioritizes q3 <= safe_max and avoids camera collision)
         pitch_candidates = [nominal_pitch]
         if allow_pitch_adaptation:
-            for delta_deg in range(5, 75, 5):
-                pitch_candidates.append(nominal_pitch - np.radians(delta_deg))
-            for delta_deg in range(5, 75, 5):
-                pitch_candidates.append(nominal_pitch + np.radians(delta_deg))
+            for delta_deg in range(3, 100, 3):
+                p_down = nominal_pitch - np.radians(delta_deg)
+                if p_down >= -np.radians(85):
+                    pitch_candidates.append(p_down)
+            for delta_deg in range(3, 75, 3):
+                p_up = nominal_pitch + np.radians(delta_deg)
+                if p_up <= np.radians(85):
+                    pitch_candidates.append(p_up)
 
         for p_cand in pitch_candidates:
             p_clamped = np.clip(p_cand, -np.radians(85), np.radians(85))
@@ -568,7 +615,8 @@ class DHKinematics:
 
                 q_rad = [q0, q1, q2, q3, q4]
                 in_limits = True
-                for j in range(5):
+                num_check = min(len(q_rad), len(self.joint_limits))
+                for j in range(num_check):
                     lo, hi = self.joint_limits[j]
                     if q_rad[j] < lo - 1e-4 or q_rad[j] > hi + 1e-4:
                         in_limits = False
@@ -608,28 +656,60 @@ class DHKinematics:
                     if clearance < 0.045:
                         clearance_penalty = 1000.0 * ((0.045 - clearance) ** 2)
 
-                    score = pos_err * 200.0 + pitch_diff * 0.05 + wrist_penalty + clearance_penalty
+                    # 3. Universal Temporal Continuity Regularization (prevents solution hopping across frames)
+                    temporal_penalty = 0.0
+                    if prev_joints is not None:
+                        n_arm = min(len(q_rad), len(prev_joints))
+                        prev_rad = np.radians(prev_joints[:n_arm])
+                        span_rad = np.array([
+                            max(1e-3, self.joint_limits[j][1] - self.joint_limits[j][0])
+                            for j in range(n_arm)
+                        ])
+                        w = np.ones(n_arm, dtype=np.float64)
+                        if wrist_idx is not None and wrist_idx < n_arm:
+                            w[wrist_idx] = 2.5
+                        norm_diff = ((np.array(q_rad[:n_arm]) - prev_rad) / span_rad) * w
+                        temporal_penalty = float(np.sum(norm_diff ** 2)) * 120.0
+
+                    score = pos_err * 200.0 + pitch_diff * 0.05 + wrist_penalty + clearance_penalty + temporal_penalty
 
                     if score < best_err:
                         best_err = score
                         best_q = q_rad
                         if pos_err < 0.005 and not was_clamped and effective_wrist_tilt <= self.q3_safe_max_deg and clearance >= 0.045:
-                            best_is_exact = True
-                            break
+                            if prev_joints is None or temporal_penalty < 0.2:
+                                best_is_exact = True
+                                break
 
             if best_is_exact:
                 break
 
         if best_q is None:
             # Fallback: enforce limits by projection
-            r_w = r - self.L4 * np.cos(nominal_pitch)
-            z_w = (z_eff - self.L1) - self.L4 * np.sin(nominal_pitch)
+            # Anchor to previous frame's approach pitch if available to prevent massive posture jumps
+            if prev_joints is not None and len(prev_joints) >= 4:
+                fallback_pitch = float(np.radians(prev_joints[1] + prev_joints[2] + prev_joints[3]))
+                fallback_pitch = float(np.clip(fallback_pitch, -np.radians(85), np.radians(85)))
+            elif z < 0.25:
+                # If near table surface and no prev frame, default to downward plunge (-50 deg) to prevent positive limits snapping
+                fallback_pitch = np.radians(-50.0)
+            else:
+                fallback_pitch = nominal_pitch
+
+            r_w = r - self.L4 * np.cos(fallback_pitch)
+            z_w = (z_eff - self.L1) - self.L4 * np.sin(fallback_pitch)
             d_w = np.hypot(r_w, z_w)
             if d_w > max_reach_wrist:
                 clamped_reasons.append("OUT_OF_REACH")
                 r_w *= max_reach_wrist / d_w
                 z_w *= max_reach_wrist / d_w
                 d_w = max_reach_wrist
+            min_reach_wrist = max(0.020, abs(self.L2 - self.L3) + 0.010)
+            if d_w < min_reach_wrist:
+                scale_w = min_reach_wrist / max(1e-6, d_w)
+                r_w *= scale_w
+                z_w *= scale_w
+                d_w = min_reach_wrist
 
             d2 = d_w**2
             cos_q2 = np.clip((d2 - self.L2**2 - self.L3**2) / (2.0 * self.L2 * self.L3), -1.0, 1.0)
@@ -637,18 +717,20 @@ class DHKinematics:
             alpha = np.arctan2(z_w, r_w)
             beta = np.arctan2(self.L3 * np.sin(q2), self.L2 + self.L3 * np.cos(q2))
             q1 = alpha - beta
-            q3 = nominal_pitch - (q1 + q2)
+            q3 = fallback_pitch - (q1 + q2)
             q4 = roll
             best_q = [q0, q1, q2, q3, q4]
             wrist_idx = getattr(self, "wrist_pitch_idx", 3)
             collision_sign = getattr(self, "wrist_collision_sign", 1)
-            for j in range(5):
+            num_limits = min(len(best_q), len(self.joint_limits))
+            for j in range(num_limits):
                 lo, hi = self.joint_limits[j]
                 if best_q[j] < lo or best_q[j] > hi:
                     clamped_reasons.append(f"JOINT_LIMIT_Q{j}")
                     if j == wrist_idx and (np.degrees(best_q[j]) * collision_sign) > self.q3_safe_max_deg:
                         clamped_reasons.append("CAMERA_COLLISION_RISK")
-                best_q[j] = float(np.clip(best_q[j], lo, hi))
+                # Universal C^2 soft saturation instead of sharp clipping
+                best_q[j] = float(universal_soft_saturation(best_q[j], lo, hi, margin_ratio=0.08))
 
         # Convert to degrees
         joints_deg = np.degrees(best_q)
@@ -697,6 +779,91 @@ class DHKinematics:
         arm_z = np.clip(arm_z, 0.02, max_reach)
 
         return np.array([arm_x, arm_y, arm_z, proll, ppitch, pyaw])
+
+    def smooth_joint_trajectory(self, joint_trajectory, fps=30.0, time_window_ms=200, soft_margin_ratio=0.08, max_deg_per_sec=180.0):
+        """
+        Universal Robot-Agnostic Joint Trajectory Smoother.
+        Works across arbitrary robot topologies, DOF counts, and joint limits.
+
+        Guarantees:
+          1. Universal C^2-continuous soft saturation on all joint limits (no hard clipping spikes).
+          2. Universal soft enforcement of camera/gripper safety ceiling on wrist_pitch_idx.
+          3. Slew-rate velocity limit (clamps frame-to-frame delta <= max_velocity * dt, eliminating large jumps).
+          4. Phase-neutral Savitzky-Golay joint-space polynomial smoothing across time.
+          5. Zero motor chattering, finite bounded accelerations, and preserved manipulator reach.
+        """
+        joint_arr = np.asarray(joint_trajectory, dtype=np.float64)
+        if len(joint_arr) == 0:
+            return joint_arr.copy()
+
+        n_frames = len(joint_arr)
+        num_limits = len(self.joint_limits)
+        n_arm = min(joint_arr.shape[1], num_limits)
+
+        arm_joints = joint_arr[:, :n_arm].copy()
+        extra = joint_arr[:, n_arm:].copy() if joint_arr.shape[1] > n_arm else None
+
+        wrist_idx = getattr(self, "wrist_pitch_idx", None)
+        collision_sign = getattr(self, "wrist_collision_sign", 1)
+        safe_max_deg = getattr(self, "q3_safe_max_deg", None)
+
+        # 1. Apply Universal Soft Saturation against Joint Limits
+        for j in range(n_arm):
+            lo_rad, hi_rad = self.joint_limits[j]
+            lo_deg, hi_deg = float(np.degrees(lo_rad)), float(np.degrees(hi_rad))
+
+            # Enforce camera safety ceiling on detected wrist pitch joint if applicable
+            if j == wrist_idx and safe_max_deg is not None:
+                if collision_sign > 0:
+                    hi_deg = min(hi_deg, float(safe_max_deg))
+                else:
+                    lo_deg = max(lo_deg, -float(safe_max_deg))
+
+            arm_joints[:, j] = universal_soft_saturation(
+                arm_joints[:, j], lo_deg, hi_deg, margin_ratio=soft_margin_ratio
+            )
+
+        # 2. Universal Slew-Rate Limiter (caps maximum angular jump per frame to max_velocity * dt)
+        if n_frames >= 2 and max_deg_per_sec is not None:
+            fps_val = max(5.0, float(fps))
+            max_delta = float(max_deg_per_sec) / fps_val
+            for t in range(1, n_frames):
+                delta = arm_joints[t] - arm_joints[t - 1]
+                arm_joints[t] = arm_joints[t - 1] + np.clip(delta, -max_delta, max_delta)
+
+        # 3. Phase-Neutral Savitzky-Golay Polynomial Smoothing across Time
+        if n_frames >= 4:
+            fps_val = max(5.0, float(fps))
+            win_len = int(round(fps_val * (time_window_ms / 1000.0)))
+            if win_len % 2 == 0:
+                win_len += 1
+            win_len = max(3, win_len)
+            if win_len >= n_frames:
+                win_len = (n_frames - 1) if (n_frames - 1) % 2 == 1 else max(3, n_frames - 2)
+
+            if win_len >= 3 and win_len <= n_frames:
+                poly = min(2, win_len - 1)
+                # Unwrap angular joints to prevent +-180 wrap discontinuities before filtering
+                unwrapped = np.unwrap(np.radians(arm_joints), axis=0)
+                filtered_unwrapped = scipy.signal.savgol_filter(unwrapped, window_length=win_len, polyorder=poly, axis=0)
+                arm_joints = np.degrees(filtered_unwrapped)
+
+        # 4. Final Boundary Soft-Catch (ensures polynomial overshoot never breaches limits)
+        for j in range(n_arm):
+            lo_rad, hi_rad = self.joint_limits[j]
+            lo_deg, hi_deg = float(np.degrees(lo_rad)), float(np.degrees(hi_rad))
+            if j == wrist_idx and safe_max_deg is not None:
+                if collision_sign > 0:
+                    hi_deg = min(hi_deg, float(safe_max_deg))
+                else:
+                    lo_deg = max(lo_deg, -float(safe_max_deg))
+            arm_joints[:, j] = universal_soft_saturation(
+                arm_joints[:, j], lo_deg, hi_deg, margin=0.5
+            )
+
+        if extra is not None:
+            return np.hstack([arm_joints, extra]).astype(joint_arr.dtype)
+        return arm_joints.astype(joint_arr.dtype)
 
 
 # ==============================================================================

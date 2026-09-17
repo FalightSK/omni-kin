@@ -29,7 +29,8 @@ export default function DevVisionMonitor({
   isApproachPhase = false,
   onTogglePlay,
   onSeekFrame,
-  onEnded
+  onEnded,
+  onOpenEkfModal
 }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -364,94 +365,109 @@ export default function DevVisionMonitor({
   return (
     <div
       ref={containerRef}
-      className="bg-slate-950/95 p-4 rounded-2xl border border-indigo-500/30 text-left flex flex-col gap-3 shadow-2xl overflow-hidden transition-all"
+      className="bg-[#0a0a0a] p-4 rounded-xl border border-neutral-800 text-left flex flex-col gap-3 shadow-xl overflow-hidden transition-all"
     >
       {/* 1. Header Toolbar: Mode Selector Tabs & Diagnostic Badges */}
-      <div className="flex items-center justify-between flex-wrap gap-2 border-b border-slate-800/80 pb-3">
+      <div className="flex items-center justify-between flex-wrap gap-2 border-b border-neutral-800/80 pb-3">
         <div className="flex items-center gap-2.5">
-          <div className="p-1.5 rounded-lg bg-indigo-500/15 border border-indigo-500/30 text-indigo-400">
+          <div className="p-1.5 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300">
             <Scan className="w-4 h-4" />
           </div>
           <div>
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-100">
+              <span className="text-xs font-semibold uppercase tracking-wider text-neutral-100 font-mono">
                 OpenCV Visual Inspection Monitor
               </span>
-              <span
-                className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase tracking-wide border ${
-                  isArucoActive
-                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wide border border-neutral-800 bg-neutral-900 text-neutral-300 flex items-center gap-1.5">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    isArucoActive
+                      ? 'bg-emerald-400'
+                      : numLandmarks > 0
+                      ? 'bg-amber-400'
+                      : 'bg-neutral-500'
+                  }`}
+                />
+                <span>
+                  {isArucoActive
+                    ? currTelemetry?.is_dual
+                      ? 'DUAL ARUCO LOCKED'
+                      : 'ARUCO TAG LOCKED'
                     : numLandmarks > 0
-                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                    : 'bg-slate-800 text-slate-300 border-slate-700'
-                }`}
-              >
-                {isArucoActive
-                  ? currTelemetry?.is_dual
-                    ? '🟢 DUAL ARUCO LOCKED'
-                    : '🟢 ARUCO TAG LOCKED'
-                  : numLandmarks > 0
-                  ? '🟡 VIRTUAL SLAM ANCHOR'
-                  : '⚪ SCANNING'}
+                    ? 'VIRTUAL SLAM ANCHOR'
+                    : 'SCANNING'}
+                </span>
               </span>
             </div>
-            <p className="text-[11px] text-slate-400 mt-0.5">
+            <p className="text-[11px] text-neutral-400 mt-0.5 font-normal">
               Live inspection of ArUco bounding boxes, 3D coordinate axes, and OpenCV Canny feature extraction
             </p>
           </div>
         </div>
 
         {/* Vision Mode Switcher Tabs */}
-        <div className="flex items-center gap-1 bg-slate-900/90 p-0.5 rounded-xl border border-slate-800 text-xs">
+        <div className="flex items-center gap-1 bg-[#050505] p-0.5 rounded-lg border border-neutral-800 text-xs">
           <button
             onClick={() => setVisionMode('dev')}
-            className={`px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5 transition-all ${
+            className={`px-3 py-1.5 rounded-md font-medium flex items-center gap-1.5 transition-all ${
               visionMode === 'dev'
-                ? 'bg-indigo-600 text-white shadow-sm font-semibold'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                ? 'bg-neutral-800 text-white shadow-sm font-semibold'
+                : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900'
             }`}
             title="Real Video with ArUco Bounding Boxes, 3D Axes, and Feature Trails"
           >
-            <Box className="w-3.5 h-3.5 text-emerald-400" />
+            <Box className="w-3.5 h-3.5 text-neutral-400" />
             <span>ArUco & 3D Bounding Box</span>
           </button>
 
           <button
             onClick={() => setVisionMode('canny')}
-            className={`px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5 transition-all ${
+            className={`px-3 py-1.5 rounded-md font-medium flex items-center gap-1.5 transition-all ${
               visionMode === 'canny'
-                ? 'bg-indigo-600 text-white shadow-sm font-semibold'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                ? 'bg-neutral-800 text-white shadow-sm font-semibold'
+                : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900'
             }`}
             title="OpenCV Canny Edge Detection view highlighting contours and table boundaries"
           >
-            <Activity className="w-3.5 h-3.5 text-cyan-400" />
+            <Activity className="w-3.5 h-3.5 text-neutral-400" />
             <span>OpenCV Canny View</span>
           </button>
 
           <button
             onClick={() => setVisionMode('raw')}
-            className={`px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5 transition-all ${
+            className={`px-3 py-1.5 rounded-md font-medium flex items-center gap-1.5 transition-all ${
               visionMode === 'raw'
-                ? 'bg-indigo-600 text-white shadow-sm font-semibold'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                ? 'bg-neutral-800 text-white shadow-sm font-semibold'
+                : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900'
             }`}
             title="Clean original camera feed without overlays"
           >
-            <Video className="w-3.5 h-3.5 text-slate-400" />
+            <Video className="w-3.5 h-3.5 text-neutral-400" />
             <span>Raw Video</span>
           </button>
         </div>
 
+        {/* EKF Tuning Dev Option */}
+        {onOpenEkfModal && (
+          <button
+            onClick={onOpenEkfModal}
+            className="px-3 py-1.5 rounded-lg bg-[#050505] hover:bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm"
+            title="Open Extended Kalman Filter (EKF) Parameters & Covariance Tuning"
+          >
+            <Sliders className="w-3.5 h-3.5 text-neutral-400" />
+            <span>EKF Tuning</span>
+          </button>
+        )}
+
         {/* Live GPU vs Pre-Rendered MP4 Switcher for Dev View */}
         {visionMode === 'dev' && (
-          <div className="flex items-center gap-1 bg-slate-900/90 p-0.5 rounded-xl border border-slate-800 text-[11px]">
+          <div className="flex items-center gap-1 bg-[#050505] p-0.5 rounded-lg border border-neutral-800 text-[11px]">
             <button
               onClick={() => setUseLiveOverlay(false)}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+              className={`px-2.5 py-1 rounded-md font-medium transition-all ${
                 !useLiveOverlay
-                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-neutral-800 text-white font-semibold shadow-sm'
+                  : 'text-neutral-400 hover:text-neutral-200'
               }`}
               title="Pre-rendered MP4 video with baked-in OpenCV annotations"
             >
@@ -459,21 +475,21 @@ export default function DevVisionMonitor({
             </button>
             <button
               onClick={() => setUseLiveOverlay(true)}
-              className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+              className={`px-2.5 py-1 rounded-md font-medium transition-all ${
                 useLiveOverlay
-                  ? 'bg-emerald-600 text-white font-semibold shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-neutral-800 text-white font-semibold shadow-sm'
+                  : 'text-neutral-400 hover:text-neutral-200'
               }`}
               title="Smooth native camera video with real-time GPU canvas overlays"
             >
-              ⚡ Smooth Native + GPU Box
+              ⚡ GPU Canvas
             </button>
           </div>
         )}
       </div>
 
       {/* 2. Video Stage: Displaying Real Video with OpenCV Augmentations */}
-      <div className="relative w-full aspect-video max-h-[520px] bg-black rounded-xl overflow-hidden border border-slate-800/80 shadow-2xl flex items-center justify-center group">
+      <div className="relative w-full aspect-video max-h-[520px] bg-black rounded-xl overflow-hidden border border-neutral-800 shadow-xl flex items-center justify-center group">
         {/* Underlying Authentic Camera or Pre-Rendered Dev Video */}
         <video
           key={currentVideoSrc}
@@ -508,14 +524,14 @@ export default function DevVisionMonitor({
         />
 
         {/* Top-Left Overlay Pill: Active Stream Info */}
-        <div className="absolute top-3 left-3 flex items-center gap-2 bg-slate-900/85 backdrop-blur-md px-2.5 py-1 rounded-lg border border-slate-700/80 text-[11px] font-mono text-slate-200 z-10">
+        <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/80 backdrop-blur-md px-2.5 py-1 rounded-lg border border-neutral-800 text-[11px] font-mono text-neutral-200 z-10">
           <span
-            className={`w-2 h-2 rounded-full ${
+            className={`w-1.5 h-1.5 rounded-full ${
               visionMode === 'canny'
-                ? 'bg-cyan-400 animate-pulse'
+                ? 'bg-neutral-300 animate-pulse'
                 : visionMode === 'dev'
                 ? 'bg-emerald-400 animate-pulse'
-                : 'bg-slate-400'
+                : 'bg-neutral-400'
             }`}
           />
           <span className="font-semibold">
@@ -525,16 +541,16 @@ export default function DevVisionMonitor({
               ? 'OpenCV ArUco + SLAM Augmented Feed'
               : 'Clean Camera Feed'}
           </span>
-          {videoDims && <span className="text-slate-400">| {videoDims}</span>}
+          {videoDims && <span className="text-neutral-500">| {videoDims}</span>}
         </div>
 
         {/* Top-Right Overlay Pill: Frame Navigation */}
-        <div className="absolute top-3 right-3 flex items-center gap-2 bg-slate-900/85 backdrop-blur-md px-2.5 py-1 rounded-lg border border-slate-700/80 text-[11px] font-mono text-slate-300 z-10">
+        <div className="absolute top-3 right-3 flex items-center gap-2 bg-black/80 backdrop-blur-md px-2.5 py-1 rounded-lg border border-neutral-800 text-[11px] font-mono text-neutral-300 z-10">
           <span>
             Frame {currentFrameIndex + 1}/{Math.max(1, totalFrames)}
           </span>
-          <span className="text-slate-500">|</span>
-          <span className="text-indigo-300">
+          <span className="text-neutral-600">|</span>
+          <span className="text-white font-semibold">
             {((currentFrameIndex / (fps || 30)) || 0).toFixed(2)}s
           </span>
         </div>
@@ -543,10 +559,10 @@ export default function DevVisionMonitor({
         {!isPlaying && onTogglePlay && (
           <button
             onClick={onTogglePlay}
-            className="absolute inset-0 m-auto w-14 h-14 rounded-2xl bg-indigo-600/80 hover:bg-indigo-600 backdrop-blur-md text-white flex items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 z-20"
+            className="absolute inset-0 m-auto w-12 h-12 rounded-xl bg-white hover:bg-neutral-200 text-black flex items-center justify-center shadow-2xl transition-all hover:scale-105 active:scale-95 z-20"
             title="Play Video"
           >
-            <Play className="w-6 h-6 fill-current ml-1" />
+            <Play className="w-5 h-5 fill-current ml-0.5" />
           </button>
         )}
       </div>
@@ -554,101 +570,105 @@ export default function DevVisionMonitor({
       {/* 3. Live Bounding Box & Feature Extraction Diagnostic Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {/* Card 1: Tag A Bounding Box */}
-        <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800/80 flex flex-col gap-1.5 font-mono text-xs">
+        <div className="p-3 rounded-xl bg-[#050505] border border-neutral-800 flex flex-col gap-1.5 font-mono text-xs">
           <div className="flex items-center justify-between font-sans">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1">
-              <Box className="w-3.5 h-3.5" />
+            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-200 flex items-center gap-1 font-mono">
+              <Box className="w-3.5 h-3.5 text-neutral-400" />
               <span>Tag A Bounding Box (Origin)</span>
             </span>
             <span
-              className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
-                tagA ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'
+              className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border ${
+                tagA
+                  ? 'bg-neutral-900 text-neutral-200 border-neutral-700'
+                  : 'bg-neutral-950 text-neutral-500 border-neutral-800'
               }`}
             >
-              {tagA ? '🟢 Detected' : '⚪ Occluded'}
+              {tagA ? '● Detected' : '○ Occluded'}
             </span>
           </div>
 
-          <div className="text-[11px] text-slate-300 flex flex-col gap-0.5 pt-1">
+          <div className="text-[11px] text-neutral-300 flex flex-col gap-0.5 pt-1">
             <div className="flex justify-between">
-              <span className="text-slate-400">Dimensions:</span>
-              <span className="font-semibold text-emerald-300">
+              <span className="text-neutral-500">Dimensions:</span>
+              <span className="font-semibold text-white">
                 {tagA ? `${tagA.width_px} × ${tagA.height_px} px` : '—'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Box Center:</span>
-              <span className="text-slate-200">
+              <span className="text-neutral-500">Box Center:</span>
+              <span className="text-neutral-300">
                 {tagA ? `(${tagA.center[0]}, ${tagA.center[1]}) px` : '—'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">World Origin:</span>
-              <span className="text-indigo-300 font-semibold">[0.0, 0.0, 0.0] cm</span>
+              <span className="text-neutral-500">World Origin:</span>
+              <span className="text-neutral-200 font-semibold">[0.0, 0.0, 0.0] cm</span>
             </div>
           </div>
         </div>
 
         {/* Card 2: Tag B Bounding Box */}
-        <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800/80 flex flex-col gap-1.5 font-mono text-xs">
+        <div className="p-3 rounded-xl bg-[#050505] border border-neutral-800 flex flex-col gap-1.5 font-mono text-xs">
           <div className="flex items-center justify-between font-sans">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1">
-              <Box className="w-3.5 h-3.5" />
+            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-200 flex items-center gap-1 font-mono">
+              <Box className="w-3.5 h-3.5 text-neutral-400" />
               <span>Tag B Bounding Box (Offset)</span>
             </span>
             <span
-              className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
-                tagB ? 'bg-amber-500/20 text-amber-300' : 'bg-slate-800 text-slate-400'
+              className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border ${
+                tagB
+                  ? 'bg-neutral-900 text-neutral-200 border-neutral-700'
+                  : 'bg-neutral-950 text-neutral-500 border-neutral-800'
               }`}
             >
-              {tagB ? '🟡 Detected' : '⚪ Occluded'}
+              {tagB ? '● Detected' : '○ Occluded'}
             </span>
           </div>
 
-          <div className="text-[11px] text-slate-300 flex flex-col gap-0.5 pt-1">
+          <div className="text-[11px] text-neutral-300 flex flex-col gap-0.5 pt-1">
             <div className="flex justify-between">
-              <span className="text-slate-400">Dimensions:</span>
-              <span className="font-semibold text-amber-300">
+              <span className="text-neutral-500">Dimensions:</span>
+              <span className="font-semibold text-white">
                 {tagB ? `${tagB.width_px} × ${tagB.height_px} px` : '—'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Box Center:</span>
-              <span className="text-slate-200">
+              <span className="text-neutral-500">Box Center:</span>
+              <span className="text-neutral-300">
                 {tagB ? `(${tagB.center[0]}, ${tagB.center[1]}) px` : '—'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Board Baseline:</span>
-              <span className="text-slate-200 font-semibold">+15.0 cm (+X)</span>
+              <span className="text-neutral-500">Board Baseline:</span>
+              <span className="text-neutral-200 font-semibold">+15.0 cm (+X)</span>
             </div>
           </div>
         </div>
 
         {/* Card 3: OpenCV Feature Extraction & Canny Status */}
-        <div className="p-3 rounded-xl bg-slate-900/70 border border-slate-800/80 flex flex-col gap-1.5 font-mono text-xs">
+        <div className="p-3 rounded-xl bg-[#050505] border border-neutral-800 flex flex-col gap-1.5 font-mono text-xs">
           <div className="flex items-center justify-between font-sans">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1">
-              <Sparkles className="w-3.5 h-3.5" />
+            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-200 flex items-center gap-1 font-mono">
+              <Sparkles className="w-3.5 h-3.5 text-neutral-400" />
               <span>Feature Extraction & Canny</span>
             </span>
-            <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-cyan-500/20 text-cyan-300">
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-neutral-900 text-neutral-300 border border-neutral-800">
               Active Filter
             </span>
           </div>
 
-          <div className="text-[11px] text-slate-300 flex flex-col gap-0.5 pt-1">
+          <div className="text-[11px] text-neutral-300 flex flex-col gap-0.5 pt-1">
             <div className="flex justify-between">
-              <span className="text-slate-400">Tracked Features:</span>
-              <span className="font-semibold text-cyan-300">{numFeatures} Keypoints</span>
+              <span className="text-neutral-500">Tracked Features:</span>
+              <span className="font-semibold text-white">{numFeatures} Keypoints</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">3D Room Landmarks:</span>
-              <span className="font-semibold text-amber-300">{numLandmarks} Points</span>
+              <span className="text-neutral-500">3D Room Landmarks:</span>
+              <span className="font-semibold text-white">{numLandmarks} Points</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-slate-400">Canny Thresholds:</span>
-              <span className="text-slate-200">
+              <span className="text-neutral-500">Canny Thresholds:</span>
+              <span className="text-neutral-300">
                 T1={cannyThresholdLow}, T2={cannyThresholdHigh}
               </span>
             </div>

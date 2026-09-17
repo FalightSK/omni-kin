@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d, Crosshair, Sparkles, CheckCircle2, AlertTriangle, Layers, Bot, Camera } from 'lucide-react';
@@ -6,7 +6,7 @@ import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d, Crosshair, Sparkles, Check
 // ==============================================================================
 // 5-DOF Robot Inverse Kinematics Engine (with Impossible Kinematics Handling)
 // ==============================================================================
-function solve5DofIK(targetX, targetY, targetZ, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3SafeMaxDeg = 0.0) {
+function solve5DofIK(targetX, targetY, targetZ, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3SafeMaxDeg = 0.0, prevQ = null) {
   const q0 = Math.atan2(targetY, targetX);
   const r = Math.hypot(targetX, targetY);
   const zEff = Math.max(0.012, targetZ); // Enforce table surface clearance
@@ -30,12 +30,15 @@ function solve5DofIK(targetX, targetY, targetZ, targetPitch, targetRoll, L1, L2,
   }
 
   // Downward plunge candidates FIRST to ensure safe negative q3
+  // Scan thoroughly down to -85 deg to ensure boundary frames near base are reachable
   const pitchCandidates = [nominalPitch];
-  for (let d = 5; d <= 75; d += 5) {
-    pitchCandidates.push(nominalPitch - THREE.MathUtils.degToRad(d));
+  for (let d = 3; d <= 99; d += 3) {
+    const p = nominalPitch - THREE.MathUtils.degToRad(d);
+    if (p >= -1.48) pitchCandidates.push(p);
   }
-  for (let d = 5; d <= 75; d += 5) {
-    pitchCandidates.push(nominalPitch + THREE.MathUtils.degToRad(d));
+  for (let d = 3; d <= 75; d += 3) {
+    const p = nominalPitch + THREE.MathUtils.degToRad(d);
+    if (p <= 1.48) pitchCandidates.push(p);
   }
 
   const q3SafeMax = q3SafeMaxDeg !== undefined ? Number(q3SafeMaxDeg) : 0.0;
@@ -146,14 +149,26 @@ function solve5DofIK(targetX, targetY, targetZ, targetPitch, targetRoll, L1, L2,
         clearancePenalty = 800.0 * Math.pow(0.045 - camClearance, 2);
       }
 
-      const score = posErr * 200.0 + pitchDiff * 0.05 + q3Penalty + clearancePenalty;
+      // Temporal continuity regularization to prevent solution jumping across consecutive frames
+      let prevPenalty = 0;
+      if (prevQ && prevQ.length >= 4) {
+        prevPenalty = 120.0 * (
+          Math.pow(q1 - prevQ[1], 2) +
+          Math.pow(q2 - prevQ[2], 2) +
+          2.5 * Math.pow(q3 - prevQ[3], 2)
+        );
+      }
+
+      const score = posErr * 200.0 + pitchDiff * 0.05 + q3Penalty + clearancePenalty + prevPenalty;
 
       if (score < bestErr) {
         bestErr = score;
         bestQ = qRad;
         wasClamped = iterClamped;
         clampedReason = iterReason;
-        if (posErr < 0.005 && !iterClamped && q3Deg <= q3SafeMax && camClearance >= 0.045) break;
+        if (posErr < 0.005 && !iterClamped && q3Deg <= q3SafeMax && camClearance >= 0.045) {
+          if (!prevQ || prevPenalty < 0.2) break;
+        }
       }
     }
   }
@@ -161,21 +176,35 @@ function solve5DofIK(targetX, targetY, targetZ, targetPitch, targetRoll, L1, L2,
   if (!bestQ) {
     wasClamped = true;
     clampedReason = 'JOINT_LIMIT';
-    let rw = r - L4 * Math.cos(nominalPitch);
-    let zw = (zEff - L1) - L4 * Math.sin(nominalPitch);
+    let fallbackPitch = nominalPitch;
+    if (prevQ && prevQ.length >= 4) {
+      fallbackPitch = prevQ[1] + prevQ[2] + prevQ[3];
+      fallbackPitch = Math.max(-1.48, Math.min(1.48, fallbackPitch));
+    } else if (targetZ < 0.25) {
+      fallbackPitch = THREE.MathUtils.degToRad(-50.0);
+    }
+
+    let rw = r - L4 * Math.cos(fallbackPitch);
+    let zw = (zEff - L1) - L4 * Math.sin(fallbackPitch);
     let dw = Math.hypot(rw, zw);
     if (dw > maxReachWrist) {
       rw *= maxReachWrist / dw;
       zw *= maxReachWrist / dw;
       dw = maxReachWrist;
       clampedReason = 'OUT_OF_REACH';
+    } else if (dw < minReachWrist) {
+      rw *= minReachWrist / Math.max(1e-6, dw);
+      zw *= minReachWrist / Math.max(1e-6, dw);
+      dw = minReachWrist;
+      clampedReason = 'SINGULARITY';
     }
+
     const cosQ2 = Math.max(-1.0, Math.min(1.0, (dw * dw - L2 * L2 - L3 * L3) / (2.0 * L2 * L3)));
     const q2 = -Math.acos(cosQ2);
     const alpha = Math.atan2(zw, rw);
     const beta = Math.atan2(L3 * Math.sin(q2), L2 + L3 * Math.cos(q2));
     const q1 = alpha - beta;
-    const q3 = nominalPitch - (q1 + q2);
+    const q3 = fallbackPitch - (q1 + q2);
     bestQ = [
       q0,
       Math.max(jointLimits[1][0], Math.min(jointLimits[1][1], q1)),
@@ -191,6 +220,71 @@ function solve5DofIK(targetX, targetY, targetZ, targetPitch, targetRoll, L1, L2,
     clampedReason: clampedReason || 'OK',
     errorDist: bestErr
   };
+}
+
+// Universal Robot-Agnostic Trajectory Precomputer with Slew-Rate Limiter (Max 6.0 deg/frame)
+function computeSmoothTrajectory(poses, robotConfig, L1, L2, L3, L4, jointLimits, q3SafeMaxDeg) {
+  if (!poses || poses.length === 0) return [];
+
+  const {
+    offset_x = 0.038,
+    offset_y = -0.406,
+    offset_z = 0.00,
+    yaw_deg = 90.0
+  } = robotConfig || {};
+
+  const yawRad = THREE.MathUtils.degToRad(yaw_deg);
+  const cosY = Math.cos(yawRad);
+  const sinY = Math.sin(yawRad);
+
+  const results = [];
+  let prevQ = null;
+  for (let i = 0; i < poses.length; i++) {
+    const pose = poses[i];
+    const dx = pose[0] - offset_x;
+    const dy = pose[1] - offset_y;
+    const dz = pose[2] - offset_z;
+
+    const rx = cosY * dx + sinY * dy;
+    const ry = -sinY * dx + cosY * dy;
+    const rz = dz;
+
+    const targetPitch = pose[4] || 0;
+    const targetRoll = pose[3] || 0;
+
+    const res = solve5DofIK(rx, ry, rz, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3SafeMaxDeg, prevQ);
+    results.push(res);
+    prevQ = res.q;
+  }
+
+  // Forward-Backward Slew-Rate Limiter (Max 6.0 deg = 0.1047 rad per frame)
+  const maxDeltaRad = THREE.MathUtils.degToRad(6.0);
+  const qSmoothed = results.map(r => [...r.q]);
+
+  // Forward pass
+  for (let i = 1; i < qSmoothed.length; i++) {
+    for (let j = 0; j < 5; j++) {
+      const diff = qSmoothed[i][j] - qSmoothed[i - 1][j];
+      if (Math.abs(diff) > maxDeltaRad) {
+        qSmoothed[i][j] = qSmoothed[i - 1][j] + Math.sign(diff) * maxDeltaRad;
+      }
+    }
+  }
+
+  // Backward pass
+  for (let i = qSmoothed.length - 2; i >= 0; i--) {
+    for (let j = 0; j < 5; j++) {
+      const diff = qSmoothed[i][j] - qSmoothed[i + 1][j];
+      if (Math.abs(diff) > maxDeltaRad) {
+        qSmoothed[i][j] = qSmoothed[i + 1][j] + Math.sign(diff) * maxDeltaRad;
+      }
+    }
+  }
+
+  return results.map((r, idx) => ({
+    ...r,
+    q: qSmoothed[idx]
+  }));
 }
 
 const _up = new THREE.Vector3(0, 1, 0);
@@ -1140,19 +1234,12 @@ export default function Viewport3D({
     }
   }, [showZones]);
 
-  useEffect(() => {
-    if (!robotGroupRef.current) return;
-
+  const kinematicSpecs = useMemo(() => {
     const {
-      offset_x = 0.038,
-      offset_y = -0.406,
-      offset_z = 0.00,
-      yaw_deg = 90.0,
       robot_type = 'so_arm101_omni_kin',
       q3_safe_max_deg = 0.0
     } = robotConfig || {};
-    const yawRad = THREE.MathUtils.degToRad(yaw_deg);
-    const safeQ3Rad = THREE.MathUtils.degToRad(q3_safe_max_deg !== undefined ? Number(q3_safe_max_deg) : 0.0);
+    const safeRad = THREE.MathUtils.degToRad(q3_safe_max_deg !== undefined ? Number(q3_safe_max_deg) : 0.0);
     const rType = (robot_type || 'so_arm101_omni_kin').toLowerCase();
     const is100 = rType.includes('100') && !rType.includes('101');
     const isOmni = rType.includes('omni');
@@ -1166,26 +1253,69 @@ export default function Viewport3D({
       [-1.833, 1.833],
       [-1.745, 1.745],
       [-2.618, 2.618],
-      [-1.745, Math.min(1.745, safeQ3Rad)],
+      [-1.745, Math.min(1.745, safeRad)],
       [-Math.PI, Math.PI]
     ] : [
       [-Math.PI, Math.PI],
       [-1.745, 1.745],
       [-2.618, 2.618],
-      [-1.745, Math.min(1.745, safeQ3Rad)],
+      [-1.745, Math.min(1.745, safeRad)],
       [-Math.PI, Math.PI]
     ];
+    return { L1, L2, L3, L4, jointLimits, safeQ3Rad: safeRad, q3SafeMaxDeg: Number(q3_safe_max_deg || 0) };
+  }, [robotConfig]);
+
+  const activePoses = (eePoses && eePoses.length > 0) ? eePoses : trajectoryPoses;
+
+  const smoothedTrajectory = useMemo(() => {
+    return computeSmoothTrajectory(
+      activePoses,
+      robotConfig,
+      kinematicSpecs.L1,
+      kinematicSpecs.L2,
+      kinematicSpecs.L3,
+      kinematicSpecs.L4,
+      kinematicSpecs.jointLimits,
+      kinematicSpecs.q3SafeMaxDeg
+    );
+  }, [activePoses, robotConfig, kinematicSpecs]);
+
+  const smoothedApproachTrajectory = useMemo(() => {
+    return computeSmoothTrajectory(
+      approachEePoses,
+      robotConfig,
+      kinematicSpecs.L1,
+      kinematicSpecs.L2,
+      kinematicSpecs.L3,
+      kinematicSpecs.L4,
+      kinematicSpecs.jointLimits,
+      kinematicSpecs.q3SafeMaxDeg
+    );
+  }, [approachEePoses, robotConfig, kinematicSpecs]);
+
+  useEffect(() => {
+    if (!robotGroupRef.current) return;
+
+    const {
+      offset_x = 0.038,
+      offset_y = -0.406,
+      offset_z = 0.00,
+      yaw_deg = 90.0,
+      q3_safe_max_deg = 0.0
+    } = robotConfig || {};
+    const yawRad = THREE.MathUtils.degToRad(yaw_deg);
+    const { L1, L2, L3, L4, jointLimits } = kinematicSpecs;
 
     const isApproachActive = trajectoryMode === 'initial_aware' && isApproachPhase && approachEePoses && approachEePoses.length > 0;
 
-    const activePoses = (eePoses && eePoses.length > 0) ? eePoses : trajectoryPoses;
     let targetGripper = [0.15, 0.05, 0.15, 0, 0, 0];
     let activeGripVal = 50.0;
     let targetCam = null;
+    let ikRes = null;
 
     if (isApproachActive) {
-      const idx = Math.min(Math.max(0, approachFrameIndex), approachEePoses.length - 1);
-      targetGripper = approachEePoses[idx];
+      const idx = Math.min(Math.max(0, approachFrameIndex), (approachEePoses?.length || 1) - 1);
+      targetGripper = approachEePoses[idx] || targetGripper;
       if (approachGripperStates && approachGripperStates.length > idx && approachGripperStates[idx] !== undefined) {
         activeGripVal = Number(approachGripperStates[idx]);
       } else {
@@ -1194,6 +1324,7 @@ export default function Viewport3D({
       if (approachCamPoses && approachCamPoses.length > idx) {
         targetCam = approachCamPoses[idx];
       }
+      ikRes = smoothedApproachTrajectory[idx];
     } else {
       if (activePoses && activePoses.length > 0) {
         const idx = Math.min(currentFrameIndex, activePoses.length - 1);
@@ -1201,6 +1332,7 @@ export default function Viewport3D({
         if (gripperStates && gripperStates.length > idx && gripperStates[idx] !== undefined) {
           activeGripVal = Number(gripperStates[idx]);
         }
+        ikRes = smoothedTrajectory[idx];
       }
       if (trajectoryPoses && trajectoryPoses.length > 0) {
         const cIdx = Math.min(currentFrameIndex, trajectoryPoses.length - 1);
@@ -1230,10 +1362,12 @@ export default function Viewport3D({
     const robotY = -sinY * dx + cosY * dy;
     const robotZ = dz;
 
-    const targetPitch = targetGripper[4] || 0;
-    const targetRoll = targetGripper[3] || 0;
+    if (!ikRes) {
+      const targetPitch = targetGripper[4] || 0;
+      const targetRoll = targetGripper[3] || 0;
+      ikRes = solve5DofIK(robotX, robotY, robotZ, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3_safe_max_deg);
+    }
 
-    const ikRes = solve5DofIK(robotX, robotY, robotZ, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3_safe_max_deg);
     const [q0, q1, q2, q3, q4] = ikRes.q;
 
     const pShoulder = new THREE.Vector3(0, 0, L1);
@@ -1389,7 +1523,10 @@ export default function Viewport3D({
     approachGripperStates,
     approachCamPoses,
     isApproachPhase,
-    approachFrameIndex
+    approachFrameIndex,
+    smoothedTrajectory,
+    smoothedApproachTrajectory,
+    kinematicSpecs
   ]);
 
   const handleAutoAlign = async (mode = 'start') => {
@@ -1429,40 +1566,40 @@ export default function Viewport3D({
       {/* Top Left: Robot Embodiment HUD & Base Initial Position Align Controls */}
       <div className="absolute top-3 left-3 flex flex-col gap-1.5 z-10 pointer-events-none max-w-[calc(100%-250px)]">
         {/* Robot Embodiment & Base Coordinates */}
-        <div className="bg-slate-900/90 backdrop-blur-md border border-slate-700/80 px-2.5 py-1.5 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-1.5 shadow-lg w-fit">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+        <div className="bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 px-2.5 py-1.5 rounded-xl text-[11px] font-mono text-neutral-300 flex items-center gap-1.5 shadow-xl w-fit">
+          <span className="w-1.5 h-1.5 rounded-full bg-neutral-400 shrink-0" />
           <span>ArUco (0,0)</span>
-          <span className="text-slate-600">|</span>
-          <span className="font-semibold text-indigo-300">
+          <span className="text-neutral-700">|</span>
+          <span className="font-semibold text-white">
             🤖 {robot_type.toUpperCase().replace(/_/g, '-')} Base: ({(offset_x * 100).toFixed(0)}cm, {(offset_y * 100).toFixed(0)}cm, {yaw_deg.toFixed(0)}°)
           </span>
         </div>
 
         {/* Set Robot Initial Position (Auto-Align Base Controls) */}
-        <div className="flex items-center gap-1 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 p-1 rounded-xl shadow-lg pointer-events-auto w-fit flex-wrap">
-          <span className="text-[10px] font-semibold text-slate-400 px-1">Base:</span>
+        <div className="flex items-center gap-1 bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 p-1 rounded-xl shadow-xl pointer-events-auto w-fit flex-wrap">
+          <span className="text-[10px] font-semibold text-neutral-400 px-1 font-mono">Base:</span>
           <button
             onClick={() => handleAutoAlign('recommended')}
             disabled={isAligning}
-            className="px-2 py-0.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 font-semibold text-[10px] flex items-center gap-1 border border-indigo-500/50 transition-all active:scale-95 disabled:opacity-50 shadow-sm"
+            className="px-2 py-0.5 rounded-lg bg-white hover:bg-neutral-200 text-black font-semibold text-[10px] flex items-center gap-1 shadow-sm transition-all active:scale-95 disabled:opacity-50"
             title="Set Recommended Workspace Layout: Base at Y=-40.6cm, Yaw=90°, facing tags beyond reach"
           >
-            <Sparkles className="w-3 h-3 text-indigo-400" />
+            <Sparkles className="w-3 h-3 text-neutral-700" />
             <span>Recommended</span>
           </button>
           <button
             onClick={() => handleAutoAlign('start')}
             disabled={isAligning || trajectoryPoses.length === 0}
-            className="px-2 py-0.5 rounded-lg bg-indigo-600/90 hover:bg-indigo-500 text-white font-medium text-[10px] flex items-center gap-1 shadow-sm transition-all active:scale-95 disabled:opacity-50"
+            className="px-2 py-0.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 font-medium text-[10px] flex items-center gap-1 border border-neutral-800 shadow-sm transition-all active:scale-95 disabled:opacity-50"
             title="Set Robot Base so the gripper starts directly at the first point of the trajectory"
           >
-            <Crosshair className="w-3 h-3 text-indigo-200" />
+            <Crosshair className="w-3 h-3 text-neutral-400" />
             <span>To Start</span>
           </button>
           <button
             onClick={() => handleAutoAlign('optimal')}
             disabled={isAligning || trajectoryPoses.length === 0}
-            className="px-2 py-0.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-[10px] flex items-center gap-1 border border-slate-700 transition-all active:scale-95 disabled:opacity-50"
+            className="px-2 py-0.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 font-medium text-[10px] flex items-center gap-1 border border-neutral-800 transition-all active:scale-95 disabled:opacity-50"
             title="Optimize Robot Base position for maximum reach across the entire demonstration"
           >
             <span>Optimal</span>
@@ -1471,17 +1608,13 @@ export default function Viewport3D({
 
         {/* Phase Indicator Badge (Approach vs Demo) */}
         {trajectoryMode === 'initial_aware' && (
-          <div className={`backdrop-blur-md border px-2.5 py-1 rounded-xl text-[11px] font-medium flex items-center gap-2 shadow-lg transition-all w-fit ${
-            isApproachPhase
-              ? 'bg-purple-950/90 border-purple-500/60 text-purple-200 animate-pulse'
-              : 'bg-indigo-950/80 border-indigo-500/40 text-indigo-200'
-          }`}>
-            <span className={`w-2 h-2 rounded-full ${isApproachPhase ? 'bg-purple-400' : 'bg-emerald-400'}`} />
+          <div className="backdrop-blur-md border border-neutral-800 bg-[#0a0a0a]/90 px-2.5 py-1 rounded-xl text-[11px] font-mono font-medium flex items-center gap-2 shadow-xl transition-all w-fit text-neutral-200">
+            <span className={`w-1.5 h-1.5 rounded-full ${isApproachPhase ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`} />
             <span className="font-bold">
-              {isApproachPhase ? '🚀 AUTO APPROACH' : '🎬 DEMO PHASE'}
+              {isApproachPhase ? 'AUTO APPROACH' : 'DEMO PHASE'}
             </span>
-            <span className="text-slate-500">|</span>
-            <span className="font-mono text-[10px] text-slate-300">
+            <span className="text-neutral-700">|</span>
+            <span className="text-[10px] text-neutral-400">
               {isApproachPhase
                 ? `Step ${(approachFrameIndex || 0) + 1}/${approachEePoses?.length || 0} (Home → Start)`
                 : `Frame ${currentFrameIndex + 1}/${(eePoses && eePoses.length) || trajectoryPoses.length || 0}`}
@@ -1490,26 +1623,22 @@ export default function Viewport3D({
         )}
 
         {/* Kinematics Reachability & Clamped Indicator */}
-        <div className={`backdrop-blur-md border px-2.5 py-1 rounded-xl text-[11px] font-medium flex items-center gap-2 shadow-lg transition-all w-fit ${
-          ikStatus.isFeasible
-            ? 'bg-emerald-950/80 border-emerald-600/60 text-emerald-200'
-            : 'bg-amber-950/85 border-amber-600/70 text-amber-200 animate-pulse'
-        }`}>
+        <div className="backdrop-blur-md border border-neutral-800 bg-[#0a0a0a]/90 px-2.5 py-1 rounded-xl text-[11px] font-mono font-medium flex items-center gap-2 shadow-xl transition-all w-fit text-neutral-200">
           {ikStatus.isFeasible ? (
             <>
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span className="font-semibold">REACHABLE</span>
+              <span className="font-semibold text-neutral-200">REACHABLE</span>
             </>
           ) : (
             <>
               <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span className="font-semibold">
+              <span className="font-semibold text-amber-300">
                 CLAMPED ({ikStatus.errorDistCm}cm {ikStatus.clampedReason})
               </span>
             </>
           )}
-          <span className="text-slate-500">|</span>
-          <span className="font-mono text-[10px] text-slate-300">
+          <span className="text-neutral-700">|</span>
+          <span className="text-[10px] text-neutral-400">
             q: [{ikStatus.jointsDeg.join('°, ')}°]
           </span>
         </div>
@@ -1518,14 +1647,14 @@ export default function Viewport3D({
       {/* Top Right: View Presets, Camera Controls & Layer Toggles */}
       <div className="absolute top-3 right-3 flex flex-col items-end gap-1.5 z-10 pointer-events-auto">
         {/* Row 1: Camera View Presets (iso, top, front, side) + Zoom + Orbit + Rotate */}
-        <div className="flex items-center gap-1 bg-slate-900/90 backdrop-blur-md border border-slate-700/70 p-1 rounded-xl text-[11px] shadow-lg">
-          <div className="flex items-center gap-0.5 bg-slate-950/60 p-0.5 rounded-lg border border-slate-800">
+        <div className="flex items-center gap-1 bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 p-1 rounded-xl text-[11px] shadow-xl">
+          <div className="flex items-center gap-0.5 bg-[#050505] p-0.5 rounded-lg border border-neutral-800">
             {['iso', 'top', 'front', 'side'].map((view) => (
               <button
                 key={view}
                 onClick={() => setViewPreset(view)}
-                className={`px-2 py-0.5 rounded font-medium capitalize transition-all text-[10px] ${
-                  activeView === view ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                className={`px-2 py-0.5 rounded font-medium capitalize transition-all text-[10px] font-mono ${
+                  activeView === view ? 'bg-neutral-800 text-white shadow-sm font-semibold' : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-900'
                 }`}
               >
                 {view}
@@ -1533,17 +1662,17 @@ export default function Viewport3D({
             ))}
           </div>
 
-          <div className="flex items-center gap-0.5 bg-slate-950/60 p-0.5 rounded-lg border border-slate-800">
+          <div className="flex items-center gap-0.5 bg-[#050505] p-0.5 rounded-lg border border-neutral-800">
             <button
               onClick={handleZoomIn}
-              className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all active:scale-95"
+              className="p-1 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-all active:scale-95"
               title="Zoom In 3D Camera"
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
             <button
               onClick={handleZoomOut}
-              className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 transition-all active:scale-95"
+              className="p-1 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-all active:scale-95"
               title="Zoom Out 3D Camera"
             >
               <ZoomOut className="w-3.5 h-3.5" />
@@ -1552,21 +1681,21 @@ export default function Viewport3D({
 
           <button
             onClick={() => setIsOrbitTouchEnabled(!isOrbitTouchEnabled)}
-            className={`px-2 py-1 rounded-lg transition-all flex items-center gap-1 text-[10px] font-medium border ${
+            className={`px-2 py-1 rounded-lg transition-all flex items-center gap-1 text-[10px] font-mono font-medium border ${
               isOrbitTouchEnabled
-                ? 'bg-indigo-600/30 text-indigo-200 border-indigo-500/40'
-                : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                ? 'bg-neutral-800 text-white border-neutral-700 shadow-sm'
+                : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:bg-neutral-800 hover:text-neutral-200'
             }`}
             title={isOrbitTouchEnabled ? 'Orbit 3D enabled' : 'Scroll page enabled'}
           >
-            <Move3d className="w-3.5 h-3.5 text-indigo-400" />
+            <Move3d className="w-3.5 h-3.5 text-neutral-300" />
             <span>{isOrbitTouchEnabled ? 'Orbit' : 'Scroll'}</span>
           </button>
 
           <button
             onClick={() => setIsAutoRotate(!isAutoRotate)}
             className={`p-1.5 rounded-lg transition-all flex items-center gap-1 ${
-              isAutoRotate ? 'bg-purple-600 text-white animate-pulse' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+              isAutoRotate ? 'bg-white text-black shadow-sm' : 'text-neutral-400 hover:text-white hover:bg-neutral-800'
             }`}
             title={isAutoRotate ? 'Stop Auto-Rotation' : 'Start Auto-Rotation'}
           >
@@ -1575,43 +1704,43 @@ export default function Viewport3D({
         </div>
 
         {/* Row 2: Viewport Visibility Toggles (Zones, Cam Path, Components) */}
-        <div className="flex items-center gap-1 bg-slate-900/90 backdrop-blur-md border border-slate-700/70 p-1 rounded-xl text-[11px] shadow-lg">
+        <div className="flex items-center gap-1 bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 p-1 rounded-xl text-[11px] shadow-xl">
           <button
             onClick={() => setShowZones(!showZones)}
-            className={`px-2 py-0.5 rounded-lg transition-all flex items-center gap-1 text-[10px] font-medium border ${
+            className={`px-2 py-0.5 rounded-lg transition-all flex items-center gap-1 text-[10px] font-mono font-medium border ${
               showZones
-                ? 'bg-cyan-600/30 text-cyan-200 border-cyan-500/50 shadow-sm'
-                : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
+                ? 'bg-neutral-800 text-white border-neutral-700 shadow-sm'
+                : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:bg-neutral-800 hover:text-neutral-200'
             }`}
             title={showZones ? 'Hide Workspace Layout Zones' : 'Show Workspace Layout Zones (Reference, Manipulation, Reach)'}
           >
-            <Layers className="w-3 h-3 text-cyan-400" />
+            <Layers className="w-3 h-3 text-neutral-400" />
             <span>Zones</span>
           </button>
 
           <button
             onClick={() => setShowCameraPath(!showCameraPath)}
-            className={`px-2 py-0.5 rounded-lg transition-all flex items-center gap-1 text-[10px] font-medium border ${
+            className={`px-2 py-0.5 rounded-lg transition-all flex items-center gap-1 text-[10px] font-mono font-medium border ${
               showCameraPath
-                ? 'bg-cyan-600/30 text-cyan-200 border-cyan-500/50 shadow-sm'
-                : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
+                ? 'bg-neutral-800 text-white border-neutral-700 shadow-sm'
+                : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:bg-neutral-800 hover:text-neutral-200'
             }`}
             title={showCameraPath ? 'Hide Camera Trajectory & Tool Rod' : 'Show Camera Trajectory & Tool Rod'}
           >
-            <Camera className="w-3 h-3 text-cyan-400" />
+            <Camera className="w-3 h-3 text-neutral-400" />
             <span>Cam Path</span>
           </button>
 
           <button
             onClick={() => setShowComponentBreakdown(!showComponentBreakdown)}
-            className={`px-2 py-0.5 rounded-lg transition-all flex items-center gap-1 text-[10px] font-medium border ${
+            className={`px-2 py-0.5 rounded-lg transition-all flex items-center gap-1 text-[10px] font-mono font-medium border ${
               showComponentBreakdown
-                ? 'bg-amber-600/30 text-amber-200 border-amber-500/50 shadow-sm'
-                : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
+                ? 'bg-neutral-800 text-white border-neutral-700 shadow-sm'
+                : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:bg-neutral-800 hover:text-neutral-200'
             }`}
             title={showComponentBreakdown ? 'Hide Component Breakdown' : 'Show Component Breakdown (Arm Body vs End-Effector)'}
           >
-            <Sparkles className="w-3 h-3 text-amber-400" />
+            <Sparkles className="w-3 h-3 text-neutral-400" />
             <span>Components</span>
           </button>
         </div>
@@ -1619,120 +1748,120 @@ export default function Viewport3D({
 
       {/* Floating Component Breakdown Overlay (Arm Body vs End-Effector) */}
       {showComponentBreakdown && (
-        <div className="absolute top-[86px] right-3 z-20 w-80 bg-slate-950/95 backdrop-blur-xl border border-indigo-500/40 rounded-2xl p-3.5 shadow-2xl flex flex-col gap-2.5 select-none">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+        <div className="absolute top-[86px] right-3 z-20 w-80 bg-[#0a0a0a]/95 backdrop-blur-xl border border-neutral-800 rounded-2xl p-3.5 shadow-2xl flex flex-col gap-2.5 select-none text-left">
+          <div className="flex items-center justify-between border-b border-neutral-800 pb-2">
             <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-cyan-400 animate-pulse" />
-              <span className="text-xs font-bold text-slate-100 font-mono">
+              <span className="w-1.5 h-1.5 rounded-full bg-neutral-300" />
+              <span className="text-xs font-semibold text-neutral-100 font-mono">
                 Component Breakdown
               </span>
             </div>
             <button
               onClick={() => setShowComponentBreakdown(false)}
-              className="text-slate-400 hover:text-white text-xs px-1 rounded hover:bg-slate-800"
+              className="text-neutral-400 hover:text-white text-xs px-1.5 py-0.5 rounded hover:bg-neutral-800"
             >
               ✕
             </button>
           </div>
 
           {/* Arm Body Section */}
-          <div className="bg-slate-900/80 rounded-xl p-2.5 border border-indigo-900/50 flex flex-col gap-1 text-[11px] font-mono">
-            <div className="flex items-center justify-between font-bold text-indigo-300">
+          <div className="bg-[#050505] rounded-xl p-2.5 border border-neutral-800/80 flex flex-col gap-1 text-[11px] font-mono">
+            <div className="flex items-center justify-between font-bold text-neutral-200">
               <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-indigo-400" />
+                <span className="w-1.5 h-1.5 rounded-full bg-neutral-400" />
                 🦾 Arm Body (5-DOF)
               </span>
-              <span className="text-[10px] bg-indigo-950 px-1.5 py-0.5 rounded text-indigo-200">
+              <span className="text-[10px] bg-neutral-900 border border-neutral-800 px-1.5 py-0.5 rounded text-neutral-300">
                 L1-L3: 27.5 cm
               </span>
             </div>
-            <div className="text-[10px] text-slate-400 flex flex-col gap-0.5 mt-0.5">
+            <div className="text-[10px] text-neutral-400 flex flex-col gap-0.5 mt-0.5">
               <div className="flex justify-between">
-                <span>Base & Turret:</span>
-                <span className="text-slate-200 font-semibold">Dark Carbon / Indigo</span>
+                <span className="text-neutral-500">Base & Turret:</span>
+                <span className="text-neutral-200 font-semibold">Dark Carbon</span>
               </div>
               <div className="flex justify-between">
-                <span>Arm Booms:</span>
-                <span className="text-slate-200 font-semibold">Silver Metallic</span>
+                <span className="text-neutral-500">Arm Booms:</span>
+                <span className="text-neutral-200 font-semibold">Silver Metallic</span>
               </div>
               <div className="flex justify-between">
-                <span>Joint Knuckles:</span>
-                <span className="text-slate-200 font-semibold">Gunmetal Slate</span>
+                <span className="text-neutral-500">Joint Knuckles:</span>
+                <span className="text-neutral-200 font-semibold">Gunmetal</span>
               </div>
             </div>
           </div>
 
           {/* Tool Flange Joint */}
-          <div className="bg-slate-900/60 rounded-xl p-2 border border-slate-800 flex items-center justify-between text-[10px] font-mono text-slate-300">
+          <div className="bg-[#050505] rounded-xl p-2 border border-neutral-800/80 flex items-center justify-between text-[10px] font-mono text-neutral-300">
             <span className="flex items-center gap-1.5 font-bold">
-              <span className="w-2 h-2 rounded-full bg-slate-400" />
+              <span className="w-1.5 h-1.5 rounded-full bg-neutral-400" />
               ⚙️ Wrist Roll Joint:
             </span>
-            <span className="text-slate-400 font-semibold">Boundary to Gripper</span>
+            <span className="text-neutral-400 font-semibold">Boundary to Gripper</span>
           </div>
 
           {/* End-Effector Section */}
-          <div className="bg-slate-900/80 rounded-xl p-2.5 border border-cyan-900/50 flex flex-col gap-1 text-[11px] font-mono">
-            <div className="flex items-center justify-between font-bold text-cyan-300">
+          <div className="bg-[#050505] rounded-xl p-2.5 border border-neutral-800/80 flex flex-col gap-1 text-[11px] font-mono">
+            <div className="flex items-center justify-between font-bold text-neutral-200">
               <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-cyan-400" />
-                ✋ End-Effector (Cyan)
+                <span className="w-1.5 h-1.5 rounded-full bg-neutral-300" />
+                ✋ End-Effector
               </span>
-              <span className="text-[10px] bg-cyan-950 px-1.5 py-0.5 rounded text-cyan-200">
+              <span className="text-[10px] bg-neutral-900 border border-neutral-800 px-1.5 py-0.5 rounded text-neutral-300">
                 L4: 11.0 cm
               </span>
             </div>
-            <div className="text-[10px] text-slate-400 flex flex-col gap-0.5 mt-0.5">
+            <div className="text-[10px] text-neutral-400 flex flex-col gap-0.5 mt-0.5">
               <div className="flex justify-between">
-                <span>Gripper Cylinder:</span>
-                <span className="text-cyan-300 font-semibold">Industrial Cyan</span>
+                <span className="text-neutral-500">Gripper Cylinder:</span>
+                <span className="text-neutral-200 font-semibold">Anodized Black</span>
               </div>
               <div className="flex justify-between">
-                <span>Parallel Fingers:</span>
-                <span className="text-sky-300 font-semibold">Electric Blue Jaws</span>
+                <span className="text-neutral-500">Parallel Fingers:</span>
+                <span className="text-neutral-200 font-semibold">Hardened Jaws</span>
               </div>
               <div className="flex justify-between">
-                <span>Dynamic State:</span>
-                <span className="text-emerald-400 font-bold">
+                <span className="text-neutral-500">Dynamic State:</span>
+                <span className="text-white font-bold">
                   {gripperStates && gripperStates[currentFrameIndex] !== undefined
                     ? `${Number(gripperStates[currentFrameIndex]).toFixed(0)}% Open`
                     : '50% (Nominal)'}
                 </span>
               </div>
-              <div className="flex justify-between pt-1 border-t border-slate-800 text-[9.5px]">
-                <span className="text-emerald-400 font-bold">🎯 Tool Center Point (TCP):</span>
-                <span className="text-emerald-200">Fingertip Grasp Reticle</span>
+              <div className="flex justify-between pt-1 border-t border-neutral-800 text-[9.5px]">
+                <span className="text-neutral-400 font-bold">🎯 Tool Center Point (TCP):</span>
+                <span className="text-neutral-200">Fingertip Reticle</span>
               </div>
             </div>
           </div>
 
           {/* Mounted Camera Rig Section */}
-          <div className="bg-slate-900/80 rounded-xl p-2.5 border border-cyan-900/50 flex flex-col gap-1 text-[11px] font-mono">
-            <div className="flex items-center justify-between font-bold text-cyan-300">
+          <div className="bg-[#050505] rounded-xl p-2.5 border border-neutral-800/80 flex flex-col gap-1 text-[11px] font-mono">
+            <div className="flex items-center justify-between font-bold text-neutral-200">
               <span className="flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-cyan-400" />
+                <span className="w-1.5 h-1.5 rounded-full bg-neutral-400" />
                 📷 Mounted Camera Rig
               </span>
-              <span className="text-[10px] bg-cyan-950 px-1.5 py-0.5 rounded text-cyan-200">
+              <span className="text-[10px] bg-neutral-900 border border-neutral-800 px-1.5 py-0.5 rounded text-neutral-300">
                 θ: {(robotConfig?.gripper_offset?.pitch_deg ?? 40.4).toFixed(1)}°
               </span>
             </div>
-            <div className="text-[10px] text-slate-400 flex flex-col gap-0.5 mt-0.5">
+            <div className="text-[10px] text-neutral-400 flex flex-col gap-0.5 mt-0.5">
               <div className="flex justify-between">
-                <span>Forward Distance (d):</span>
-                <span className="text-slate-200 font-semibold">{(robotConfig?.gripper_offset?.forward_cm ?? 12.8).toFixed(1)} cm</span>
+                <span className="text-neutral-500">Forward Distance (d):</span>
+                <span className="text-neutral-200 font-semibold">{(robotConfig?.gripper_offset?.forward_cm ?? 12.8).toFixed(1)} cm</span>
               </div>
               <div className="flex justify-between">
-                <span>Vertical Height (h):</span>
-                <span className="text-slate-200 font-semibold">{(robotConfig?.gripper_offset?.height_cm ?? 10.9).toFixed(1)} cm</span>
+                <span className="text-neutral-500">Vertical Height (h):</span>
+                <span className="text-neutral-200 font-semibold">{(robotConfig?.gripper_offset?.height_cm ?? 10.9).toFixed(1)} cm</span>
               </div>
               <div className="flex justify-between">
-                <span>Bracket Base:</span>
-                <span className="text-slate-200 font-semibold">Fixed to Wrist / Gripper</span>
+                <span className="text-neutral-500">Bracket Base:</span>
+                <span className="text-neutral-200 font-semibold">Fixed to Wrist / Gripper</span>
               </div>
-              <div className="flex justify-between pt-1 border-t border-slate-800 text-[9.5px]">
-                <span className="text-cyan-400 font-bold">Rigid Attachment:</span>
-                <span className="text-emerald-300">Synchronized with Base & IK</span>
+              <div className="flex justify-between pt-1 border-t border-neutral-800 text-[9.5px]">
+                <span className="text-neutral-400 font-bold">Rigid Attachment:</span>
+                <span className="text-neutral-200">Synchronized with Base & IK</span>
               </div>
             </div>
           </div>
@@ -1741,48 +1870,48 @@ export default function Viewport3D({
 
       {/* Bottom Left: Trajectory Color Legend & Interaction Guide */}
       <div className="absolute bottom-3 left-3 flex flex-col gap-1.5 z-10 pointer-events-none">
-        <div className="bg-slate-950/90 backdrop-blur-md border border-slate-800/90 px-2.5 py-1.5 rounded-xl text-[10px] text-slate-300 shadow-xl flex items-center gap-2.5 flex-wrap">
+        <div className="bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 px-2.5 py-1.5 rounded-xl text-[10px] text-neutral-300 shadow-xl flex items-center gap-2.5 flex-wrap font-mono">
           <div className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50" />
-            <span className="font-semibold text-emerald-300">Green:</span>
-            <span className="text-slate-400">Start / Reachable</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            <span className="font-semibold text-neutral-200">Green:</span>
+            <span className="text-neutral-400">Start / Reachable</span>
           </div>
-          <span className="text-slate-700">|</span>
+          <span className="text-neutral-700">|</span>
           <div className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-amber-500 shadow-sm shadow-amber-500/50 animate-pulse" />
-            <span className="font-semibold text-amber-300">Yellow:</span>
-            <span className="text-slate-400">Current / Clamped</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+            <span className="font-semibold text-neutral-200">Yellow:</span>
+            <span className="text-neutral-400">Current / Clamped</span>
           </div>
-          <span className="text-slate-700">|</span>
+          <span className="text-neutral-700">|</span>
           <div className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-rose-500 shadow-sm shadow-rose-500/50" />
-            <span className="font-semibold text-rose-300">Red:</span>
-            <span className="text-slate-400">Goal / Out of Reach</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+            <span className="font-semibold text-neutral-200">Red:</span>
+            <span className="text-neutral-400">Goal / Out of Reach</span>
           </div>
           {trajectoryMode === 'initial_aware' && approachEePoses && approachEePoses.length > 0 && (
             <>
-              <span className="text-slate-700">|</span>
+              <span className="text-neutral-700">|</span>
               <div className="flex items-center gap-1">
-                <span className="w-2.5 h-2.5 rounded-full bg-purple-500 shadow-sm shadow-purple-500/50" />
-                <span className="font-semibold text-purple-300">Purple:</span>
-                <span className="text-slate-400">Approach Path</span>
+                <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+                <span className="font-semibold text-neutral-200">Purple:</span>
+                <span className="text-neutral-400">Approach Path</span>
               </div>
             </>
           )}
           {eePoses && eePoses.length > 0 && showCameraPath && (
             <>
-              <span className="text-slate-700">|</span>
+              <span className="text-neutral-700">|</span>
               <div className="flex items-center gap-1">
-                <span className="w-3 h-0.5 bg-cyan-400" />
-                <span className="font-semibold text-cyan-300">Cyan:</span>
-                <span className="text-slate-400">Cam Path</span>
+                <span className="w-2.5 h-0.5 bg-cyan-400" />
+                <span className="font-semibold text-neutral-200">Cyan:</span>
+                <span className="text-neutral-400">Cam Path</span>
               </div>
             </>
           )}
         </div>
 
-        <div className="bg-slate-900/80 backdrop-blur-sm border border-slate-800/80 px-2.5 py-1 rounded-lg text-[9.5px] text-slate-400 font-mono flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
-          <Compass className="w-3 h-3 text-indigo-400" />
+        <div className="bg-[#0a0a0a]/80 backdrop-blur-sm border border-neutral-800 px-2.5 py-1 rounded-lg text-[9.5px] text-neutral-400 font-mono flex items-center gap-1.5">
+          <Compass className="w-3 h-3 text-neutral-400" />
           <span>Scrub timeline to articulate arm • Drag: Rotate • Scroll: Zoom</span>
         </div>
       </div>

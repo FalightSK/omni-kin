@@ -12,6 +12,8 @@ from robot_kinematics import (
     SO101OmniKinKinematics,
     SO100Kinematics,
     SO101Kinematics,
+    DHKinematics,
+    universal_soft_saturation,
     WorkspaceCalibrator,
     CameraGripperCalibrator,
     get_robot_solver,
@@ -229,6 +231,56 @@ def test_camera_gripper_calibrator():
 
     print('[PASS] 6-DoF Camera-to-Gripper Calibrator fully verified!')
 
+
+def test_universal_soft_barrier_and_multi_robot_smoothing():
+    print('\n=== Test 7: Universal Soft-Barrier & Multi-Robot Joint Smoothing ===')
+
+    # 1. Test universal_soft_saturation
+    limits = (-90.0, 5.0)
+    noisy_angles = np.array([4.2, 4.9, 5.3, 4.8, 5.1, 5.5, 4.7, 5.2])
+    soft_angles = universal_soft_saturation(noisy_angles, limits[0], limits[1], margin_ratio=0.08)
+    assert np.all(soft_angles <= 5.0), 'Must not exceed 5.0'
+    assert np.all(soft_angles >= -90.0), 'Must not be less than -90.0'
+    print(f'  Soft saturation test passed! Max value: {np.max(soft_angles):.3f} <= 5.0 [OK]')
+
+    # 2. Test smooth_joint_trajectory on SO101OmniKinKinematics
+    solver_omni = get_robot_solver('so_arm101_omni_kin', q3_safe_max_deg=0.0)
+    T = 60
+    t = np.linspace(0, 2, T)
+    clean_q = np.zeros((T, 6))
+    clean_q[:, 1] = 20.0 * np.sin(t)
+    clean_q[:, 2] = -30.0 + 10.0 * np.cos(t)
+    clean_q[:, 3] = 0.0 + 1.5 * np.sin(20 * t) + np.random.normal(0, 0.5, T)
+    clean_q[:, 5] = 50.0
+
+    raw_wrist_jerk = np.diff(np.diff(clean_q[:, 3]))
+    smoothed_q = solver_omni.smooth_joint_trajectory(clean_q, fps=30.0)
+    smooth_wrist_jerk = np.diff(np.diff(smoothed_q[:, 3]))
+
+    assert np.all(smoothed_q[:, 3] <= 0.0 + 1e-4), f'Wrist pitch exceeded ceiling: {np.max(smoothed_q[:, 3])}'
+    assert np.std(smooth_wrist_jerk) < np.std(raw_wrist_jerk) * 0.35, 'Smoothing must suppress jerk by >65%'
+    print(f'  OMNI-KIN Joint Smoothing Passed: Jerk std reduced from {np.std(raw_wrist_jerk):.3f} to {np.std(smooth_wrist_jerk):.3f} [OK]')
+
+    # 3. Test on Custom 6-DOF Robot with wrist pitch at joint 4
+    custom_dh = [
+        {'name': 'base_yaw', 'a': 0, 'alpha_deg': 90, 'd': 0.15, 'theta_deg': 0, 'limits_deg': [-180, 180]},
+        {'name': 'shoulder_pitch', 'a': 0.20, 'alpha_deg': 0, 'd': 0, 'theta_deg': 0, 'limits_deg': [-90, 90]},
+        {'name': 'elbow_pitch', 'a': 0.18, 'alpha_deg': 0, 'd': 0, 'theta_deg': 0, 'limits_deg': [-120, 120]},
+        {'name': 'wrist_roll', 'a': 0, 'alpha_deg': 90, 'd': 0.08, 'theta_deg': 0, 'limits_deg': [-180, 180]},
+        {'name': 'wrist_pitch', 'a': 0, 'alpha_deg': 0, 'd': 0.10, 'theta_deg': 0, 'limits_deg': [-90, 10]},
+        {'name': 'wrist_yaw', 'a': 0, 'alpha_deg': 0, 'd': 0.05, 'theta_deg': 0, 'limits_deg': [-180, 180]},
+    ]
+    solver_6dof = DHKinematics(custom_dh, model_name='Custom-6DOF', q3_safe_max_deg=5.0)
+    assert solver_6dof.wrist_pitch_idx == 4, f'Expected wrist pitch at joint 4, got {solver_6dof.wrist_pitch_idx}'
+
+    traj_6dof = np.zeros((T, 6))
+    traj_6dof[:, 4] = 6.0 + np.random.normal(0, 1.0, T)
+    smoothed_6dof = solver_6dof.smooth_joint_trajectory(traj_6dof, fps=30.0)
+    assert np.all(smoothed_6dof[:, 4] <= 5.0 + 1e-4), 'Custom 6-DOF wrist pitch must respect safe max ceiling!'
+    print(f'  Custom 6-DOF Robot with wrist at joint {solver_6dof.wrist_pitch_idx} passed successfully! Max={np.max(smoothed_6dof[:, 4]):.2f} deg [OK]')
+    print('[PASS] Universal Soft-Barrier & Multi-Robot Joint Smoothing verified!')
+
+
 if __name__ == '__main__':
     test_dh_tables_and_specs()
     test_omnikin_forward_inverse_consistency()
@@ -237,6 +289,7 @@ if __name__ == '__main__':
     test_workspace_calibrator()
     test_feasible_ik_and_auto_align()
     test_camera_gripper_calibrator()
+    test_universal_soft_barrier_and_multi_robot_smoothing()
     print('\nALL ROBOT KINEMATICS & WORKSPACE CALIBRATION TESTS PASSED!')
 
 

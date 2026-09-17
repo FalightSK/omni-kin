@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { Video, Terminal, Cpu, CheckCircle2, Layers } from 'lucide-react';
+import { Video, Terminal, Cpu, CheckCircle2, Layers, AlertCircle, RefreshCw } from 'lucide-react';
 
 export default function VideoPlayer({
   videoUrl,
@@ -97,14 +97,25 @@ export default function VideoPlayer({
       setVideoDims(aspectLabel);
     }
 
-    // Apply any pending seeks once metadata is available
-    if (pendingSeekRef.current !== null) {
-      video.currentTime = pendingSeekRef.current;
+    // Apply any pending seeks once metadata or data is available
+    applyPendingSeek();
+  };
+
+  const applyPendingSeek = () => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (pendingSeekRef.current !== null && Number.isFinite(pendingSeekRef.current)) {
+      try {
+        video.currentTime = pendingSeekRef.current;
+      } catch (_) {}
       pendingSeekRef.current = null;
     } else if (!isApproachPhase && currentFrameIndex > 0) {
       const targetTime = Math.max(0, currentFrameIndex / (fps || 30));
       if (Number.isFinite(targetTime) && targetTime > 0) {
-        video.currentTime = targetTime;
+        try {
+          video.currentTime = targetTime;
+        } catch (_) {}
       }
     }
   };
@@ -113,7 +124,26 @@ export default function VideoPlayer({
 
   return (
     <div className="w-full h-full relative rounded-2xl overflow-hidden glass-card flex items-center justify-center bg-black/95 select-none">
-      {activeVideoUrl ? (
+      {videoError && activeVideoUrl === videoUrl ? (
+        <div className="flex flex-col items-center gap-2 text-neutral-400 py-10 text-center p-4">
+          <AlertCircle className="w-8 h-8 text-neutral-500 mb-1" />
+          <span className="text-xs font-semibold text-neutral-200 font-mono">Video playback unavailable</span>
+          <span className="text-[10px] text-neutral-500 max-w-xs font-mono truncate">
+            {activeVideoUrl || 'No video source'}
+          </span>
+          <button
+            onClick={() => {
+              setVideoError(false);
+              if (videoRef.current) {
+                videoRef.current.load();
+              }
+            }}
+            className="mt-2 px-3 py-1.5 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-200 text-xs hover:bg-neutral-800 flex items-center gap-1.5 transition-colors font-mono"
+          >
+            <RefreshCw className="w-3 h-3" /> Retry Loading
+          </button>
+        </div>
+      ) : activeVideoUrl ? (
         <video
           key={activeVideoUrl}
           ref={videoRef}
@@ -122,6 +152,8 @@ export default function VideoPlayer({
           muted
           preload="auto"
           onLoadedMetadata={handleLoadedMetadata}
+          onLoadedData={applyPendingSeek}
+          onCanPlay={applyPendingSeek}
           onError={() => {
             console.warn('Video failed to load for:', activeVideoUrl);
             setVideoError(true);
@@ -137,24 +169,24 @@ export default function VideoPlayer({
           }}
         />
       ) : (
-        <div className="flex flex-col items-center gap-2 text-slate-500 py-12">
-          <Video className="w-8 h-8 stroke-1 text-slate-600" />
-          <span className="text-xs font-medium">No video recording loaded</span>
+        <div className="flex flex-col items-center gap-2 text-neutral-500 py-12">
+          <Video className="w-8 h-8 stroke-1 text-neutral-600" />
+          <span className="text-xs font-medium font-mono">No video recording loaded</span>
         </div>
       )}
 
       {/* Top Left: Stream Badge & Dev View Mode Toggle */}
       {showBadge && (
-        <div className="absolute top-3 left-3 bg-slate-900/90 backdrop-blur-md border border-slate-800 px-2 py-1 rounded-xl text-[11px] font-medium text-slate-300 flex items-center gap-2 z-20 shadow-lg">
+        <div className="absolute top-3 left-3 bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 px-2 py-1 rounded-xl text-[11px] font-medium text-neutral-300 flex items-center gap-2 z-20 shadow-lg">
           {devVideoUrl && setIsDevView ? (
-            <div className="flex items-center gap-1 bg-slate-950/80 p-0.5 rounded-lg border border-slate-800/80">
+            <div className="flex items-center gap-1 bg-[#050505] p-0.5 rounded-lg border border-neutral-800">
               <button
                 type="button"
                 onClick={() => setIsDevView(false)}
-                className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all ${
+                className={`px-2 py-0.5 rounded text-[10px] transition-all ${
                   !isDevView
-                    ? 'bg-indigo-600 text-white shadow-sm font-semibold'
-                    : 'text-slate-400 hover:text-slate-200'
+                    ? 'bg-white text-black font-semibold shadow-sm'
+                    : 'text-neutral-400 hover:text-neutral-200'
                 }`}
               >
                 Raw View
@@ -164,8 +196,8 @@ export default function VideoPlayer({
                 onClick={() => setIsDevView(true)}
                 className={`px-2 py-0.5 rounded text-[10px] font-medium flex items-center gap-1 transition-all ${
                   isDevView
-                    ? 'bg-amber-500 text-slate-950 font-bold shadow-sm'
-                    : 'text-slate-400 hover:text-amber-300'
+                    ? 'bg-white text-black font-semibold shadow-sm'
+                    : 'text-neutral-400 hover:text-neutral-200'
                 }`}
                 title="View ArUco Marker detection and Virtual SLAM tracking overlays"
               >
@@ -175,13 +207,13 @@ export default function VideoPlayer({
             </div>
           ) : (
             <div className="flex items-center gap-1.5 px-2 py-0.5">
-              <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
-              <span>Camera Stream</span>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-neutral-200">Camera Stream</span>
             </div>
           )}
 
           {videoDims && (
-            <span className="text-slate-400 font-mono text-[10px] px-1 hidden sm:inline">
+            <span className="text-neutral-500 font-mono text-[10px] px-1 hidden sm:inline">
               {videoDims}
             </span>
           )}
@@ -190,17 +222,17 @@ export default function VideoPlayer({
 
       {/* Top Right: Real-time Anchor Status Badge when in Dev View */}
       {isDevView && currTelemetry && (
-        <div className="absolute top-3 right-3 bg-slate-950/90 backdrop-blur-md border border-amber-500/30 px-3 py-1.5 rounded-xl text-[11px] font-sans text-amber-300 flex items-center gap-2 z-20 shadow-xl pointer-events-none">
+        <div className="absolute top-3 right-3 bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 px-3 py-1.5 rounded-xl text-[11px] font-sans text-neutral-200 flex items-center gap-2 z-20 shadow-xl pointer-events-none">
           <span
-            className={`w-2.5 h-2.5 rounded-full animate-pulse ${
+            className={`w-2 h-2 rounded-full animate-pulse ${
               currTelemetry.source === 'dual_aruco' || currTelemetry.source === 'single_aruco'
-                ? 'bg-emerald-400 shadow-sm shadow-emerald-400/50'
+                ? 'bg-emerald-400'
                 : currTelemetry.source === 'feature_pnp' || currTelemetry.source === 'feature_vo'
-                ? 'bg-amber-400 shadow-sm shadow-amber-400/50'
-                : 'bg-orange-400 shadow-sm shadow-orange-400/50'
+                ? 'bg-amber-400'
+                : 'bg-neutral-400'
             }`}
           />
-          <span className="font-semibold text-slate-100">
+          <span className="font-semibold text-neutral-200">
             {currTelemetry.source === 'dual_aruco'
               ? '🏷️ ArUco Dual Board (Table Locked)'
               : currTelemetry.source === 'single_aruco'
@@ -209,9 +241,9 @@ export default function VideoPlayer({
               ? '🌐 Virtual SLAM (Scene Anchors Active)'
               : '⚡ Inertial Continuity'}
           </span>
-          <span className="text-slate-600">|</span>
-          <span className="text-slate-300 font-mono text-[10px]">
-            {currTelemetry.tags_detected?.length > 0 ? 'Tag Visible' : 'Tag Hidden (Anchored to Scene)'}
+          <span className="text-neutral-700">|</span>
+          <span className="text-neutral-400 font-mono text-[10px]">
+            {currTelemetry.tags_detected?.length > 0 ? 'Tag Visible' : 'Tag Hidden (Anchored)'}
           </span>
         </div>
       )}
