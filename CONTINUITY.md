@@ -56,7 +56,7 @@ flowchart TD
     end
 
     Client -- "HTTPS (Port 8443) / Local Wi-Fi" --> Backend
-    Backend -- "WebSockets / REST" --> Dashboard
+    Backend -- "REST polling / HTTPS" --> Dashboard
     LE --> Export
 ```
 
@@ -170,7 +170,7 @@ To deliver zero-latency interactive 3D rendering alongside high-precision datase
 
 ## 5. LeRobot v2.0 Dataset Schema & Invariants
 
-Datasets exported via `lerobot_exporter.py` strictly adhere to the Hugging Face LeRobot v2.0 / v2.1 specifications.
+Datasets exported via `lerobot_exporter.py` are checked locally for the required frame, action, and video-parity invariants. Compatibility with a specific installed LeRobot version must also be verified in release testing.
 
 ### Mandatory Invariants (Verified via Unit Tests)
 1. **Action Horizon Shifting**:

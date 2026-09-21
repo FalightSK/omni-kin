@@ -8,7 +8,23 @@ import os
 import numpy as np
 import xml.etree.ElementTree as ET
 from scipy.spatial.transform import Rotation as R
+from scipy.optimize import minimize
 import scipy.signal
+
+def rodrigues_rot(axis, theta):
+    K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    return np.eye(3) + np.sin(theta) * K + (1 - np.cos(theta)) * (K @ K)
+
+
+def rpy_to_matrix(rpy):
+    r, p, y = rpy
+    cr, sr = np.cos(r), np.sin(r)
+    cp, sp = np.cos(p), np.sin(p)
+    cy, sy = np.cos(y), np.sin(y)
+    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    return Rz @ Ry @ Rx
 
 R_CAM_TO_PHONE = np.diag([1.0, -1.0, -1.0])
 
@@ -516,6 +532,43 @@ class DHKinematics:
 
         return T
 
+    def forward_kinematics_chain(self, joints):
+        """
+        Computes 3D joint and link positions along the serial kinematic chain:
+        [Base (0,0,0), Yaw joint, Shoulder, Elbow, Wrist, Tip]
+        Returns list of 3D numpy arrays matching the URDF link positions format.
+        """
+        q = np.asarray(joints[:5], dtype=np.float64)
+        q0 = q[0] if len(q) > 0 else 0.0
+        q1 = q[1] if len(q) > 1 else 0.0
+        q2 = q[2] if len(q) > 2 else 0.0
+        q3 = q[3] if len(q) > 3 else 0.0
+
+        th1 = q1
+        th2 = q1 + q2
+        th3 = q1 + q2 + q3
+
+        cos_q0 = np.cos(q0)
+        sin_q0 = np.sin(q0)
+
+        p_base = np.array([0.0, 0.0, 0.0])
+        p_turret = np.array([0.0, 0.0, self.L1 * 0.5])
+        p_shoulder = np.array([0.0, 0.0, self.L1])
+
+        r_elbow = self.L2 * np.cos(th1)
+        z_elbow = self.L1 + self.L2 * np.sin(th1)
+        p_elbow = np.array([r_elbow * cos_q0, r_elbow * sin_q0, z_elbow])
+
+        r_wrist = r_elbow + self.L3 * np.cos(th2)
+        z_wrist = z_elbow + self.L3 * np.sin(th2)
+        p_wrist = np.array([r_wrist * cos_q0, r_wrist * sin_q0, z_wrist])
+
+        r_tip = r_wrist + self.L4 * np.cos(th3)
+        z_tip = z_wrist + self.L4 * np.sin(th3)
+        p_tip = np.array([r_tip * cos_q0, r_tip * sin_q0, z_tip])
+
+        return [p_base, p_turret, p_shoulder, p_elbow, p_wrist, p_tip]
+
     def solve_feasible_ik(self, target_pose, gripper_state=50.0, prev_joints=None, allow_pitch_adaptation=True):
         """
         Robust Inverse Kinematics solver designed to solve impossible or boundary kinematics
@@ -746,7 +799,8 @@ class DHKinematics:
             "achieved_pose": achieved_pose,
             "is_feasible": is_feasible,
             "error_distance_cm": round(err_dist_cm, 2),
-            "clamped_reasons": list(set(clamped_reasons))
+            "clamped_reasons": list(set(clamped_reasons)),
+            "link_positions": [p.tolist() for p in self.forward_kinematics_chain(best_q)]
         }
 
     def inverse_kinematics(self, target_pose, gripper_state=50.0, prev_joints=None, elbow_up=True, allow_pitch_adaptation=True):
@@ -797,9 +851,7 @@ class DHKinematics:
             return joint_arr.copy()
 
         n_frames = len(joint_arr)
-        num_limits = len(self.joint_limits)
-        n_arm = min(joint_arr.shape[1], num_limits)
-
+        n_arm = min(joint_arr.shape[1], len(self.dh_table))
         arm_joints = joint_arr[:, :n_arm].copy()
         extra = joint_arr[:, n_arm:].copy() if joint_arr.shape[1] > n_arm else None
 
@@ -930,45 +982,7 @@ def normalize_robot_type(robot_type):
     return r if r in ROBOT_PRESETS else "so_arm101_omni_kin"
 
 
-def get_robot_solver(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0, **kwargs):
-    """Factory helper to obtain the kinematic solver instance with camera safety limits."""
-    r_type = normalize_robot_type(robot_type)
-    if r_type in ROBOT_PRESETS:
-        return ROBOT_PRESETS[r_type]["class"](q3_safe_max_deg=q3_safe_max_deg, **kwargs)
-    return SO101OmniKinKinematics(q3_safe_max_deg=q3_safe_max_deg, **kwargs)
 
-
-def get_robot_specs(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0):
-    """Returns metadata, DH table, and component breakdown for the specified robot preset."""
-    r_type = normalize_robot_type(robot_type)
-    preset = ROBOT_PRESETS.get(r_type, ROBOT_PRESETS["so_arm101_omni_kin"])
-    urdf_str = get_robot_urdf(r_type)
-    components = None
-    try:
-        _, parsed_specs = URDFParser.parse_urdf(urdf_str, q3_safe_max_deg=q3_safe_max_deg)
-        components = parsed_specs.get("components")
-    except Exception:
-        pass
-
-    dh_table_copy = [dict(row) for row in preset["dh_table"]]
-    wrist_idx = find_wrist_pitch_index(dh_table_copy)
-    if len(dh_table_copy) > wrist_idx and q3_safe_max_deg is not None:
-        limits = list(dh_table_copy[wrist_idx]["limits_deg"])
-        limits[1] = min(limits[1], float(q3_safe_max_deg))
-        dh_table_copy[wrist_idx]["limits_deg"] = limits
-
-    return {
-        "robot_type": r_type,
-        "name": preset["name"],
-        "description": preset["description"],
-        "reach_meters": preset["reach_meters"],
-        "payload_kg": preset["payload_kg"],
-        "dh_table": dh_table_copy,
-        "urdf": urdf_str,
-        "components": components,
-        "wrist_pitch_idx": wrist_idx,
-        "q3_safe_max_deg": float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
-    }
 
 
 # ==============================================================================
@@ -1120,7 +1134,7 @@ class URDFParser:
     """
 
     @staticmethod
-    def parse_urdf(urdf_text, q3_safe_max_deg=0.0):
+    def parse_urdf(urdf_text, q3_safe_max_deg=None):
         """
         Parses a URDF XML string, extracts the serial kinematic joint chain,
         and constructs the corresponding Denavit-Hartenberg (DH) table and robot metadata.
@@ -1329,18 +1343,8 @@ class URDFParser:
             if not raw_limits or len(raw_limits) != 2:
                 return [-180.0, 180.0]
             low, high = float(raw_limits[0]), float(raw_limits[1])
-            span = high - low
-            if j_idx == 1:  # Shoulder pitch
-                if high < 45.0:
-                    half_span = min(100.0, round(span / 2.0, 1))
-                    return [-half_span, half_span]
-            elif j_idx == 2:  # Elbow pitch
-                if low >= -10.0:
-                    half_span = min(150.0, round(span, 1))
-                    return [-half_span, half_span]
-            elif j_idx == detected_wrist_idx:  # Universally detected wrist pitch joint
-                if q3_safe_max_deg is not None:
-                    high = min(high, float(q3_safe_max_deg))
+            if j_idx == detected_wrist_idx and q3_safe_max_deg is not None:
+                high = min(high, float(q3_safe_max_deg))
             return [round(low, 1), round(high, 1)]
 
         # Construct DH Table
@@ -1573,15 +1577,396 @@ def get_robot_urdf(robot_type="so_arm101_omni_kin"):
     return SO101_URDF_TEMPLATE
 
 
+# ==============================================================================
+# 4. Universal URDF Kinematics Engine (Robot & Topology Agnostic)
+# ==============================================================================
+
+class URDFKinematics:
+    """
+    Universal Robot-Agnostic Kinematics Engine parsed dynamically from ANY URDF description.
+    Supports arbitrary joint origins, rotation axes, joint limits, and coordinate orientations.
+    Computes exact forward kinematics, reach direction, bounded numerical inverse kinematics,
+    and link position chains.
+    """
+    def __init__(self, urdf_content, model_name="URDF-Robot", q3_safe_max_deg=0.0, **kwargs):
+        if not urdf_content or not str(urdf_content).strip():
+            raise ValueError("Empty URDF XML provided.")
+        raw_xml = str(urdf_content).strip()
+        if raw_xml.startswith("<"):
+            self.root = ET.fromstring(raw_xml)
+        elif os.path.exists(raw_xml):
+            self.root = ET.parse(raw_xml).getroot()
+        else:
+            self.root = ET.fromstring(raw_xml)
+
+        self.model_name = self.root.get("name", model_name)
+        self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
+
+        # 1. Parse all joints and links
+        self.joints_by_parent = {}
+        self.joints_by_child = {}
+        self.joints_dict = {}
+
+        for j_elem in self.root.findall(".//joint"):
+            j_name = j_elem.get("name", "")
+            j_type = j_elem.get("type", "revolute")
+            p_link = j_elem.find("parent").get("link", "") if j_elem.find("parent") is not None else ""
+            c_link = j_elem.find("child").get("link", "") if j_elem.find("child") is not None else ""
+
+            orig_elem = j_elem.find("origin")
+            xyz = [float(v) for v in orig_elem.attrib.get("xyz", "0 0 0").split()] if orig_elem is not None else [0.0, 0.0, 0.0]
+            rpy = [float(v) for v in orig_elem.attrib.get("rpy", "0 0 0").split()] if orig_elem is not None else [0.0, 0.0, 0.0]
+
+            axis_elem = j_elem.find("axis")
+            axis = [float(v) for v in axis_elem.attrib.get("xyz", "0 0 1").split()] if axis_elem is not None else [0.0, 0.0, 1.0]
+            norm_a = np.linalg.norm(axis)
+            axis = (np.array(axis) / norm_a).tolist() if norm_a > 1e-6 else [0.0, 0.0, 1.0]
+
+            lim_elem = j_elem.find("limit")
+            low = float(lim_elem.attrib.get("lower", -np.pi)) if lim_elem is not None else -np.pi
+            up = float(lim_elem.attrib.get("upper", np.pi)) if lim_elem is not None else np.pi
+
+            T_orig = np.eye(4, dtype=np.float64)
+            T_orig[:3, :3] = rpy_to_matrix(rpy)
+            T_orig[:3, 3] = xyz
+
+            j_info = {
+                "name": j_name,
+                "type": j_type,
+                "parent": p_link,
+                "child": c_link,
+                "xyz": xyz,
+                "rpy": rpy,
+                "axis": axis,
+                "limits_rad": (low, up),
+                "limits_deg": (float(np.degrees(low)), float(np.degrees(up))),
+                "T_orig": T_orig
+            }
+            self.joints_dict[j_name] = j_info
+            if p_link not in self.joints_by_parent:
+                self.joints_by_parent[p_link] = []
+            self.joints_by_parent[p_link].append(j_info)
+            self.joints_by_child[c_link] = j_info
+
+        # 2. Trace serial chain from root link
+        all_parents = set(self.joints_by_parent.keys())
+        all_children = set(self.joints_by_child.keys())
+        base_cands = list(all_parents - all_children)
+        curr = base_cands[0] if base_cands else (list(all_parents)[0] if all_parents else "base_link")
+        self.base_link = curr
+
+        self.arm_joints = []
+        while curr in self.joints_by_parent:
+            children = self.joints_by_parent[curr]
+            primary = None
+            for j in children:
+                if j["type"] in ["revolute", "continuous"]:
+                    primary = j
+                    break
+            if not primary:
+                primary = children[0]
+            self.arm_joints.append(primary)
+            curr = primary["child"]
+            if len(self.arm_joints) >= 6:
+                break
+
+        # Filter to revolute / continuous joints (up to 5 for arm body)
+        self.active_joints = [j for j in self.arm_joints if j["type"] in ["revolute", "continuous"]][:5]
+        self.num_joints = len(self.active_joints)
+        self.joint_limits = [list(j["limits_rad"]) for j in self.active_joints]
+        self.joint_names = [j["name"] for j in self.active_joints]
+
+        # Calculate max reach and physical link lengths
+        self.max_reach = float(np.sum([np.linalg.norm(j["xyz"]) for j in self.arm_joints]))
+        if self.max_reach < 0.10:
+            self.max_reach = 0.385
+
+        self.L1 = float(np.linalg.norm(self.arm_joints[0]["xyz"])) if len(self.arm_joints) > 0 else 0.119
+        self.L2 = float(np.linalg.norm(self.arm_joints[1]["xyz"])) if len(self.arm_joints) > 1 else 0.140
+        self.L3 = float(np.linalg.norm(self.arm_joints[2]["xyz"])) if len(self.arm_joints) > 2 else 0.135
+        self.L4 = float(np.linalg.norm(self.arm_joints[3]["xyz"])) if len(self.arm_joints) > 3 else 0.110
+        self.wrist_pitch_idx = min(3, self.num_joints - 1)
+
+        # 3. Detect nominal reach vector from FK at mid joint configuration
+        mid_q = np.array([(lo + up) / 2.0 for lo, up in self.joint_limits])
+        p_mid = self.forward_kinematics(mid_q)[:3]
+        norm_xy = np.hypot(p_mid[0], p_mid[1])
+        if norm_xy > 0.02:
+            self.reach_angle_rad = float(np.arctan2(p_mid[1], p_mid[0]))
+        else:
+            self.reach_angle_rad = 0.0
+        self.reach_angle_deg = float(np.degrees(self.reach_angle_rad))
+
+    def update_q3_safe_max(self, q3_safe_max_deg):
+        self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
+
+    def update_wrist_safe_max(self, safe_max_deg):
+        self.update_q3_safe_max(safe_max_deg)
+
+    def update_camera_extrinsics(self, forward_cm=None, height_cm=None, lateral_cm=None):
+        pass
+
+    def get_dh_table(self):
+        return getattr(self, "dh_table", [])
+
+    def forward_kinematics(self, q_rad):
+        T = np.eye(4, dtype=np.float64)
+        for i, j in enumerate(self.active_joints):
+            th = q_rad[i] if i < len(q_rad) else 0.0
+            T_j = np.eye(4, dtype=np.float64)
+            T_j[:3, :3] = rodrigues_rot(j["axis"], th)
+            T = T @ j["T_orig"] @ T_j
+
+        pos = T[:3, 3]
+        try:
+            r = R.from_matrix(T[:3, :3])
+            euler = r.as_euler('xyz')
+        except Exception:
+            euler = [0.0, 0.0, 0.0]
+        return np.concatenate([pos, euler])
+
+    def forward_kinematics_chain(self, q_rad):
+        positions = [np.array([0.0, 0.0, 0.0])]
+        T = np.eye(4, dtype=np.float64)
+        for i, j in enumerate(self.active_joints):
+            th = q_rad[i] if i < len(q_rad) else 0.0
+            T_j = np.eye(4, dtype=np.float64)
+            T_j[:3, :3] = rodrigues_rot(j["axis"], th)
+            T = T @ j["T_orig"] @ T_j
+            positions.append(T[:3, 3].copy())
+        return positions
+
+    def clip_joint_limits(self, joints_deg):
+        q = np.array(joints_deg, dtype=np.float64)
+        for j in range(min(len(q), len(self.joint_limits))):
+            lo_deg = float(np.degrees(self.joint_limits[j][0]))
+            hi_deg = float(np.degrees(self.joint_limits[j][1]))
+            q[j] = np.clip(q[j], lo_deg, hi_deg)
+        return q
+
+    def solve_feasible_ik(self, target_pose, gripper_state=50.0, prev_joints=None, allow_pitch_adaptation=True):
+        target_pos = np.asarray(target_pose[:3], dtype=np.float64)
+        target_pos_eff = target_pos.copy()
+        target_pos_eff[2] = max(0.012, target_pos[2])
+
+        candidate_seeds = []
+        if prev_joints is not None and len(prev_joints) >= self.num_joints:
+            candidate_seeds.append(np.radians(np.asarray(prev_joints[:self.num_joints], dtype=np.float64)))
+
+        # Natural heuristic seeds based on target quadrant and reach direction
+        base_yaw = float(np.arctan2(target_pos[1], target_pos[0]) - self.reach_angle_rad)
+        base_yaw = (base_yaw + np.pi) % (2 * np.pi) - np.pi
+
+        candidate_seeds.append(np.array([base_yaw, -0.52, 1.05, -0.52, 0.0][:self.num_joints]))
+        candidate_seeds.append(np.array([base_yaw, 0.52, -1.05, 0.52, 0.0][:self.num_joints]))
+        candidate_seeds.append(np.array([base_yaw, -1.05, 1.57, -0.52, 0.0][:self.num_joints]))
+        candidate_seeds.append(np.array([(lo + up) / 2.0 for lo, up in self.joint_limits]))
+
+        wrist_idx = self.wrist_pitch_idx
+        safe_max_rad = np.radians(self.q3_safe_max_deg)
+
+        best_res = None
+        best_err = 1e9
+
+        for q_seed in candidate_seeds:
+            q_init = q_seed.copy()
+            for i, (lo, up) in enumerate(self.joint_limits):
+                q_init[i] = np.clip(q_init[i], lo + 1e-4, up - 1e-4)
+
+            def loss(q):
+                pos = self.forward_kinematics(q)[:3]
+                pos_err = np.sum((pos - target_pos_eff)**2)
+                wrist_penalty = 0.0
+                if self.q3_safe_max_deg is not None and len(q) > wrist_idx:
+                    w_val = q[wrist_idx]
+                    if w_val > safe_max_rad:
+                        wrist_penalty = 50.0 * ((w_val - safe_max_rad)**2)
+                reg = 1e-4 * np.sum((q - q_init)**2)
+                return pos_err + wrist_penalty + reg
+
+            res = minimize(loss, q_init, method='L-BFGS-B', bounds=self.joint_limits, tol=1e-6)
+            achieved_pose = self.forward_kinematics(res.x)
+            err_dist_cm = float(np.linalg.norm(achieved_pose[:3] - target_pos) * 100.0)
+
+            if err_dist_cm < best_err:
+                best_err = err_dist_cm
+                best_res = res
+                if err_dist_cm < 0.30:  # < 3mm error, highly accurate convergence
+                    break
+
+        achieved_pose = self.forward_kinematics(best_res.x)
+        err_dist_cm = float(np.linalg.norm(achieved_pose[:3] - target_pos) * 100.0)
+
+        joints_deg = np.degrees(best_res.x)
+        full_joints = np.zeros(self.num_joints + 1, dtype=np.float32)
+        full_joints[:self.num_joints] = joints_deg
+        full_joints[-1] = float(gripper_state)
+
+        clamped_reasons = []
+        if err_dist_cm > 2.0:
+            clamped_reasons.append("OUT_OF_REACH")
+        if target_pos[2] < 0.012:
+            clamped_reasons.append("TABLE_COLLISION")
+
+        chain = self.forward_kinematics_chain(best_res.x)
+        return {
+            "joints": full_joints,
+            "achieved_pose": achieved_pose,
+            "is_feasible": bool(err_dist_cm < 1.5 and len(clamped_reasons) == 0),
+            "error_distance_cm": round(err_dist_cm, 2),
+            "clamped_reasons": clamped_reasons,
+            "link_positions": [p.tolist() for p in chain]
+        }
+
+    def inverse_kinematics(self, target_pose, gripper_state=50.0, prev_joints=None, **kwargs):
+        res = self.solve_feasible_ik(target_pose, gripper_state=gripper_state, prev_joints=prev_joints)
+        return res["joints"]
+
+    def smooth_joint_trajectory(self, joint_trajectory, fps=30.0, time_window_ms=200, soft_margin_ratio=0.08, max_deg_per_sec=180.0):
+        joint_arr = np.asarray(joint_trajectory, dtype=np.float64)
+        if len(joint_arr) == 0:
+            return joint_arr.copy()
+
+        n_frames = len(joint_arr)
+        n_arm = min(joint_arr.shape[1], self.num_joints)
+        arm_joints = joint_arr[:, :n_arm].copy()
+        extra = joint_arr[:, n_arm:].copy() if joint_arr.shape[1] > n_arm else None
+
+        # 1. Soft saturation to limits
+        for j in range(n_arm):
+            lo_deg = float(np.degrees(self.joint_limits[j][0]))
+            hi_deg = float(np.degrees(self.joint_limits[j][1]))
+            if j == self.wrist_pitch_idx and self.q3_safe_max_deg is not None:
+                hi_deg = min(hi_deg, float(self.q3_safe_max_deg))
+            arm_joints[:, j] = universal_soft_saturation(arm_joints[:, j], lo_deg, hi_deg, margin=0.5)
+
+        # 2. Velocity slew rate limit
+        dt = 1.0 / max(1.0, float(fps))
+        max_delta = max_deg_per_sec * dt
+        for i in range(1, n_frames):
+            delta = arm_joints[i] - arm_joints[i - 1]
+            clamped_delta = np.clip(delta, -max_delta, max_delta)
+            arm_joints[i] = arm_joints[i - 1] + clamped_delta
+
+        # 3. Savitzky-Golay polynomial smoothing
+        window_length = int(round((time_window_ms / 1000.0) * fps))
+        if window_length % 2 == 0:
+            window_length += 1
+        window_length = max(5, window_length)
+
+        if n_frames >= window_length:
+            try:
+                poly_order = min(2, window_length - 2)
+                for j in range(n_arm):
+                    smoothed_col = scipy.signal.savgol_filter(arm_joints[:, j], window_length=window_length, polyorder=poly_order)
+                    arm_joints[:, j] = smoothed_col
+            except Exception:
+                pass
+
+        # Final pass clipping
+        for j in range(n_arm):
+            lo_deg = float(np.degrees(self.joint_limits[j][0]))
+            hi_deg = float(np.degrees(self.joint_limits[j][1]))
+            if j == self.wrist_pitch_idx and self.q3_safe_max_deg is not None:
+                hi_deg = min(hi_deg, float(self.q3_safe_max_deg))
+            arm_joints[:, j] = universal_soft_saturation(arm_joints[:, j], lo_deg, hi_deg, margin=0.5)
+
+        if extra is not None:
+            return np.hstack([arm_joints, extra]).astype(joint_arr.dtype)
+        return arm_joints.astype(joint_arr.dtype)
+
+
+# Subclass specializations backed by URDF descriptions
+class SO101OmniKinKinematics(URDFKinematics):
+    """SO-ARM101-OMNI-KIN 5-DOF Robot Arm Kinematics (Default Project Setup)."""
+    def __init__(self, q3_safe_max_deg=0.0, **kwargs):
+        urdf_str = get_robot_urdf("so_arm101_omni_kin")
+        super().__init__(urdf_str, model_name="SO-ARM101-OMNI-KIN", q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+        self.dh_table = SO101_OMNIKIN_DH_TABLE
+
+
+class SO101Kinematics(URDFKinematics):
+    """SO-101 5-DOF Robot Arm Kinematics (Refined Open Hardware Preset)."""
+    def __init__(self, q3_safe_max_deg=0.0, **kwargs):
+        urdf_str = get_robot_urdf("so101")
+        super().__init__(urdf_str, model_name="SO-101", q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+        self.dh_table = SO101_DH_TABLE
+
+
+class SO100Kinematics(URDFKinematics):
+    """SO-100 5-DOF Robot Arm Kinematics (LeRobot Original Preset)."""
+    def __init__(self, q3_safe_max_deg=0.0, **kwargs):
+        urdf_str = get_robot_urdf("so100")
+        super().__init__(urdf_str, model_name="SO-100", q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+        self.dh_table = SO100_DH_TABLE
+
+
+ROBOT_PRESETS["so_arm101_omni_kin"]["class"] = SO101OmniKinKinematics
+ROBOT_PRESETS["so101"]["class"] = SO101Kinematics
+ROBOT_PRESETS["so100"]["class"] = SO100Kinematics
+
+
+def get_robot_solver(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0, custom_dh_table=None, custom_urdf=None, **kwargs):
+    """Factory helper to obtain the kinematic solver instance with camera safety limits."""
+    if custom_urdf:
+        return URDFKinematics(custom_urdf, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+    r_type = normalize_robot_type(robot_type)
+    if r_type in ROBOT_PRESETS:
+        return ROBOT_PRESETS[r_type]["class"](q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+    urdf_content = get_robot_urdf(r_type)
+    if urdf_content:
+        return URDFKinematics(urdf_content, model_name=r_type, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+    if custom_dh_table:
+        return DHKinematics(custom_dh_table, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+    return SO101OmniKinKinematics(q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+
+
+def get_robot_specs(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0):
+    """Returns metadata, DH table, and component breakdown for the specified robot preset."""
+    r_type = normalize_robot_type(robot_type)
+    preset = ROBOT_PRESETS.get(r_type, ROBOT_PRESETS["so_arm101_omni_kin"])
+    urdf_str = get_robot_urdf(r_type)
+    components = None
+    try:
+        _, parsed_specs = URDFParser.parse_urdf(urdf_str, q3_safe_max_deg=q3_safe_max_deg)
+        components = parsed_specs.get("components")
+    except Exception:
+        pass
+
+    dh_table_copy = [dict(row) for row in preset["dh_table"]]
+    wrist_idx = find_wrist_pitch_index(dh_table_copy)
+    if len(dh_table_copy) > wrist_idx and q3_safe_max_deg is not None:
+        limits = list(dh_table_copy[wrist_idx]["limits_deg"])
+        limits[1] = min(limits[1], float(q3_safe_max_deg))
+        dh_table_copy[wrist_idx]["limits_deg"] = limits
+
+    solver = get_robot_solver(r_type, q3_safe_max_deg=q3_safe_max_deg)
+
+    return {
+        "robot_type": r_type,
+        "name": preset["name"],
+        "description": preset["description"],
+        "reach_meters": preset["reach_meters"],
+        "payload_kg": preset["payload_kg"],
+        "dh_table": dh_table_copy,
+        "urdf": urdf_str,
+        "components": components,
+        "wrist_pitch_idx": wrist_idx,
+        "q3_safe_max_deg": float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0,
+        "reach_angle_rad": getattr(solver, "reach_angle_rad", 0.0),
+        "reach_angle_deg": getattr(solver, "reach_angle_deg", 0.0)
+    }
+
 
 # ==============================================================================
-# 4. Workspace Calibrator (ArUco Table Plane <-> Robot Base Frame)
+# 5. Workspace Calibrator (ArUco Table Plane <-> Robot Base Frame)
 # ==============================================================================
 
 class WorkspaceCalibrator:
     """
     Transforms 6-DoF Cartesian poses between the ArUco Table Coordinate System (0,0,0)
     and the Robot Base Coordinate System.
+    Dynamically aligns the robot's physical reach vector to the table coordinate frame.
     
     Coordinate Conventions:
       ArUco Frame:
@@ -1593,16 +1978,23 @@ class WorkspaceCalibrator:
         Origin: Center of robot base mounting plate.
         Offset (x0, y0, z0): Robot base position relative to Tag A.
         Yaw (theta_yaw): Mounting heading angle around table normal Z.
+        Reach Angle (psi_reach): Robot nominal forward reach angle in URDF base frame.
     """
 
-    def __init__(self, offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0):
+    def __init__(self, offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0, reach_angle_rad=0.0):
         self.offset_x = float(offset_x)
         self.offset_y = float(offset_y)
         self.offset_z = float(offset_z)
         self.yaw_deg = float(yaw_deg)
         self.yaw_rad = np.radians(self.yaw_deg)
+        self.reach_angle_rad = float(reach_angle_rad)
 
-    def update_config(self, offset_x=None, offset_y=None, offset_z=None, yaw_deg=None):
+    @property
+    def effective_yaw_rad(self):
+        """Effective rotation angle from table frame to robot base frame."""
+        return self.yaw_rad - self.reach_angle_rad
+
+    def update_config(self, offset_x=None, offset_y=None, offset_z=None, yaw_deg=None, reach_angle_rad=None, reach_angle_deg=None):
         """Updates calibration offset parameters."""
         if offset_x is not None:
             self.offset_x = float(offset_x)
@@ -1613,6 +2005,10 @@ class WorkspaceCalibrator:
         if yaw_deg is not None:
             self.yaw_deg = float(yaw_deg)
             self.yaw_rad = np.radians(self.yaw_deg)
+        if reach_angle_rad is not None:
+            self.reach_angle_rad = float(reach_angle_rad)
+        elif reach_angle_deg is not None:
+            self.reach_angle_rad = np.radians(float(reach_angle_deg))
 
     def get_config(self):
         """Returns active calibration config dictionary."""
@@ -1620,12 +2016,15 @@ class WorkspaceCalibrator:
             "offset_x": self.offset_x,
             "offset_y": self.offset_y,
             "offset_z": self.offset_z,
-            "yaw_deg": self.yaw_deg
+            "yaw_deg": self.yaw_deg,
+            "reach_angle_rad": self.reach_angle_rad,
+            "reach_angle_deg": float(np.degrees(self.reach_angle_rad))
         }
 
     def aruco_to_robot(self, pose_aruco):
         """
         Transforms a 6-DoF pose [x, y, z, roll, pitch, yaw] from ArUco space into Robot Base frame.
+        Uses full 3D rotation matrix multiplication to avoid gimbal lock and Euler distortion.
         """
         xa, ya, za, roll, pitch, yaw = pose_aruco
 
@@ -1634,39 +2033,53 @@ class WorkspaceCalibrator:
         dy = ya - self.offset_y
         dz = za - self.offset_z
 
-        # Rotate by -yaw_rad around table normal Z
-        cos_th = np.cos(self.yaw_rad)
-        sin_th = np.sin(self.yaw_rad)
+        eff_yaw = self.effective_yaw_rad
+        cos_th = np.cos(eff_yaw)
+        sin_th = np.sin(eff_yaw)
 
         xr = cos_th * dx + sin_th * dy
         yr = -sin_th * dx + cos_th * dy
         zr = dz
 
-        # Transform yaw orientation angle
-        yaw_r = yaw - self.yaw_rad
-        # Normalize to [-pi, pi]
-        yaw_r = (yaw_r + np.pi) % (2 * np.pi) - np.pi
+        # Transform 3D orientation: R_robot = R_base.T @ R_aruco
+        try:
+            r_aruco = trajectory_euler_to_rotation_matrix([roll, pitch, yaw])
+            r_base = R.from_euler('z', eff_yaw).as_matrix()
+            r_robot = r_base.T @ r_aruco
+            roll_r, pitch_r, yaw_r = rotation_matrix_to_trajectory_euler(r_robot)
+        except Exception:
+            yaw_r = (yaw - eff_yaw + np.pi) % (2 * np.pi) - np.pi
+            roll_r, pitch_r = roll, pitch
 
-        return np.array([xr, yr, zr, roll, pitch, yaw_r], dtype=np.float64)
+        return np.array([xr, yr, zr, roll_r, pitch_r, yaw_r], dtype=np.float64)
 
     def robot_to_aruco(self, pose_robot):
         """
         Transforms a 6-DoF pose [x, y, z, roll, pitch, yaw] from Robot Base frame into ArUco space.
+        Uses full 3D rotation matrix multiplication to avoid gimbal lock and Euler distortion.
         """
         xr, yr, zr, roll, pitch, yaw = pose_robot
 
-        # Rotate by +yaw_rad around table normal Z
-        cos_th = np.cos(self.yaw_rad)
-        sin_th = np.sin(self.yaw_rad)
+        eff_yaw = self.effective_yaw_rad
+        cos_th = np.cos(eff_yaw)
+        sin_th = np.sin(eff_yaw)
 
         xa = cos_th * xr - sin_th * yr + self.offset_x
         ya = sin_th * xr + cos_th * yr + self.offset_y
         za = zr + self.offset_z
 
-        yaw_a = yaw + self.yaw_rad
-        yaw_a = (yaw_a + np.pi) % (2 * np.pi) - np.pi
+        # Transform 3D orientation: R_aruco = R_base @ R_robot
+        try:
+            r_robot = trajectory_euler_to_rotation_matrix([roll, pitch, yaw])
+            r_base = R.from_euler('z', eff_yaw).as_matrix()
+            r_aruco = r_base @ r_robot
+            roll_a, pitch_a, yaw_a = rotation_matrix_to_trajectory_euler(r_aruco)
+        except Exception:
+            yaw_a = (yaw + eff_yaw + np.pi) % (2 * np.pi) - np.pi
+            roll_a, pitch_a = roll, pitch
 
-        return np.array([xa, ya, za, roll, pitch, yaw_a], dtype=np.float64)
+        return np.array([xa, ya, za, roll_a, pitch_a, yaw_a], dtype=np.float64)
+
 
     def transform_trajectory(self, trajectory, to_robot=True):
         """
@@ -1977,7 +2390,9 @@ class TrajectoryPlanner:
 
     def __init__(self, solver=None, workspace_calibrator=None, camera_gripper_calibrator=None):
         self.solver = solver or get_robot_solver()
-        self.workspace_calibrator = workspace_calibrator or WorkspaceCalibrator()
+        self.workspace_calibrator = workspace_calibrator or WorkspaceCalibrator(reach_angle_rad=getattr(self.solver, "reach_angle_rad", 0.0))
+        if hasattr(self.solver, "reach_angle_rad"):
+            self.workspace_calibrator.reach_angle_rad = self.solver.reach_angle_rad
         self.camera_gripper_calibrator = camera_gripper_calibrator or CameraGripperCalibrator()
 
     def plan_approach_path(

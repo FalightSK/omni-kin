@@ -245,6 +245,82 @@ def test_ekf_velocity_leakage_damping():
     print(f"[PASS] test_ekf_velocity_leakage_damping passed! Final Position: {p_final}")
 
 
+def test_gripper_marker_tracking():
+    """
+    Unit tests for gripper jaw ArUco marker tracking (Tag 2 & Tag 3, 22mm).
+    Verifies:
+      1. Accurate open/close percentage mapping based on physical distance (28mm closed to 60mm open).
+      2. ZERO-FAILURE FALLBACK: Missing tags must NEVER fail or raise errors and must default to Open (100.0%).
+      3. Integration inside detect_marker_pnp.
+    """
+    tracker = VisualInertialTracker(
+        tag_a_size=0.10, tag_b_size=0.05, tag_a_id=0, tag_b_id=1
+    )
+    tracker.configure_gripper_markers({
+        "enabled": True,
+        "tag_id_a": 2,
+        "tag_id_b": 3,
+        "marker_size_mm": 22.0,
+        "open_distance_mm": 60.0,
+        "close_distance_mm": 28.0
+    })
+    camera_matrix, dist_coeffs = tracker.estimate_camera_matrix(1280, 720)
+
+    # 1. Test missing tags (Tag 2 & 3 not in frame) -> Must return detected=False, val=100.0
+    res_empty = tracker.detect_gripper_state([], [], camera_matrix, dist_coeffs)
+    assert not res_empty["detected"], "Empty markers should not be detected"
+    assert res_empty["gripper_val"] == 100.0, f"Expected 100.0 (Open default), got {res_empty['gripper_val']}"
+
+    # Only Tag 2 present (Tag 3 missing / occluded)
+    dummy_corners = [np.array([[[100, 100], [140, 100], [140, 140], [100, 140]]], dtype=np.float32)]
+    res_single = tracker.detect_gripper_state(dummy_corners, [2], camera_matrix, dist_coeffs)
+    assert not res_single["detected"], "Single tag should not trigger gripper detection"
+    assert res_single["gripper_val"] == 100.0, "Missing Tag 3 must default to 100.0 (Open)"
+
+    # 2. Test both Tag 2 & 3 present at varying distances in synthetic image
+    tag2_img = tracker.generate_raw_marker(marker_id=2, side_pixels=80)
+    tag3_img = tracker.generate_raw_marker(marker_id=3, side_pixels=80)
+
+    # Case A: Wide open gripper (~60mm equivalent in pixel scale)
+    frame_open = np.ones((720, 1280, 3), dtype=np.uint8) * 240
+    # Marker width 80px represents 22mm -> scale ~ 3.63 px/mm
+    # Open distance 60mm -> ~218 px center-to-center distance
+    frame_open[250:330, 400:480] = cv2.cvtColor(tag2_img, cv2.COLOR_GRAY2BGR)
+    frame_open[250:330, 618:698] = cv2.cvtColor(tag3_img, cv2.COLOR_GRAY2BGR)
+
+    det_open, _, _, _, _, _, corners_open = tracker.detect_marker_pnp(frame_open, camera_matrix, dist_coeffs, return_corners=True)
+    grip_open = tracker.last_gripper_state
+    assert grip_open["detected"], "Both Tag 2 & 3 should be detected"
+    assert grip_open["gripper_val"] >= 90.0, f"Wide distance should be ~100% open, got {grip_open['gripper_val']}% ({grip_open['dist_mm']}mm)"
+    print(f"[PASS] Gripper OPEN state detected: {grip_open['gripper_val']}% ({grip_open['dist_mm']}mm)")
+
+    # Case B: Closed gripper (~28mm equivalent in pixel scale)
+    # Closed distance 28mm -> ~102 px center-to-center distance
+    frame_closed = np.ones((720, 1280, 3), dtype=np.uint8) * 240
+    frame_closed[250:330, 500:580] = cv2.cvtColor(tag2_img, cv2.COLOR_GRAY2BGR)
+    frame_closed[250:330, 602:682] = cv2.cvtColor(tag3_img, cv2.COLOR_GRAY2BGR)
+
+    det_closed, _, _, _, _, _, corners_closed = tracker.detect_marker_pnp(frame_closed, camera_matrix, dist_coeffs, return_corners=True)
+    grip_closed = tracker.last_gripper_state
+    assert grip_closed["detected"], "Both Tag 2 & 3 should be detected"
+    assert grip_closed["gripper_val"] <= 15.0, f"Narrow distance should be ~0% closed, got {grip_closed['gripper_val']}% ({grip_closed['dist_mm']}mm)"
+    print(f"[PASS] Gripper CLOSED state detected: {grip_closed['gripper_val']}% ({grip_closed['dist_mm']}mm)")
+
+    # Case C: Combined table anchor (Tag 0) + Gripper jaw markers (Tag 2 & 3)
+    tag0_img = tracker.generate_raw_marker(marker_id=0, side_pixels=160)
+    frame_combined = np.ones((720, 1280, 3), dtype=np.uint8) * 240
+    frame_combined[100:260, 200:360] = cv2.cvtColor(tag0_img, cv2.COLOR_GRAY2BGR)  # Table Tag 0
+    frame_combined[350:430, 700:780] = cv2.cvtColor(tag2_img, cv2.COLOR_GRAY2BGR)  # Gripper Tag 2
+    frame_combined[350:430, 860:940] = cv2.cvtColor(tag3_img, cv2.COLOR_GRAY2BGR)  # Gripper Tag 3
+
+    det_comb, p_comb, R_comb, _, _, _, corners_comb = tracker.detect_marker_pnp(frame_combined, camera_matrix, dist_coeffs, return_corners=True)
+    assert det_comb, "Table Tag 0 must establish camera pose"
+    assert tracker.last_gripper_state["detected"], "Gripper Tag 2 & 3 must be detected simultaneously"
+    print(f"[PASS] Combined Table PnP + Gripper Tracking passed! Cam Z={p_comb[2]:.2f}m, Gripper={tracker.last_gripper_state['gripper_val']}%")
+
+    print("[PASS] test_gripper_marker_tracking passed completely!\n")
+
+
 if __name__ == "__main__":
     print("Running ArUco + Feature Extraction + IMU Test Suite...")
     test_marker_generation()
@@ -256,4 +332,5 @@ if __name__ == "__main__":
     test_pitch_accuracy()
     test_virtual_slam_landmark_expansion()
     test_ekf_velocity_leakage_damping()
+    test_gripper_marker_tracking()
     print("\nALL ARUCO + FEATURE EXTRACTION + IMU TESTS PASSED SUCCESSFULLY!")

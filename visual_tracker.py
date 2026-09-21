@@ -734,6 +734,32 @@ class VisualInertialTracker:
         self.last_detected_ids = []
         self.last_detected_corners = []
 
+        # Gripper Jaw ArUco Tracking Configuration (Tags 2 and 3, 22mm)
+        self.gripper_tracking_enabled = True
+        self.gripper_tag_a_id = 2
+        self.gripper_tag_b_id = 3
+        self.gripper_marker_size_m = 0.022   # 22.0 mm
+        self.gripper_open_dist_m = 0.060     # 60.0 mm -> 100% open
+        self.gripper_close_dist_m = 0.028    # 28.0 mm -> 0% closed
+        hs_grip = self.gripper_marker_size_m / 2.0
+        self.gripper_marker_3d = np.array([
+            [-hs_grip,  hs_grip, 0.0],
+            [ hs_grip,  hs_grip, 0.0],
+            [ hs_grip, -hs_grip, 0.0],
+            [-hs_grip, -hs_grip, 0.0]
+        ], dtype=np.float32)
+        self.last_gripper_state = {
+            "detected": False,
+            "gripper_val": 100.0,
+            "dist_mm": None,
+            "corners_a": None,
+            "corners_b": None,
+            "center_a": None,
+            "center_b": None
+        }
+        self.last_gripper_states = []
+        self.last_resolved_gripper_values = []
+
         # Extended Kalman Filter Tuning Parameters
         self.ekf_params = {
             "q_pos": 1e-4,
@@ -795,6 +821,121 @@ class VisualInertialTracker:
             if k in new_params:
                 self.ekf_params[k] = float(new_params[k])
         return self.ekf_params.copy()
+
+    def configure_gripper_markers(self, config_dict=None):
+        """
+        Configures gripper jaw ArUco marker tracking parameters from robot_config.json.
+        Defaults to Tag 2 & 3, 22mm width, 60mm open, 28mm closed.
+        """
+        if not config_dict:
+            return
+        if "enabled" in config_dict:
+            self.gripper_tracking_enabled = bool(config_dict["enabled"])
+        if "tag_id_a" in config_dict:
+            self.gripper_tag_a_id = int(config_dict["tag_id_a"])
+        if "tag_id_b" in config_dict:
+            self.gripper_tag_b_id = int(config_dict["tag_id_b"])
+        if "marker_size_mm" in config_dict:
+            self.gripper_marker_size_m = float(config_dict["marker_size_mm"]) / 1000.0
+            hs_grip = self.gripper_marker_size_m / 2.0
+            self.gripper_marker_3d = np.array([
+                [-hs_grip,  hs_grip, 0.0],
+                [ hs_grip,  hs_grip, 0.0],
+                [ hs_grip, -hs_grip, 0.0],
+                [-hs_grip, -hs_grip, 0.0]
+            ], dtype=np.float32)
+        if "open_distance_mm" in config_dict:
+            self.gripper_open_dist_m = float(config_dict["open_distance_mm"]) / 1000.0
+        if "close_distance_mm" in config_dict:
+            self.gripper_close_dist_m = float(config_dict["close_distance_mm"]) / 1000.0
+
+    def detect_gripper_state(self, corners, ids_flat, camera_matrix, dist_coeffs):
+        """
+        Detects physical open/close state of gripper from jaw ArUco markers (Tag 2 & 3, 22mm).
+        CRITICAL CONSTRAINT: If markers are not detected or missing, this MUST NOT fail or
+        throw an error, but must safely default to Open (100.0%).
+        """
+        fallback_state = {
+            "detected": False,
+            "gripper_val": 100.0,
+            "dist_mm": None,
+            "corners_a": None,
+            "corners_b": None,
+            "center_a": None,
+            "center_b": None
+        }
+
+        if not getattr(self, 'gripper_tracking_enabled', True):
+            return fallback_state
+
+        if not corners or not ids_flat:
+            return fallback_state
+
+        try:
+            tag_a = getattr(self, 'gripper_tag_a_id', 2)
+            tag_b = getattr(self, 'gripper_tag_b_id', 3)
+
+            if tag_a not in ids_flat or tag_b not in ids_flat:
+                return fallback_state
+
+            idx_a = ids_flat.index(tag_a)
+            idx_b = ids_flat.index(tag_b)
+
+            c_a = corners[idx_a][0].astype(np.float32)
+            c_b = corners[idx_b][0].astype(np.float32)
+
+            center_a = c_a.mean(axis=0)
+            center_b = c_b.mean(axis=0)
+
+            # Estimate 3D distance via individual marker PnP
+            dist_m = None
+            try:
+                succ_a, rvec_a, tvec_a = cv2.solvePnP(
+                    self.gripper_marker_3d, c_a, camera_matrix, dist_coeffs,
+                    flags=cv2.SOLVEPNP_IPPE_SQUARE
+                )
+                succ_b, rvec_b, tvec_b = cv2.solvePnP(
+                    self.gripper_marker_3d, c_b, camera_matrix, dist_coeffs,
+                    flags=cv2.SOLVEPNP_IPPE_SQUARE
+                )
+                if succ_a and succ_b and tvec_a is not None and tvec_b is not None:
+                    d3d = float(np.linalg.norm(tvec_a.ravel() - tvec_b.ravel()))
+                    if 0.005 <= d3d <= 0.250:
+                        dist_m = d3d
+            except Exception:
+                dist_m = None
+
+            # Robust 2D projective pixel scale fallback if 3D PnP was noisy or failed
+            if dist_m is None:
+                w_a = (np.linalg.norm(c_a[1] - c_a[0]) + np.linalg.norm(c_a[2] - c_a[3])) / 2.0
+                w_b = (np.linalg.norm(c_b[1] - c_b[0]) + np.linalg.norm(c_b[2] - c_b[3])) / 2.0
+                w_px = max(1.0, (w_a + w_b) / 2.0)
+                d_px = np.linalg.norm(center_a - center_b)
+                marker_size_m = getattr(self, 'gripper_marker_size_m', 0.022)
+                dist_m = float((d_px / w_px) * marker_size_m)
+
+            dist_mm = dist_m * 1000.0
+            open_mm = getattr(self, 'gripper_open_dist_m', 0.060) * 1000.0
+            close_mm = getattr(self, 'gripper_close_dist_m', 0.028) * 1000.0
+
+            if open_mm > close_mm:
+                ratio = (dist_mm - close_mm) / (open_mm - close_mm)
+                gripper_val = float(np.clip(ratio * 100.0, 0.0, 100.0))
+            else:
+                gripper_val = 100.0
+
+            return {
+                "detected": True,
+                "gripper_val": round(gripper_val, 1),
+                "dist_mm": round(float(dist_mm), 1),
+                "corners_a": c_a.tolist(),
+                "corners_b": c_b.tolist(),
+                "center_a": [round(float(center_a[0]), 1), round(float(center_a[1]), 1)],
+                "center_b": [round(float(center_b[0]), 1), round(float(center_b[1]), 1)]
+            }
+        except Exception:
+            # Graceful fallback: NEVER fail or crash
+            return fallback_state
 
     def generate_raw_marker(self, marker_id=0, side_pixels=600, dict_name="DICT_6X6_250"):
         """
@@ -1246,6 +1387,15 @@ class VisualInertialTracker:
         if ids is None or len(ids) == 0:
             self.last_detected_ids = []
             self.last_detected_corners = []
+            self.last_gripper_state = {
+                "detected": False,
+                "gripper_val": 100.0,
+                "dist_mm": None,
+                "corners_a": None,
+                "corners_b": None,
+                "center_a": None,
+                "center_b": None
+            }
             self.last_rvec = None
             self.last_tvec = None
             if return_corners:
@@ -1262,6 +1412,7 @@ class VisualInertialTracker:
         ids_flat = ids.flatten().tolist()
         self.last_detected_ids = ids_flat
         self.last_detected_corners = refined_corners
+        self.last_gripper_state = self.detect_gripper_state(refined_corners, ids_flat, camera_matrix, dist_coeffs)
         has_tag_a = self.tag_a_id in ids_flat
         has_tag_b = self.tag_b_id in ids_flat
 
@@ -1392,7 +1543,7 @@ class VisualInertialTracker:
             self.last_rvec = None
             self.last_tvec = None
             if return_corners:
-                return False, None, None, None, None, False, []
+                return False, None, None, None, None, False, refined_corners
             return False, None, None, None, None, False
 
         self.last_rvec = rvec.copy()
@@ -1526,7 +1677,8 @@ class VisualInertialTracker:
         ids_list=None,
         tracked_pts=None,
         prev_pts=None,
-        landmarks_3d=None
+        landmarks_3d=None,
+        gripper_state=None
     ):
         """
         Renders an augmented developer diagnostic visualization on the camera frame:
@@ -1585,22 +1737,49 @@ class VisualInertialTracker:
         if corners is not None and len(corners) > 0:
             for i, c in enumerate(corners):
                 pts = c[0].astype(np.int32)
-                cv2.polylines(annotated, [pts], isClosed=True, color=(0, 255, 0), thickness=2, lineType=cv2.LINE_AA)
-                cv2.circle(annotated, tuple(pts[0]), 5, (0, 0, 255), -1, cv2.LINE_AA)
-
                 tid = ids_list[i] if (ids_list and i < len(ids_list)) else i
+
                 if tid == self.tag_a_id:
                     tag_name = f"Tag A (ID {tid} Origin [0,0,0])"
                     pill_color = (0, 255, 128)
+                    poly_color = (0, 255, 0)
                 elif tid == self.tag_b_id:
                     tag_name = f"Tag B (ID {tid} Offset +15cm)"
                     pill_color = (255, 220, 0)
+                    poly_color = (0, 255, 255)
+                elif tid == getattr(self, 'gripper_tag_a_id', 2):
+                    tag_name = f"Jaw A (ID {tid} 22mm)"
+                    pill_color = (255, 100, 255)  # Magenta
+                    poly_color = (255, 0, 255)
+                elif tid == getattr(self, 'gripper_tag_b_id', 3):
+                    tag_name = f"Jaw B (ID {tid} 22mm)"
+                    pill_color = (255, 255, 100)  # Cyan
+                    poly_color = (255, 255, 0)
                 else:
                     tag_name = f"ArUco ID {tid}"
                     pill_color = (200, 200, 200)
+                    poly_color = (0, 255, 0)
+
+                cv2.polylines(annotated, [pts], isClosed=True, color=poly_color, thickness=2, lineType=cv2.LINE_AA)
+                cv2.circle(annotated, tuple(pts[0]), 5, (0, 0, 255), -1, cv2.LINE_AA)
 
                 label_pos = (pts[0][0], max(20, pts[0][1] - 8))
                 cv2.putText(annotated, tag_name, label_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.45, pill_color, 1, cv2.LINE_AA)
+
+        # 4b. Draw Gripper Jaw Span Indicator (Tag 2 & 3)
+        if gripper_state and gripper_state.get('detected'):
+            ca = gripper_state.get('center_a')
+            cb = gripper_state.get('center_b')
+            if ca and cb:
+                pt_a = (int(round(float(ca[0]))), int(round(float(ca[1]))))
+                pt_b = (int(round(float(cb[0]))), int(round(float(cb[1]))))
+                cv2.line(annotated, pt_a, pt_b, (255, 0, 255), 2, cv2.LINE_AA)
+                mid_pt = ((pt_a[0] + pt_b[0]) // 2, (pt_a[1] + pt_b[1]) // 2 - 10)
+                d_mm = gripper_state.get('dist_mm', 0.0)
+                g_val = gripper_state.get('gripper_val', 100.0)
+                g_lbl = f"Gripper: {g_val:.0f}% ({d_mm:.1f}mm)"
+                cv2.putText(annotated, g_lbl, (mid_pt[0] + 1, mid_pt[1] + 1), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2, cv2.LINE_AA)
+                cv2.putText(annotated, g_lbl, mid_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 100, 255), 1, cv2.LINE_AA)
 
         # 5. Draw 3D Physical Coordinate Frame Axes Anchored to Table
         axes_drawn = False
@@ -1634,7 +1813,7 @@ class VisualInertialTracker:
                     axes_drawn = True
 
         # 6. Draw HUD Telemetry Banner across top
-        hud_h = 72
+        hud_h = 76
         overlay = annotated.copy()
         cv2.rectangle(overlay, (0, 0), (width, hud_h), (12, 16, 24), -1)
         cv2.addWeighted(overlay, 0.78, annotated, 0.22, 0, annotated)
@@ -1653,17 +1832,17 @@ class VisualInertialTracker:
         else:
             src_label, src_color = source_cfg.get(source, ('INITIALIZING', (180, 180, 180)))
 
-        cv2.circle(annotated, (18, 22), 5, src_color, -1, cv2.LINE_AA)
-        cv2.putText(annotated, f"[{src_label}]", (30, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, src_color, 2, cv2.LINE_AA)
+        cv2.circle(annotated, (18, 20), 5, src_color, -1, cv2.LINE_AA)
+        cv2.putText(annotated, f"[{src_label}]", (30, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.52, src_color, 2, cv2.LINE_AA)
 
         time_sec = frame_idx / (fps if fps > 0 else 30.0)
         f_text = f"Frame {frame_idx + 1}/{max(1, total_frames)}  ({time_sec:.2f}s)  |  {fps:.1f} FPS"
-        cv2.putText(annotated, f_text, (max(width - 320, 240), 26), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 230), 1, cv2.LINE_AA)
+        cv2.putText(annotated, f_text, (max(width - 320, 240), 24), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 230), 1, cv2.LINE_AA)
 
         lm_count = len(landmarks_3d) if landmarks_3d else 0
         feat_count = len(tracked_pts) if tracked_pts is not None else 0
         stats_text = f"Scene Anchors: {lm_count} Pinned 3D Points  |  Optical Features: {feat_count}"
-        cv2.putText(annotated, stats_text, (18, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (170, 200, 250), 1, cv2.LINE_AA)
+        cv2.putText(annotated, stats_text, (18, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (170, 200, 250), 1, cv2.LINE_AA)
 
         if p_world is not None:
             x_cm = p_world[0] * 100
@@ -1671,7 +1850,16 @@ class VisualInertialTracker:
             z_cm = p_world[2] * 100
             pitch_deg = np.degrees(euler[1]) if (euler is not None and abs(euler[1]) < 3.14) else (euler[1] if euler is not None else 0.0)
             pose_text = f"Cam: [{x_cm:+.1f}, {y_cm:+.1f}, {z_cm:+.1f}] cm  |  Pitch: {pitch_deg:+.1f}°"
-            cv2.putText(annotated, pose_text, (max(width - 360, 200), 50), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 240, 180), 1, cv2.LINE_AA)
+            cv2.putText(annotated, pose_text, (max(width - 360, 200), 46), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (180, 240, 180), 1, cv2.LINE_AA)
+
+        # Line 3: Live Gripper Telemetry Readout
+        if gripper_state and gripper_state.get('detected'):
+            grip_txt = f"Gripper: {gripper_state['gripper_val']:.0f}% ({gripper_state['dist_mm']:.1f}mm) [TAGS 2&3]"
+            grip_col = (255, 120, 255)
+        else:
+            grip_txt = "Gripper: OPEN 100% (Default / Tags 2&3 Not In View)"
+            grip_col = (160, 160, 180)
+        cv2.putText(annotated, grip_txt, (18, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.40, grip_col, 1, cv2.LINE_AA)
 
         cv2.putText(annotated, "OMNIKIN DEV VIEW: ARUCO & 3D SCENE ANCHORING", (12, height - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (130, 150, 180), 1, cv2.LINE_AA)
 
@@ -1844,6 +2032,7 @@ class VisualInertialTracker:
 
         video_detections = []  # (frame_idx, p_world, euler, is_dual, source)
         dev_telemetry = []
+        detected_gripper_states = []
         frame_idx = 0
         tracker_rvec_viz = None
         tracker_tvec_viz = None
@@ -1860,6 +2049,8 @@ class VisualInertialTracker:
                 frame, camera_matrix, dist_coeffs, return_corners=True
             )
             det, p_world, R_world, rvec, tvec, is_dual, corners = det_res
+            grip_state = getattr(self, 'last_gripper_state', None) or self.detect_gripper_state([], [], camera_matrix, dist_coeffs)
+            detected_gripper_states.append(grip_state)
 
             rvec_curr = None
             tvec_curr = None
@@ -1895,13 +2086,24 @@ class VisualInertialTracker:
 
             # Extract bounding boxes for telemetry
             detected_bboxes = []
-            if det and corners is not None and len(corners) > 0:
+            if corners is not None and len(corners) > 0:
                 for i_box, c_box in enumerate(corners):
                     c_pts = c_box[0]
                     t_box_id = int(self.last_detected_ids[i_box]) if (i_box < len(self.last_detected_ids)) else i_box
+                    if t_box_id == self.tag_a_id:
+                        box_name = 'Tag A (Origin)'
+                    elif t_box_id == self.tag_b_id:
+                        box_name = 'Tag B (Offset)'
+                    elif t_box_id == getattr(self, 'gripper_tag_a_id', 2):
+                        box_name = 'Tag 2 (Jaw A 22mm)'
+                    elif t_box_id == getattr(self, 'gripper_tag_b_id', 3):
+                        box_name = 'Tag 3 (Jaw B 22mm)'
+                    else:
+                        box_name = f'Tag {t_box_id}'
+
                     detected_bboxes.append({
                         'id': t_box_id,
-                        'name': 'Tag A (Origin)' if t_box_id == self.tag_a_id else 'Tag B (Offset)' if t_box_id == self.tag_b_id else f'Tag {t_box_id}',
+                        'name': box_name,
                         'corners': c_pts.tolist(),
                         'center': [round(float(c_pts[:, 0].mean()), 1), round(float(c_pts[:, 1].mean()), 1)],
                         'width_px': round(float(np.linalg.norm(c_pts[1] - c_pts[0])), 1),
@@ -1915,8 +2117,14 @@ class VisualInertialTracker:
                 'num_landmarks': len(feature_tracker.landmarks_3d),
                 'num_features': len(feature_tracker.tracked_pts),
                 'is_dual': is_dual if det else False,
-                'tags_detected': list(self.last_detected_ids) if det else [],
+                'tags_detected': list(self.last_detected_ids),
                 'bounding_boxes': detected_bboxes,
+                'gripper': {
+                    'detected': grip_state['detected'],
+                    'value': grip_state['gripper_val'],
+                    'dist_mm': grip_state['dist_mm'],
+                    'open_pct': grip_state['gripper_val']
+                },
                 'pose': p_curr.tolist() if p_curr is not None else [0.0, 0.0, 0.0],
                 'euler': euler_curr.tolist() if euler_curr is not None else [0.0, 0.0, 0.0]
             })
@@ -1961,11 +2169,12 @@ class VisualInertialTracker:
                     rvec=rvec_to_render,
                     tvec=tvec_to_render,
                     source=src,
-                    corners=corners if det else None,
-                    ids_list=self.last_detected_ids if det else None,
+                    corners=corners if det else (self.last_detected_corners or None),
+                    ids_list=self.last_detected_ids or None,
                     tracked_pts=feature_tracker.tracked_pts,
                     prev_pts=feature_tracker.prev_gray_pts,
-                    landmarks_3d=feature_tracker.landmarks_3d
+                    landmarks_3d=feature_tracker.landmarks_3d,
+                    gripper_state=grip_state
                 )
                 dev_writer.write(dev_frame)
 
@@ -2034,11 +2243,36 @@ class VisualInertialTracker:
                 final_trajectory, fps=fps, method=smooth_method, time_window_ms=smooth_window_ms
             )
 
-        # Synchronize final trajectory into dev_telemetry for frontend inspection
+        # Resolve frame-by-frame gripper trajectory with continuity holding
+        self.last_gripper_states = detected_gripper_states
+        resolved_gripper_values = []
+        has_any_gripper = any(g.get('detected', False) for g in detected_gripper_states)
+        if has_any_gripper:
+            last_val = 100.0
+            for g in detected_gripper_states:
+                if g.get('detected'):
+                    last_val = g['gripper_val']
+                    break
+            for g in detected_gripper_states:
+                if g.get('detected'):
+                    last_val = g['gripper_val']
+                resolved_gripper_values.append(last_val)
+        else:
+            # Gripper tags not detected in this video: safely default to 100.0 (Open) with zero failure
+            resolved_gripper_values = [100.0] * num_frames
+
+        self.last_resolved_gripper_values = resolved_gripper_values
+
+        # Synchronize final trajectory and gripper values into dev_telemetry
         for i_frame, item in enumerate(dev_telemetry):
             if i_frame < len(final_trajectory):
                 item['pose'] = final_trajectory[i_frame, :3].tolist()
                 item['euler'] = final_trajectory[i_frame, 3:].tolist()
+            if i_frame < len(resolved_gripper_values):
+                if 'gripper' not in item:
+                    item['gripper'] = {}
+                item['gripper']['value'] = resolved_gripper_values[i_frame]
+                item['gripper']['open_pct'] = resolved_gripper_values[i_frame]
 
         if return_dev_info:
             return final_trajectory, dev_telemetry

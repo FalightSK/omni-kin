@@ -9,11 +9,13 @@ import os
 import sys
 import json
 import shutil
+import time
 import cv2
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from integrity import dataset_slug, frame_timestamps
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -59,6 +61,48 @@ def find_feasible_window(ee_poses_robot, solver, max_err_cm=1.5):
     return int(starts[best_idx]), int(ends[best_idx])
 
 
+def validate_export_dataset(export_path, expected_episode_lengths):
+    """Fail closed unless table, actions, metadata, and videos agree exactly."""
+    data_path = os.path.join(export_path, "data", "chunk-000", "file-000.parquet")
+    frame_table = pd.read_parquet(data_path)
+    errors = []
+    required = {"index", "episode_index", "frame_index", "timestamp", "next.done", "observation.state", "action"}
+    missing = required - set(frame_table.columns)
+    if missing:
+        errors.append(f"Missing parquet columns: {sorted(missing)}")
+    if len(frame_table) != sum(expected_episode_lengths):
+        errors.append("Parquet row count does not equal expected frame count")
+    if not frame_table.empty:
+        if frame_table["index"].tolist() != list(range(len(frame_table))):
+            errors.append("Global frame index is not contiguous")
+        for ep_index, expected_length in enumerate(expected_episode_lengths):
+            group = frame_table[frame_table["episode_index"] == ep_index]
+            if len(group) != expected_length or group["frame_index"].tolist() != list(range(expected_length)):
+                errors.append(f"Episode {ep_index} has invalid frame indexing")
+                continue
+            if group["next.done"].tolist() != [False] * (expected_length - 1) + [True]:
+                errors.append(f"Episode {ep_index} has invalid terminal flags")
+            states, actions = group["observation.state"].tolist(), group["action"].tolist()
+            for idx in range(expected_length - 1):
+                if not np.allclose(actions[idx], states[idx + 1], atol=1e-5):
+                    errors.append(f"Episode {ep_index} action alignment failed at frame {idx}")
+                    break
+            if not np.allclose(actions[-1], states[-1], atol=1e-5):
+                errors.append(f"Episode {ep_index} terminal action alignment failed")
+            video_path = os.path.join(export_path, "videos", "observation.images.phone", "chunk-000", f"episode_{ep_index:06d}.mp4")
+            cap = cv2.VideoCapture(video_path)
+            count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) if cap.isOpened() else 0
+            cap.release()
+            if count != expected_length:
+                errors.append(f"Episode {ep_index} video frame count {count} != {expected_length}")
+    report = {"passed": not errors, "errors": errors, "episodes": len(expected_episode_lengths), "frames": len(frame_table)}
+    with open(os.path.join(export_path, "validation_report.json"), "w", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2)
+    if errors:
+        raise ValueError("Export integrity validation failed: " + "; ".join(errors))
+    return report
+
+
 class LeRobotExporter:
     """
     Exports captured 3D multimodal trajectories into official Hugging Face LeRobot format.
@@ -77,24 +121,35 @@ class LeRobotExporter:
         fps=30,
         robot_type="so_arm101_omni_kin",
         workspace_calibrator=None,
-        q3_safe_max_deg=None
+        q3_safe_max_deg=None,
+        custom_dh_table=None,
+        custom_urdf=None
     ):
         self.output_dir = output_dir
         self.fps = int(fps)
         self.robot_type = robot_type
         self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
-        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg)
-        self.workspace_calibrator = workspace_calibrator or WorkspaceCalibrator()
+        self.custom_dh_table = custom_dh_table
+        self.custom_urdf = custom_urdf
+        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg, custom_dh_table=self.custom_dh_table, custom_urdf=self.custom_urdf)
+        self.workspace_calibrator = workspace_calibrator or WorkspaceCalibrator(reach_angle_rad=getattr(self.ik_solver, "reach_angle_rad", 0.0))
+        if hasattr(self.ik_solver, "reach_angle_rad"):
+            self.workspace_calibrator.reach_angle_rad = self.ik_solver.reach_angle_rad
 
-    def set_robot_config(self, robot_type="so_arm101_omni_kin", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0, q3_safe_max_deg=None):
+    def set_robot_config(self, robot_type="so_arm101_omni_kin", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0, q3_safe_max_deg=None, custom_dh_table=None, custom_urdf=None):
         """
         Updates the active robot model preset, workspace offset, and camera safe wrist limits.
         """
         self.robot_type = robot_type
         if q3_safe_max_deg is not None:
             self.q3_safe_max_deg = float(q3_safe_max_deg)
-        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg)
-        self.workspace_calibrator.update_config(offset_x, offset_y, offset_z, yaw_deg)
+        if custom_dh_table is not None:
+            self.custom_dh_table = custom_dh_table
+        if custom_urdf is not None:
+            self.custom_urdf = custom_urdf
+        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg, custom_dh_table=self.custom_dh_table, custom_urdf=self.custom_urdf)
+        reach_rad = getattr(self.ik_solver, "reach_angle_rad", 0.0)
+        self.workspace_calibrator.update_config(offset_x, offset_y, offset_z, yaw_deg, reach_angle_rad=reach_rad)
 
     def _ensure_joint_states_and_poses(self, ep, trajectory_mode="free_form", initial_position=None, auto_trim=True):
         """
@@ -107,9 +162,12 @@ class LeRobotExporter:
         raw_poses = ep.get('ee_poses') if ep.get('ee_poses') is not None else ep.get('poses')
         gripper_states = ep.get('gripper_states')
         raw_joints = ep.get('joint_states')
+        raw_robot_ee = ep.get('robot_ee_poses')
 
         num_frames = 0
-        if raw_poses is not None and len(raw_poses) > 0:
+        if raw_robot_ee is not None and len(raw_robot_ee) > 0:
+            num_frames = len(raw_robot_ee)
+        elif raw_poses is not None and len(raw_poses) > 0:
             num_frames = len(raw_poses)
         elif raw_joints is not None and len(raw_joints) > 0:
             num_frames = len(raw_joints)
@@ -119,9 +177,15 @@ class LeRobotExporter:
             num_frames = 30
 
         orig_num_frames = num_frames
+        has_server_parity = bool(
+            raw_joints is not None and len(raw_joints) == orig_num_frames and
+            raw_robot_ee is not None and len(raw_robot_ee) == orig_num_frames
+        )
 
         # 1. Resolve Cartesian EE Poses (in Robot Base Frame)
-        if raw_poses is not None and len(raw_poses) == num_frames:
+        if raw_robot_ee is not None and len(raw_robot_ee) == num_frames:
+            ee_poses = np.asarray(raw_robot_ee, dtype=np.float32)
+        elif raw_poses is not None and len(raw_poses) == num_frames:
             raw_arr = np.asarray(raw_poses, dtype=np.float64)
             ee_poses = self.workspace_calibrator.transform_trajectory(raw_arr, to_robot=True).astype(np.float32)
         else:
@@ -174,37 +238,30 @@ class LeRobotExporter:
                 try:
                     q = self.ik_solver.inverse_kinematics(pose_i, gripper_state=grip_i, prev_joints=prev_q)
                     prev_q = q[:5]
-                except Exception:
-                    q = np.array([0.0, 35.0, -55.0, -20.0, 0.0, grip_i], dtype=np.float32)
+                except Exception as exc:
+                    raise ValueError(f"IK failed at frame {i}; refusing fabricated export state") from exc
                 computed_joints.append(q)
             joint_states = np.array(computed_joints, dtype=np.float32)
             joint_states[:, -1] = grippers
 
         # 4b. Apply Universal Robot-Agnostic Joint Trajectory Smoother
-        # Smooths joint velocities, eliminates boundary vibration and hard-limit chatter across all DOF
-        if hasattr(self.ik_solver, "smooth_joint_trajectory") and len(joint_states) > 0:
-            joint_states = self.ik_solver.smooth_joint_trajectory(joint_states, fps=self.fps)
+        # If joints were already smoothed by server sync and untrimmed, skip re-smoothing to prevent float drift
+        if not (has_server_parity and not trim_info["is_trimmed"]):
+            if hasattr(self.ik_solver, "smooth_joint_trajectory") and len(joint_states) > 0:
+                joint_states = self.ik_solver.smooth_joint_trajectory(joint_states, fps=self.fps)
 
-        # 5. Resolve Actions (Next-frame target joints)
-        raw_actions = ep.get('actions')
-        if raw_actions is not None and len(raw_actions) == orig_num_frames:
-            raw_act_arr = np.asarray(raw_actions, dtype=np.float32)
-            if trim_info["is_trimmed"]:
-                actions = raw_act_arr[trim_info["f_start"]:trim_info["f_end"]]
-            else:
-                actions = raw_act_arr
-            if actions.shape[1] > 0 and np.max(actions[:, -1]) > 1.0 + 1e-3:
-                actions[:, -1] = np.clip(actions[:, -1] / 100.0, 0.0, 1.0)
-            if hasattr(self.ik_solver, "smooth_joint_trajectory") and len(actions) > 0:
-                actions = self.ik_solver.smooth_joint_trajectory(actions, fps=self.fps)
-        else:
-            actions = np.roll(joint_states, -1, axis=0)
-            actions[-1] = joint_states[-1]
+        # 4c. Synchronize Cartesian EE Poses strictly with Solved Joint States via Forward Kinematics
+        # Guarantees 100% mathematical parity between observation.state and observation.ee_pose
+        if not (has_server_parity and not trim_info["is_trimmed"]):
+            fk_poses = []
+            for i in range(num_frames):
+                q_rad = np.radians(joint_states[i, :5])
+                fk_p = self.ik_solver.forward_kinematics(q_rad)
+                fk_poses.append(fk_p)
+            ee_poses = np.array(fk_poses, dtype=np.float32)
 
-        # 6. Resolve Timestamps
-        timestamps = np.linspace(0, num_frames / self.fps, num_frames, dtype=np.float32)
 
-        # 7. Prepend Auto Approach Path if Initial-Position Aware Mode is active
+        # 5. Prepend Auto Approach Path if Initial-Position Aware Mode is active
         prepend_approach_frames = 0
         if str(trajectory_mode).lower() == "initial_aware" and len(ee_poses) > 0:
             try:
@@ -239,17 +296,21 @@ class LeRobotExporter:
                 app_ee = np.asarray(approach_res['robot_ee_poses'], dtype=np.float32)
                 app_joints = np.asarray(approach_res['joint_states'], dtype=np.float32)
                 app_joints[:, -1] = np.clip(app_joints[:, -1] / 100.0, 0.0, 1.0)
-                app_actions = np.asarray(approach_res['actions'], dtype=np.float32)
-                app_actions[:, -1] = np.clip(app_actions[:, -1] / 100.0, 0.0, 1.0)
 
                 prepend_approach_frames = len(app_ee)
                 ee_poses = np.vstack([app_ee, ee_poses])
                 joint_states = np.vstack([app_joints, joint_states])
-                actions = np.vstack([app_actions, actions])
                 num_frames = len(ee_poses)
-                timestamps = np.linspace(0, num_frames / self.fps, num_frames, dtype=np.float32)
             except Exception as e:
                 print(f"Warning: Failed to prepend approach path in export: {e}")
+
+        # 6. Resolve Actions (Next-frame target joints: action[t] = joint_states[t+1])
+        # In LeRobot dataset format, actions MUST be in the same space as observation.state (joint states in degrees + gripper [0,1]).
+        # Never leak Cartesian coordinates into actions.
+        actions = np.roll(joint_states, -1, axis=0)
+        actions[-1] = joint_states[-1]
+        # 7. Resolve Timestamps
+        timestamps = np.asarray(frame_timestamps(num_frames, self.fps), dtype=np.float32)
 
         return joint_states, ee_poses, actions, timestamps, num_frames, trim_info, prepend_approach_frames
 
@@ -309,20 +370,10 @@ class LeRobotExporter:
             cap.release()
             writer.release()
 
-            if written_count > 0:
-                return True
-
-        # Fallback: Generate clean placeholder MP4 with exact frame count
-        w, h = 640, 480
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        writer = cv2.VideoWriter(dst_path, fourcc, target_fps, (w, h))
-        for i in range(max(num_frames, 1)):
-            frame = np.full((h, w, 3), (30, 35, 45), dtype=np.uint8)
-            cv2.putText(frame, f"LeRobot Frame {i}/{num_frames}", (30, 240),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            writer.write(frame)
-        writer.release()
-        return True
+            if written_count != num_frames:
+                raise ValueError(f"Video frame count {written_count} does not match trajectory {num_frames}")
+            return True
+        raise ValueError("Source video is missing or unreadable; refusing placeholder export")
 
     def export_dataset(
         self,
@@ -330,17 +381,26 @@ class LeRobotExporter:
         dataset_name="mobile_aruco_3d_trajectories",
         trajectory_mode="free_form",
         initial_position=None,
-        auto_trim=True
+        auto_trim=True,
+        use_timestamp=True
     ):
         """
         Exports episodes_data into the official Hugging Face LeRobot dataset schema.
         Supports both 'free_form' (pretraining) and 'initial_aware' (fine-tuning) modes,
         with optional auto_trim of out-of-reach boundary frames.
+        Creates a timestamped versioned folder when use_timestamp=True to support versioning.
         """
         if not episodes_data:
             raise ValueError("No episodes provided for LeRobot export.")
 
-        export_path = os.path.join(self.output_dir, dataset_name)
+        dataset_name = dataset_slug(dataset_name)
+        if use_timestamp:
+            timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+            folder_name = f"{dataset_name}_{timestamp_str}"
+        else:
+            folder_name = dataset_name
+
+        export_path = os.path.join(self.output_dir, folder_name)
 
         data_dir = os.path.join(export_path, "data", "chunk-000")
         meta_dir = os.path.join(export_path, "meta")
@@ -363,6 +423,7 @@ class LeRobotExporter:
         all_states = []
         all_ee_poses = []
         all_actions = []
+        expected_episode_lengths = []
 
         for ep_idx, ep in enumerate(episodes_data):
             task = ep.get('task', 'reach to object')
@@ -379,6 +440,7 @@ class LeRobotExporter:
             all_states.append(joint_states)
             all_ee_poses.append(ee_poses)
             all_actions.append(actions)
+            expected_episode_lengths.append(num_frames)
 
             # Transcode / copy video with synchronous trimming and approach frame padding
             src_video = ep.get('video_path', '')
@@ -524,7 +586,7 @@ class LeRobotExporter:
         with open(os.path.join(meta_dir, "info.json"), "w") as f:
             json.dump(info, f, indent=2)
 
-
+        validate_export_dataset(export_path, expected_episode_lengths)
         print(f"[OK] Successfully exported LeRobot dataset ({len(episodes_data)} episodes, {global_frame_idx} frames) to: {export_path}")
         return export_path
 
@@ -540,4 +602,3 @@ if __name__ == "__main__":
         'timestamps': np.linspace(0, 1, 30).tolist()
     }]
     exporter.export_dataset(dummy_ep)
-

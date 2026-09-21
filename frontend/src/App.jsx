@@ -165,11 +165,19 @@ export default function App() {
     setIsRobotModalOpen(true);
   };
 
-  const handleReprocessComplete = (newPoses, newEePoses) => {
+  const handleReprocessComplete = (newPoses, newEePoses, fullData = null) => {
     setEpisodes((prev) =>
       prev.map((ep) =>
         ep.episode_index === selectedEpIdx
-          ? { ...ep, poses: newPoses, ...(newEePoses ? { ee_poses: newEePoses } : {}) }
+          ? {
+              ...ep,
+              poses: newPoses,
+              ...(newEePoses ? { ee_poses: newEePoses } : {}),
+              ...(fullData?.joint_states ? { joint_states: fullData.joint_states } : {}),
+              ...(fullData?.robot_ee_poses ? { robot_ee_poses: fullData.robot_ee_poses } : {}),
+              ...(fullData?.fk_table_poses ? { fk_table_poses: fullData.fk_table_poses } : {}),
+              ...(fullData?.fk_camera_poses ? { fk_camera_poses: fullData.fk_camera_poses } : {})
+            }
           : ep
       )
     );

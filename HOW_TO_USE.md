@@ -50,6 +50,18 @@ flowchart TB
    - **Spacing between markers:** Exactly $5.0\text{ cm}$
 4. Tape the printed sheet flat onto your table with clear tape so it cannot move during demonstrations.
 
+### Optional: Print & Attach Gripper Jaw Markers (Tags 2 & 3 · 22 mm)
+
+To automatically record physical gripper open/close state without touching your phone screen:
+1. Open **`http://localhost:8000/api/marker/print_gripper`** in your browser (or click **"Print 22mm Markers"** in the Dev Vision Monitor).
+2. Print at **Scale: 100% (Actual Size)** on standard A4 paper.
+3. Verify that each black square is exactly **22.0 mm (2.2 cm)** using a physical ruler or caliper.
+4. Cut out along the dashed cutting guides:
+   - Tape **Tag 2** to the left gripper jaw (Jaw A).
+   - Tape **Tag 3** to the right gripper jaw (Jaw B).
+   - Face them forward towards the phone camera.
+5. **Zero-Failure Guarantee**: If these markers are missing, out of view, or occluded, recording will **never fail** and will safely default the gripper to **Open (100%)**.
+
 ---
 
 ## 💻 Step 2: Start the OmniKin Server
@@ -63,8 +75,8 @@ conda activate lerobot_collector
 # 2. Navigate to project root
 cd f:\work\mobile_dataset_collector
 
-# 3. Start the server
-python server.py
+# 3. Launch OmniKin server with HTTPS
+python server.py --ssl
 ```
 
 The terminal will display your server URLs and local IP address:
@@ -75,7 +87,8 @@ The terminal will display your server URLs and local IP address:
  Desktop Dashboard (HTTP):  http://localhost:8000
  📱 Mobile Logger  (HTTPS): https://192.168.1.50:8443/mobile
  📱 Mobile Logger  (HTTP):  http://192.168.1.50:8000/mobile
- Print ArUco Marker:        http://localhost:8000/api/marker/print_dual
+ Print Dual-ArUco Board:    http://localhost:8000/api/marker/print_dual
+ Print Gripper Markers:     http://localhost:8000/api/marker/print_gripper
  Mobile QR Code:            http://localhost:8000/api/mobile/qr
 =================================================================
 ```

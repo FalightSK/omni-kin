@@ -6,6 +6,7 @@ Automated end-to-end verification script for mobile dataset collector demo.
 import os
 import sys
 import json
+import cv2
 import numpy as np
 import pandas as pd
 from robot_kinematics import SO100Kinematics
@@ -41,16 +42,30 @@ def test_trajectory_estimator():
     print(f"[OK] Estimated Poses Shape: {poses.shape}")
     print(f"[OK] Pose Sample [x,y,z,r,p,y]: {np.round(poses[30], 3)}")
 
-def test_lerobot_export():
+def _write_test_video(path, frame_count, fps=30):
+    """Create a small, decodable MP4 fixture with an exact frame count."""
+    size = (64, 48)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, size)
+    assert writer.isOpened(), "Could not create video test fixture"
+    for frame_index in range(frame_count):
+        frame = np.full((size[1], size[0], 3), frame_index % 255, dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+
+
+def test_lerobot_export(tmp_path):
     print("\n=== Testing LeRobot Dataset Export ===")
-    output_dir = "test_export_output"
-    exporter = LeRobotExporter(output_dir=output_dir, fps=30)
+    exporter = LeRobotExporter(output_dir=str(tmp_path / "exports"), fps=30)
+    first_video = tmp_path / "first.mp4"
+    second_video = tmp_path / "second.mp4"
+    _write_test_video(first_video, 45)
+    _write_test_video(second_video, 60)
     
     dummy_episodes = [
         {
             'episode_index': 0,
             'task': 'reach to apple',
-            'video_path': 'test_video_dummy.mp4',
+            'video_path': str(first_video),
             'joint_states': np.random.randn(45, 6),
             'actions': np.random.randn(45, 6),
             'timestamps': np.linspace(0, 1.5, 45)
@@ -58,22 +73,14 @@ def test_lerobot_export():
         {
             'episode_index': 1,
             'task': 'reach to banana',
-            'video_path': 'test_video_dummy2.mp4',
+            'video_path': str(second_video),
             'joint_states': np.random.randn(60, 6),
             'actions': np.random.randn(60, 6),
             'timestamps': np.linspace(0, 2.0, 60)
         }
     ]
     
-    # Create temporary dummy mp4 files
-    open("test_video_dummy.mp4", "w").close()
-    open("test_video_dummy2.mp4", "w").close()
-
     export_path = exporter.export_dataset(dummy_episodes, dataset_name="test_so100_dataset")
-
-    # Clean up dummy video files
-    if os.path.exists("test_video_dummy.mp4"): os.remove("test_video_dummy.mp4")
-    if os.path.exists("test_video_dummy2.mp4"): os.remove("test_video_dummy2.mp4")
 
     # Verify Parquet & Info Files
     parquet_path = os.path.join(export_path, "data", "chunk-000", "file-000.parquet")

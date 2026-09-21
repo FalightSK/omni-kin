@@ -14,7 +14,8 @@ import {
   CheckCircle2,
   Box,
   Sliders,
-  RefreshCw
+  RefreshCw,
+  Printer
 } from 'lucide-react';
 
 export default function DevVisionMonitor({
@@ -124,7 +125,33 @@ export default function DevVisionMonitor({
       const corners = box.corners;
       if (!corners || corners.length < 4) return;
 
-      // 1. Thick glowing neon green bounding box
+      // Determine tag color and label
+      let boxColor = '#00ff66';
+      let fillColor = 'rgba(0, 255, 102, 0.12)';
+      let labelText = `Tag ${box.id}`;
+
+      if (box.id === 0) {
+        boxColor = '#00ff66';
+        fillColor = 'rgba(0, 255, 102, 0.12)';
+        labelText = 'Tag A [Origin 0,0,0]';
+      } else if (box.id === 1) {
+        boxColor = '#ffaa00';
+        fillColor = 'rgba(255, 170, 0, 0.12)';
+        labelText = 'Tag B [Offset +15cm]';
+      } else if (box.id === 2) {
+        boxColor = '#d946ef';
+        fillColor = 'rgba(217, 70, 239, 0.12)';
+        labelText = 'Tag 2 [Jaw A 22mm]';
+      } else if (box.id === 3) {
+        boxColor = '#06b6d4';
+        fillColor = 'rgba(6, 182, 212, 0.12)';
+        labelText = 'Tag 3 [Jaw B 22mm]';
+      } else {
+        boxColor = '#94a3b8';
+        fillColor = 'rgba(148, 163, 184, 0.12)';
+      }
+
+      // 1. Glowing bounding box
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(corners[0][0], corners[0][1]);
@@ -132,13 +159,13 @@ export default function DevVisionMonitor({
         ctx.lineTo(corners[i][0], corners[i][1]);
       }
       ctx.closePath();
-      ctx.lineWidth = 4;
-      ctx.strokeStyle = '#00ff66';
-      ctx.shadowColor = '#00ff66';
-      ctx.shadowBlur = 10;
+      ctx.lineWidth = 3.5;
+      ctx.strokeStyle = boxColor;
+      ctx.shadowColor = boxColor;
+      ctx.shadowBlur = 8;
       ctx.stroke();
 
-      ctx.fillStyle = 'rgba(0, 255, 102, 0.12)';
+      ctx.fillStyle = fillColor;
       ctx.fill();
       ctx.restore();
 
@@ -165,20 +192,13 @@ export default function DevVisionMonitor({
 
       // 3. Tag Label Banner Pill
       const pt0 = corners[0];
-      const labelText =
-        box.id === 0
-          ? 'Tag A [Origin 0,0,0]'
-          : box.id === 1
-          ? 'Tag B [Offset +15cm]'
-          : `Tag ${box.id}`;
-
       ctx.save();
-      ctx.font = 'bold 13px ui-monospace, monospace';
+      ctx.font = 'bold 12px ui-monospace, monospace';
       const textWidth = ctx.measureText(labelText).width;
-      const boxW = textWidth + 20;
-      const boxH = 26;
+      const boxW = textWidth + 18;
+      const boxH = 24;
       const bx = Math.max(8, pt0[0]);
-      const by = Math.max(boxH + 6, pt0[1] - 10);
+      const by = Math.max(boxH + 6, pt0[1] - 8);
 
       ctx.fillStyle = 'rgba(10, 15, 25, 0.88)';
       ctx.beginPath();
@@ -190,11 +210,11 @@ export default function DevVisionMonitor({
       ctx.fill();
 
       ctx.lineWidth = 1.5;
-      ctx.strokeStyle = box.id === 0 ? '#00ff66' : '#ffaa00';
+      ctx.strokeStyle = boxColor;
       ctx.stroke();
 
-      ctx.fillStyle = box.id === 0 ? '#00ff66' : '#ffaa00';
-      ctx.fillText(labelText, bx + 10, by - 8);
+      ctx.fillStyle = boxColor;
+      ctx.fillText(labelText, bx + 9, by - 7);
       ctx.restore();
 
       // 4. 3D Coordinate Frame Axes standing on Tag A Origin
@@ -253,6 +273,40 @@ export default function DevVisionMonitor({
         drawAxisArrow(uz[0], uz[1], '#00b0ff', '+Z (Normal)');
       }
     });
+
+    // 5. Connect Gripper Tag 2 & 3 with span line and real-time distance badge
+    const b2 = bboxes.find((b) => b.id === 2);
+    const b3 = bboxes.find((b) => b.id === 3);
+    if (b2 && b3 && b2.center && b3.center) {
+      const c2 = b2.center;
+      const c3 = b3.center;
+      ctx.save();
+      ctx.beginPath();
+      ctx.setLineDash([6, 4]);
+      ctx.moveTo(c2[0], c2[1]);
+      ctx.lineTo(c3[0], c3[1]);
+      ctx.strokeStyle = '#e879f9';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      const midX = (c2[0] + c3[0]) / 2;
+      const midY = (c2[1] + c3[1]) / 2 - 12;
+      const grip = frameTelem.gripper;
+      const distStr = grip?.dist_mm ? `${grip.dist_mm}mm` : 'Detected';
+      const valStr = grip?.value !== undefined ? `${grip.value.toFixed(0)}%` : '100%';
+      const badgeText = `Gripper: ${valStr} (${distStr})`;
+
+      ctx.font = 'bold 12px ui-monospace, monospace';
+      const bWidth = ctx.measureText(badgeText).width;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+      ctx.fillRect(midX - bWidth / 2 - 8, midY - 14, bWidth + 16, 22);
+      ctx.strokeStyle = '#e879f9';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(midX - bWidth / 2 - 8, midY - 14, bWidth + 16, 22);
+      ctx.fillStyle = '#f0abfc';
+      ctx.fillText(badgeText, midX - bWidth / 2, midY + 1);
+      ctx.restore();
+    }
   }, [devTelemetry, currentFrameIndex]);
 
   // Dedicated renderer for Dev View overlays (HUD banner + bounding boxes over real video)
@@ -361,6 +415,9 @@ export default function DevVisionMonitor({
   const isArucoActive = currTelemetry?.source === 'dual_aruco' || currTelemetry?.source === 'single_aruco';
   const tagA = bboxes.find((b) => b.id === 0);
   const tagB = bboxes.find((b) => b.id === 1);
+  const tag2 = bboxes.find((b) => b.id === 2);
+  const tag3 = bboxes.find((b) => b.id === 3);
+  const isGripperActive = Boolean(currTelemetry?.gripper?.detected || (tag2 && tag3));
 
   return (
     <div
@@ -458,6 +515,18 @@ export default function DevVisionMonitor({
             <span>EKF Tuning</span>
           </button>
         )}
+
+        {/* Print Gripper Markers Button */}
+        <a
+          href="/api/marker/print_gripper"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-2.5 py-1.5 rounded-lg bg-[#050505] hover:bg-neutral-900 border border-neutral-800 text-neutral-300 hover:text-white text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm"
+          title="Print 22mm ArUco markers for gripper jaws (Tag 2 & 3)"
+        >
+          <Printer className="w-3.5 h-3.5 text-neutral-400" />
+          <span>Print 22mm Markers</span>
+        </a>
 
         {/* Live GPU vs Pre-Rendered MP4 Switcher for Dev View */}
         {visionMode === 'dev' && (
@@ -568,13 +637,13 @@ export default function DevVisionMonitor({
       </div>
 
       {/* 3. Live Bounding Box & Feature Extraction Diagnostic Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {/* Card 1: Tag A Bounding Box */}
         <div className="p-3 rounded-xl bg-[#050505] border border-neutral-800 flex flex-col gap-1.5 font-mono text-xs">
           <div className="flex items-center justify-between font-sans">
             <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-200 flex items-center gap-1 font-mono">
               <Box className="w-3.5 h-3.5 text-neutral-400" />
-              <span>Tag A Bounding Box (Origin)</span>
+              <span>Tag A (Origin 10cm)</span>
             </span>
             <span
               className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border ${
@@ -612,7 +681,7 @@ export default function DevVisionMonitor({
           <div className="flex items-center justify-between font-sans">
             <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-200 flex items-center gap-1 font-mono">
               <Box className="w-3.5 h-3.5 text-neutral-400" />
-              <span>Tag B Bounding Box (Offset)</span>
+              <span>Tag B (Offset 5cm)</span>
             </span>
             <span
               className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border ${
@@ -645,7 +714,49 @@ export default function DevVisionMonitor({
           </div>
         </div>
 
-        {/* Card 3: OpenCV Feature Extraction & Canny Status */}
+        {/* Card 3: Gripper Jaw Markers (Tag 2 & 3 - 22mm) */}
+        <div className="p-3 rounded-xl bg-[#050505] border border-neutral-800 flex flex-col gap-1.5 font-mono text-xs">
+          <div className="flex items-center justify-between font-sans">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-200 flex items-center gap-1 font-mono">
+              <Box className="w-3.5 h-3.5 text-fuchsia-400" />
+              <span>Gripper (Tag 2 & 3 · 22mm)</span>
+            </span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border ${
+                isGripperActive
+                  ? 'bg-fuchsia-950/60 text-fuchsia-300 border-fuchsia-800/60'
+                  : 'bg-neutral-950 text-neutral-500 border-neutral-800'
+              }`}
+            >
+              {isGripperActive ? '● Tracking' : '○ Default Open'}
+            </span>
+          </div>
+
+          <div className="text-[11px] text-neutral-300 flex flex-col gap-0.5 pt-1">
+            <div className="flex justify-between">
+              <span className="text-neutral-500">Jaw Distance:</span>
+              <span className="font-semibold text-white">
+                {currTelemetry?.gripper?.dist_mm ? `${currTelemetry.gripper.dist_mm} mm` : '—'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-neutral-500">Gripper State:</span>
+              <span className="text-fuchsia-300 font-semibold">
+                {currTelemetry?.gripper?.value !== undefined
+                  ? `${currTelemetry.gripper.value.toFixed(0)}% (${currTelemetry.gripper.value > 50 ? 'Open' : 'Closed'})`
+                  : '100% (Open)'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-neutral-500">Jaw Markers:</span>
+              <span className="text-neutral-400">
+                {tag2 && tag3 ? 'Tag 2 + Tag 3' : tag2 ? 'Tag 2 only' : tag3 ? 'Tag 3 only' : 'Not in view'}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Card 4: OpenCV Feature Extraction & Canny Status */}
         <div className="p-3 rounded-xl bg-[#050505] border border-neutral-800 flex flex-col gap-1.5 font-mono text-xs">
           <div className="flex items-center justify-between font-sans">
             <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-200 flex items-center gap-1 font-mono">
@@ -663,7 +774,7 @@ export default function DevVisionMonitor({
               <span className="font-semibold text-white">{numFeatures} Keypoints</span>
             </div>
             <div className="flex justify-between">
-              <span className="text-neutral-500">3D Room Landmarks:</span>
+              <span className="text-neutral-500">3D Landmarks:</span>
               <span className="font-semibold text-white">{numLandmarks} Points</span>
             </div>
             <div className="flex justify-between">

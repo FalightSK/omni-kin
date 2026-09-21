@@ -82,6 +82,27 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const isUploadingRef = useRef(false);
   const [queueCount, setQueueCount] = useState(0);
   const [uploadStatus, setUploadStatus] = useState('');
+  const [serverProcessing, setServerProcessing] = useState(null);
+
+  // Keep the phone informed after upload: ingestion is asynchronous and the
+  // queue can outlive the upload toast.
+  useEffect(() => {
+    let stopped = false;
+    let timer = null;
+    const poll = async () => {
+      try {
+        const response = await fetch('/api/processing/status');
+        const data = await response.json();
+        if (!stopped && data.status === 'success') setServerProcessing(data);
+        const active = data.is_processing || data.pending_count > 0;
+        timer = setTimeout(poll, active ? 1500 : 5000);
+      } catch (_) {
+        if (!stopped) timer = setTimeout(poll, 5000);
+      }
+    };
+    poll();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, []);
 
   // Orientation State: Checks window aspect ratio and Accelerometer Ax (|Ax| >= 6.0 m/s^2)
   const [isLandscape, setIsLandscape] = useState(
@@ -180,11 +201,11 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         window.location.hostname !== 'localhost' &&
         window.location.hostname !== '127.0.0.1';
       if (isRemote && window.location.protocol === 'http:') {
-        window.location.href = `https://${window.location.hostname}:8443/mobile`;
+      window.location.href = `https://${window.location.hostname}:8443/mobile${window.location.search}`;
         return;
       }
       setStatusMsg('Camera access requires HTTPS or localhost context.');
-      alert('Camera access requires HTTPS. Please connect to https://' + window.location.hostname + ':8443/mobile');
+    alert('Camera access requires HTTPS. Please connect to https://' + window.location.hostname + ':8443/mobile' + window.location.search);
       return;
     }
 
@@ -593,6 +614,12 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 px-4 py-1.5 bg-[#0a0a0a]/95 backdrop-blur-md border border-neutral-700 rounded-full text-xs font-semibold text-neutral-200 shadow-2xl flex items-center gap-2 animate-fade-in font-mono">
           <Sparkles className="w-3.5 h-3.5 text-neutral-300" />
           <span>{statusMsg}</span>
+        </div>
+      )}
+      {serverProcessing && (serverProcessing.is_processing || serverProcessing.pending_count > 0) && (
+        <div className="absolute top-12 left-1/2 -translate-x-1/2 z-40 px-3 py-1 bg-black/85 border border-neutral-700 rounded-full text-[10px] font-mono text-neutral-300 shadow-xl">
+          Server processing · {serverProcessing.pending_count + (serverProcessing.is_processing ? 1 : 0)} queued
+          {serverProcessing.current_job?.task ? ` · ${serverProcessing.current_job.task}` : ''}
         </div>
       )}
 

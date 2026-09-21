@@ -694,12 +694,17 @@
 
                 try {
                     statusText.innerText = "⚙️ Server is calculating 3D Trajectory (ArUco PnP + EKF Fusion)...";
+                    const pairingToken = new URLSearchParams(window.location.search).get('pair') || sessionStorage.getItem('omnikin.operator-token') || '';
+                    if (pairingToken) sessionStorage.setItem('omnikin.operator-token', pairingToken);
                     const response = await fetch('/api/recordings/save', {
                         method: 'POST',
+                        headers: pairingToken ? { 'X-OmniKin-Token': pairingToken } : {},
                         body: formData
                     });
                     const res = await response.json();
-                    if (res.status === 'success') {
+                    if (res.status === 'queued') {
+                        statusText.innerText = `✅ Upload queued (#${res.queue_position}). Processing continues in the background.`;
+                    } else if (res.status === 'success') {
                         statusText.innerText = `🎉 Server Calculated & Saved! Episode #${res.episode_index} (${res.num_frames} frames).`;
                     } else {
                         statusText.innerText = "❌ Server error: " + (res.message || "Processing failed.");

@@ -31,7 +31,7 @@ flowchart TD
     end
 
     Phone -- "Video + IMU Telemetry (Wi-Fi HTTPS :8443)" --> Server
-    Server -- "WebSockets / REST" --> Dashboard
+    Server -- "REST polling / HTTPS" --> Dashboard
     IK --> Dataset
 ```
 
@@ -70,7 +70,7 @@ Collecting real-world robot manipulation demonstrations typically requires:
 - Bulky VR controllers with external SteamVR base stations
 - High-end optical motion capture rooms (Vicon/OptiTrack)
 
-**OmniKin eliminates all specialized hardware.** By combining a standard sheet of paper printed with two ArUco markers and a smartphone you already own, OmniKin delivers **sub-millimeter 3D trajectory tracking**, transforms hand motion into collision-safe robot joint states, and exports clean, training-ready LeRobot datasets.
+**OmniKin reduces the hardware needed for trajectory collection.** A dual-ArUco board and phone provide a table-anchored trajectory estimate, which must be validated against the physical acceptance protocol before it is used for robot training.
 
 ---
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import Viewport3D from '../components/Viewport3D';
 import VideoPlayer from '../components/VideoPlayer';
 import DevVisionMonitor from '../components/DevVisionMonitor';
@@ -42,6 +42,51 @@ import {
   Sliders,
   RotateCw
 } from 'lucide-react';
+
+function previewFilterWindow(windowMs, fps, length) {
+  if (length < 3) return 1;
+  let frames = Math.max(3, Math.round((windowMs / 1000) * (fps || 30)));
+  if (frames % 2 === 0) frames += 1;
+  return Math.min(frames, length % 2 === 0 ? length - 1 : length);
+}
+
+function isRenderablePoseArray(poses) {
+  return Array.isArray(poses)
+    && poses.length > 0
+    && poses.every((pose) => Array.isArray(pose)
+      && pose.length >= 3
+      && Number.isFinite(Number(pose[0]))
+      && Number.isFinite(Number(pose[1]))
+      && Number.isFinite(Number(pose[2])));
+}
+
+function filterPreviewPoses(poses, method, windowMs, fps) {
+  if (!isRenderablePoseArray(poses) || method === 'raw') return poses || [];
+  const frameWindow = previewFilterWindow(windowMs, fps, poses.length);
+  if (frameWindow < 3) return poses;
+  const half = Math.floor(frameWindow / 2);
+  const offsets = Array.from({ length: frameWindow }, (_, i) => i - half);
+
+  // Quadratic Savitzky-Golay weights derived from the symmetric least-squares
+  // normal matrix. They preserve local shape without contacting the server.
+  const sum2 = offsets.reduce((total, value) => total + value * value, 0);
+  const sum4 = offsets.reduce((total, value) => total + value ** 4, 0);
+  const determinant = frameWindow * sum4 - sum2 * sum2;
+  const weights = method === 'savgol'
+    ? offsets.map((value) => (sum4 - sum2 * value * value) / determinant)
+    : offsets.map(() => 1 / frameWindow);
+
+  return poses.map((pose, index) => pose.map((value, axis) => {
+    if (!Number.isFinite(value)) return value;
+    let filtered = 0;
+    for (let sample = 0; sample < frameWindow; sample += 1) {
+      const sampleIndex = Math.min(poses.length - 1, Math.max(0, index + offsets[sample]));
+      const sampleValue = Number(poses[sampleIndex]?.[axis]);
+      filtered += (Number.isFinite(sampleValue) ? sampleValue : value) * weights[sample];
+    }
+    return filtered;
+  }));
+}
 
 export default function Dashboard({
   episodes,
@@ -90,7 +135,9 @@ export default function Dashboard({
   // Trajectory Smoothing Configuration (Savitzky-Golay / Moving Average)
   const [smoothingMethod, setSmoothingMethod] = useState('savgol');
   const [smoothingWindowMs, setSmoothingWindowMs] = useState(250);
-  const [isSmoothingApplying, setIsSmoothingApplying] = useState(false);
+  // A capture is fetched asynchronously.  Advance this once after its points
+  // are committed so the imperative WebGL layer performs its initial draw.
+  const [previewRevision, setPreviewRevision] = useState(0);
 
   // Dev View Diagnostic Overlay (ArUco + Virtual SLAM) - Default OFF for clean minimalist view
   const [isDevView, setIsDevView] = useState(false);
@@ -99,7 +146,7 @@ export default function Dashboard({
 
   // Layout Configuration: Default to 'pip' (Big 3D Trajectory with anchored bottom-right Camera)
   const [layoutMode, setLayoutMode] = useState('pip'); // 'pip' (Default), 'vertical', or 'horizontal'
-  const [pipSize, setPipSize] = useState('medium'); // 'small', 'medium', 'large'
+  const [pipSize, setPipSize] = useState('small'); // 'small', 'medium', 'large'
   const [isPipOpen, setIsPipOpen] = useState(true);
 
   // Split ratio for alternative split modes
@@ -112,7 +159,10 @@ export default function Dashboard({
 
   const [overridePoses, setOverridePoses] = useState(null);
   const [overrideEePoses, setOverrideEePoses] = useState(null);
-  const debouncedSmoothRef = useRef(null);
+  const [overrideJointStates, setOverrideJointStates] = useState(null);
+  const [overrideRobotEePoses, setOverrideRobotEePoses] = useState(null);
+  const [overrideFkTablePoses, setOverrideFkTablePoses] = useState(null);
+  const [overrideFkCameraPoses, setOverrideFkCameraPoses] = useState(null);
   const [isRecalculatingTrajectory, setIsRecalculatingTrajectory] = useState(false);
   const [recalcSuccess, setRecalcSuccess] = useState(false);
 
@@ -148,7 +198,7 @@ export default function Dashboard({
     completed_count: 0,
     current_job: null
   });
-  const prevCompletedCountRef = useRef(0);
+  const prevCompletedCountRef = useRef(null);
   const prevIsProcessingRef = useRef(false);
 
   useEffect(() => {
@@ -170,18 +220,18 @@ export default function Dashboard({
         setProcessingStatus(data);
 
         // Auto-refresh episode list and auto-select newly completed demonstration
-        if (prevCompletedCountRef.current === 0) {
-          prevCompletedCountRef.current = data.completed_count || 0;
-        } else if (
-          (data.completed_count > prevCompletedCountRef.current) ||
-          (prevIsProcessingRef.current && !data.is_processing)
-        ) {
+        const completedCount = data.completed_count || 0;
+        const hasCompletion = prevCompletedCountRef.current !== null && completedCount > prevCompletedCountRef.current;
+        const processingFinished = prevIsProcessingRef.current && !data.is_processing;
+        if (hasCompletion || processingFinished) {
           prevCompletedCountRef.current = data.completed_count || 0;
           const latestCompleted = data.recent_jobs?.filter((j) => j.status === 'completed').slice(-1)[0];
           const newEpIdx = latestCompleted?.episode_index;
           if (onRefreshEpisodes) {
             onRefreshEpisodes(newEpIdx !== undefined ? newEpIdx : null);
           }
+        } else if (prevCompletedCountRef.current === null) {
+          prevCompletedCountRef.current = completedCount;
         }
         prevIsProcessingRef.current = data.is_processing;
 
@@ -214,8 +264,36 @@ export default function Dashboard({
   }, [onRefreshEpisodes]);
 
   const activeEp = episodes.find((e) => e.episode_index === selectedEpIdx) || episodes[0] || null;
-  const poses = overridePoses || activeEp?.poses || [];
-  const eePoses = overrideEePoses || activeEp?.ee_poses || [];
+  const processedPoses = (overridePoses?.length ? overridePoses : null) || activeEp?.poses || [];
+  const rawPoses = activeEp?.raw_poses || [];
+  const sourcePoses = smoothingMethod === 'raw' && isRenderablePoseArray(rawPoses)
+    ? rawPoses
+    : (isRenderablePoseArray(processedPoses) ? processedPoses : rawPoses);
+  const candidateEePoses = (overrideEePoses?.length ? overrideEePoses : null)
+    || activeEp?.ee_poses
+    || [];
+  const sourceEePoses = isRenderablePoseArray(candidateEePoses) ? candidateEePoses : [];
+  const poses = useMemo(
+    () => filterPreviewPoses(sourcePoses, smoothingMethod, smoothingWindowMs, activeEp?.fps || 30),
+    [sourcePoses, smoothingMethod, smoothingWindowMs, activeEp?.fps]
+  );
+  const eePoses = useMemo(
+    () => filterPreviewPoses(sourceEePoses, smoothingMethod, smoothingWindowMs, activeEp?.fps || 30),
+    [sourceEePoses, smoothingMethod, smoothingWindowMs, activeEp?.fps]
+  );
+  // Recreate the WebGL viewport only when a new reference trajectory arrives
+  // (upload, episode switch, or explicit recalculation). Filter changes keep
+  // the same renderer and replace only the in-memory display arrays.
+  const previewSourceKey = `${activeEp?.episode_id ?? 'empty'}:${processedPoses.length}:${candidateEePoses.length}`;
+  useEffect(() => {
+    if (!poses.length && !eePoses.length) return undefined;
+    const frameId = requestAnimationFrame(() => setPreviewRevision((revision) => revision + 1));
+    return () => cancelAnimationFrame(frameId);
+  }, [previewSourceKey]);
+  const jointStates = overrideJointStates || activeEp?.joint_states || [];
+  const robotEePoses = overrideRobotEePoses || activeEp?.robot_ee_poses || [];
+  const fkTablePoses = overrideFkTablePoses || activeEp?.fk_table_poses || [];
+  const fkCameraPoses = overrideFkCameraPoses || activeEp?.fk_camera_poses || [];
   const totalFrames = activeEp?.num_frames || 0;
 
   // Dual Trajectory System Phase & Timeline Index Resolution
@@ -293,6 +371,10 @@ export default function Dashboard({
   useEffect(() => {
     setOverridePoses(null);
     setOverrideEePoses(null);
+    setOverrideJointStates(null);
+    setOverrideRobotEePoses(null);
+    setOverrideFkTablePoses(null);
+    setOverrideFkCameraPoses(null);
   }, [activeEp?.episode_index]);
 
   // Ensure dev_video_url and canny_video_url are generated for the active episode only if Dev Mode is ON
@@ -315,44 +397,14 @@ export default function Dashboard({
     setIsPlaying(false);
   }, [activeEp?.episode_index, activeEp?.video_url, trajectoryMode]);
 
-  const handleApplySmoothing = async (newMethod, newWindowMs) => {
-    if (!activeEp) return;
+  const handleApplySmoothing = (newMethod, newWindowMs) => {
     setSmoothingMethod(newMethod);
     const win = newWindowMs !== undefined ? newWindowMs : smoothingWindowMs;
     if (newWindowMs !== undefined) setSmoothingWindowMs(win);
-
-    setIsSmoothingApplying(true);
-    try {
-      const res = await fetch(`/api/episodes/${activeEp.episode_index}/smooth`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ method: newMethod, time_window_ms: win })
-      });
-      const data = await res.json();
-      if (data.status === 'success' && data.poses) {
-        setOverridePoses(data.poses);
-        if (data.ee_poses) {
-          setOverrideEePoses(data.ee_poses);
-        }
-        if (onUpdateEpisodePoses) {
-          onUpdateEpisodePoses(data.poses, data.ee_poses);
-        }
-      }
-    } catch (err) {
-      console.error('Error applying smoothing:', err);
-    } finally {
-      setIsSmoothingApplying(false);
-    }
   };
 
   const handleSliderChange = (newVal) => {
     setSmoothingWindowMs(newVal);
-    if (debouncedSmoothRef.current) {
-      clearTimeout(debouncedSmoothRef.current);
-    }
-    debouncedSmoothRef.current = setTimeout(() => {
-      handleApplySmoothing(smoothingMethod, newVal);
-    }, 120);
   };
 
   useEffect(() => {
@@ -717,8 +769,10 @@ export default function Dashboard({
             {/* Primary Big 3D Workspace */}
             <div className="w-full h-full relative">
               <Viewport3D
+                key={previewSourceKey}
                 trajectoryPoses={poses}
                 eePoses={eePoses}
+                trajectoryRevision={previewRevision}
                 gripperStates={activeEp?.gripper_states || []}
                 currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}
@@ -730,6 +784,12 @@ export default function Dashboard({
                 approachCamPoses={approachData?.aruco_cam_poses || []}
                 isApproachPhase={isApproachPhase}
                 approachFrameIndex={approachFrameIndex}
+                jointStates={jointStates}
+                robotEePoses={robotEePoses}
+                fkTablePoses={fkTablePoses}
+                fkCameraPoses={fkCameraPoses}
+                linkPositions={activeEp?.link_positions || []}
+                reachAngleDeg={activeEp?.reach_angle_deg ?? robotConfig?.reach_angle_deg}
               />
             </div>
 
@@ -823,8 +883,10 @@ export default function Dashboard({
               className="relative overflow-hidden transition-[height,width] duration-75 ease-out"
             >
               <Viewport3D
+                key={previewSourceKey}
                 trajectoryPoses={poses}
                 eePoses={eePoses}
+                trajectoryRevision={previewRevision}
                 gripperStates={activeEp?.gripper_states || []}
                 currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}
@@ -836,6 +898,12 @@ export default function Dashboard({
                 approachCamPoses={approachData?.aruco_cam_poses || []}
                 isApproachPhase={isApproachPhase}
                 approachFrameIndex={approachFrameIndex}
+                jointStates={jointStates}
+                robotEePoses={robotEePoses}
+                fkTablePoses={fkTablePoses}
+                fkCameraPoses={fkCameraPoses}
+                linkPositions={activeEp?.link_positions || []}
+                reachAngleDeg={activeEp?.reach_angle_deg ?? robotConfig?.reach_angle_deg}
               />
             </div>
 
@@ -1099,12 +1167,12 @@ export default function Dashboard({
             <div className="flex items-center gap-2">
               <Sparkles className="w-3.5 h-3.5 text-neutral-400" />
               <span className="font-semibold text-neutral-300 text-[11px] uppercase tracking-wider font-mono">Smoothing:</span>
+              <span className="text-[10px] text-neutral-500 font-medium">Live preview · no recording changes</span>
             </div>
 
             <div className="flex items-center gap-1 bg-neutral-950 p-0.5 rounded-lg border border-neutral-800">
               <button
                 onClick={() => handleApplySmoothing('raw')}
-                disabled={isSmoothingApplying}
                 className={`px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
                   smoothingMethod === 'raw'
                     ? 'bg-neutral-800 text-white shadow-sm font-semibold'
@@ -1116,7 +1184,6 @@ export default function Dashboard({
 
               <button
                 onClick={() => handleApplySmoothing('savgol')}
-                disabled={isSmoothingApplying}
                 className={`px-2.5 py-1 rounded text-[11px] font-medium flex items-center gap-1 transition-all ${
                   smoothingMethod === 'savgol'
                     ? 'bg-neutral-800 text-white shadow-sm font-semibold'
@@ -1130,7 +1197,6 @@ export default function Dashboard({
 
               <button
                 onClick={() => handleApplySmoothing('moving_average')}
-                disabled={isSmoothingApplying}
                 className={`px-2.5 py-1 rounded text-[11px] font-medium transition-all ${
                   smoothingMethod === 'moving_average'
                     ? 'bg-neutral-800 text-white shadow-sm font-semibold'
@@ -1152,8 +1218,6 @@ export default function Dashboard({
                   step="50"
                   value={smoothingWindowMs}
                   onChange={(e) => handleSliderChange(parseInt(e.target.value))}
-                  onMouseUp={(e) => handleApplySmoothing(smoothingMethod, parseInt(e.target.value))}
-                  onTouchEnd={(e) => handleApplySmoothing(smoothingMethod, parseInt(e.target.value))}
                   className="w-24 accent-white cursor-pointer h-1.5 bg-neutral-800 rounded"
                 />
                 <span className="text-neutral-300 w-12">{smoothingWindowMs}ms</span>
@@ -1463,8 +1527,8 @@ export default function Dashboard({
                     </div>
                     <div className="p-2 rounded bg-neutral-900 border border-neutral-800">
                       <div className="text-neutral-200 font-bold mb-1">Coordinates</div>
-                      <div>Table: [{(currentX * 100).toFixed(1)}, {(currentY * 100).toFixed(1)}, {(currentZ * 100).toFixed(1)}] cm</div>
-                      <div>Robot Base: [{(robotX * 100).toFixed(1)}, {(robotY * 100).toFixed(1)}, {(robotZ * 100).toFixed(1)}] cm</div>
+                      <div>Table: [{(currentTcpX * 100).toFixed(1)}, {(currentTcpY * 100).toFixed(1)}, {(currentTcpZ * 100).toFixed(1)}] cm</div>
+                      <div>Robot Base: [{(robotTcpX * 100).toFixed(1)}, {(robotTcpY * 100).toFixed(1)}, {(robotTcpZ * 100).toFixed(1)}] cm</div>
                       <div>Pitch: {((currentPose[4] || 0) * (180 / Math.PI)).toFixed(1)}°</div>
                     </div>
                   </div>
@@ -1506,12 +1570,12 @@ export default function Dashboard({
           </div>
 
           {/* Background Processing Queue Monitor Banner */}
-          {(processingStatus.is_processing || processingStatus.pending_count > 0) && (
+          {(processingStatus.is_processing || processingStatus.pending_count > 0 || processingStatus.recent_jobs?.some((job) => job.status === 'failed')) && (
             <div className="p-2.5 rounded-lg bg-neutral-900 border border-neutral-800 flex flex-col gap-1">
               <div className="flex items-center justify-between text-[11px]">
                 <span className="font-semibold text-neutral-200 flex items-center gap-1.5">
                   <RefreshCw className="w-3 h-3 animate-spin text-neutral-400" />
-                  <span>Processing Demo</span>
+                  <span>{processingStatus.is_processing ? 'Processing Demo' : 'Processing Queue'}</span>
                 </span>
                 <span className="px-1.5 py-0.2 rounded bg-neutral-800 text-neutral-300 font-mono text-[10px] font-bold">
                   {processingStatus.pending_count + (processingStatus.is_processing ? 1 : 0)} in queue
@@ -1519,9 +1583,14 @@ export default function Dashboard({
               </div>
               {processingStatus.current_job && (
                 <div className="text-[10px] text-neutral-400 truncate font-mono">
-                  Active: {processingStatus.current_job.task}
+                  Active: {processingStatus.current_job.task} · {processingStatus.current_job.phase || 'processing'}
                 </div>
               )}
+              {processingStatus.recent_jobs?.filter((job) => job.status === 'failed').slice(-1).map((job) => (
+                <div key={job.job_id} className="text-[10px] text-rose-400 truncate font-mono">
+                  Failed: {job.error || 'processing error'}
+                </div>
+              ))}
             </div>
           )}
 

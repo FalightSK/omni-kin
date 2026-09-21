@@ -11,6 +11,9 @@ import socket
 import shutil
 import io
 import uuid
+import secrets
+import hashlib
+import copy
 import numpy as np
 import cv2
 import asyncio
@@ -42,8 +45,34 @@ from robot_kinematics import (
     URDFParser,
     ROBOT_PRESETS
 )
+from integrity import (
+    MAX_JSON_BYTES, MAX_UPLOAD_BYTES, dataset_slug, ensure_finite_number,
+    episode_manifest, frame_timestamps, legacy_manifest, reject_unsafe_xml,
+    sha256_file,
+)
 
 app = FastAPI(title="ArUco-Anchored 3D Trajectory Collector")
+
+# This is intentionally a shared, operator-provided secret for a trusted LAN.
+# Set OMNIKIN_PAIRING_TOKEN before starting the service to keep QR pairings stable.
+PAIRING_TOKEN = os.environ.get("OMNIKIN_PAIRING_TOKEN") or secrets.token_urlsafe(32)
+AUTH_HEADER = "x-omnikin-token"
+EPISODE_LOCK = threading.RLock()
+
+
+@app.middleware("http")
+async def require_operator_token(request: Request, call_next):
+    """Protect all state-changing API routes after QR pairing.
+
+    Read-only endpoints remain available so a new device can retrieve its pairing
+    URL. Pairing itself requires the unguessable QR code value.
+    """
+    if request.url.path.startswith("/api/") and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        if request.url.path != "/api/pairing/session":
+            supplied = request.headers.get(AUTH_HEADER, "")
+            if not supplied or not secrets.compare_digest(supplied, PAIRING_TOKEN):
+                return JSONResponse({"status": "error", "message": "Operator pairing required"}, status_code=401)
+    return await call_next(request)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
@@ -101,11 +130,25 @@ def save_robot_config(cfg):
         print(f"Error saving {ROBOT_CONFIG_FILE}: {e}")
 
 ROBOT_CONFIG = load_robot_config()
+# A previously uploaded URDF is inert until the operator explicitly applies it.
+if not ROBOT_CONFIG.get("custom_urdf_enabled", False):
+    ROBOT_CONFIG.pop("custom_dh_table", None)
+    ROBOT_CONFIG.pop("custom_specs", None)
+    ROBOT_CONFIG.pop("custom_urdf", None)
+_init_solver = get_robot_solver(
+    ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
+    q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+    custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
+    custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+)
+ROBOT_CONFIG["reach_angle_deg"] = getattr(_init_solver, "reach_angle_deg", 0.0)
+
 workspace_calibrator = WorkspaceCalibrator(
     offset_x=ROBOT_CONFIG["offset_x"],
     offset_y=ROBOT_CONFIG["offset_y"],
     offset_z=ROBOT_CONFIG["offset_z"],
-    yaw_deg=ROBOT_CONFIG["yaw_deg"]
+    yaw_deg=ROBOT_CONFIG["yaw_deg"],
+    reach_angle_rad=getattr(_init_solver, "reach_angle_rad", 0.0)
 )
 
 gripper_cfg = ROBOT_CONFIG.get("gripper_offset", {})
@@ -120,7 +163,7 @@ camera_gripper_calibrator = CameraGripperCalibrator(
 )
 
 trajectory_planner = TrajectoryPlanner(
-    solver=get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)),
+    solver=_init_solver,
     workspace_calibrator=workspace_calibrator,
     camera_gripper_calibrator=camera_gripper_calibrator
 )
@@ -142,6 +185,7 @@ visual_tracker = VisualInertialTracker(
     tag_b_id=1,
     tag_b_offset=(0.15, 0.0, 0.0)
 )
+visual_tracker.configure_gripper_markers(ROBOT_CONFIG.get("gripper_marker_tracking", {}))
 lerobot_exporter = LeRobotExporter(
     output_dir=EXPORT_DIR,
     robot_type=ROBOT_CONFIG["robot_type"],
@@ -157,6 +201,77 @@ def safe_to_list(arr, fallback=None):
         return arr.tolist()
     return list(arr)
 
+
+def _config_snapshot():
+    """Capture job inputs once so a concurrent calibration update cannot alter it."""
+    return copy.deepcopy(ROBOT_CONFIG)
+
+
+def _new_tracker(config_snapshot):
+    tracker = VisualInertialTracker(
+        tag_a_size=0.10, tag_b_size=0.05, tag_a_id=0, tag_b_id=1,
+        tag_b_offset=(0.15, 0.0, 0.0),
+    )
+    tracker.configure_gripper_markers(config_snapshot.get("gripper_marker_tracking", {}))
+    return tracker
+
+
+async def _stream_upload_to_file(video: UploadFile, destination: str):
+    """Persist uploads without holding an unbounded video in RAM."""
+    total = 0
+    digest = hashlib.sha256()
+    with open(destination, "wb") as stream:
+        while True:
+            chunk = await video.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_UPLOAD_BYTES:
+                stream.close()
+                try:
+                    os.remove(destination)
+                except OSError:
+                    pass
+                raise ValueError("Video exceeds the 500 MiB upload limit")
+            digest.update(chunk)
+            stream.write(chunk)
+    if total == 0:
+        raise ValueError("Uploaded video is empty")
+    return total, digest.hexdigest()
+
+
+def _validate_video(path: str):
+    cap = cv2.VideoCapture(path)
+    try:
+        if not cap.isOpened():
+            raise ValueError("Uploaded file is not a readable video container")
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        if not np.isfinite(fps) or fps <= 0 or fps > 120 or frame_count <= 0:
+            raise ValueError("Uploaded video has invalid FPS or no decodable frames")
+        ok, _ = cap.read()
+        if not ok:
+            raise ValueError("Uploaded video contains no decodable frame")
+        return frame_count, fps
+    finally:
+        cap.release()
+
+
+def _ensure_idle(operation: str):
+    if PROCESSING_STATUS["is_processing"] or not PROCESSING_QUEUE.empty():
+        raise ValueError(f"Cannot {operation} while recording processing is active")
+
+
+def _save_job_manifest(job, status, errors=None):
+    manifest = episode_manifest(
+        source_sha256=job["source_sha256"], frame_count=job["source_frame_count"],
+        fps=job["source_fps"], imu_samples=len(job.get("parsed_imu", [])),
+        config_snapshot=job["config_snapshot"], status=status,
+        validation={"state": "failed" if errors else "pending", "errors": errors or []},
+    )
+    with open(os.path.join(job["ep_dir"], "episode_manifest.json"), "w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, indent=2)
+
 def save_episode_meta(ep_data):
     try:
         ep_uid = ep_data.get('episode_id')
@@ -169,6 +284,112 @@ def save_episode_meta(ep_data):
             json.dump(ep_data, f, indent=2)
     except Exception as e:
         print(f"Error saving episode metadata: {e}")
+
+def sync_episode_kinematics(ep):
+    """
+    Computes and stores server-side joint_states, robot_ee_poses, and actions for an episode.
+    These are used by the frontend Viewport3D for 1:1 export/preview parity without client-side IK re-solve.
+    Dynamically adheres to any loaded URDF data / custom_dh_table.
+    """
+    try:
+        r_solver = get_robot_solver(
+            ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+        )
+        workspace_calibrator.reach_angle_rad = getattr(r_solver, "reach_angle_rad", 0.0)
+        # Prioritize active (smoothed/filtered) poses over raw un-filtered poses
+        base_poses = ep.get("poses") or ep.get("raw_poses", [])
+        if not base_poses or len(base_poses) == 0:
+            return
+
+        poses_arr = np.asarray(base_poses, dtype=np.float64)
+
+        # 1. Camera → Gripper TCP in table frame
+        ee_table = camera_gripper_calibrator.transform_trajectory(poses_arr, to_gripper=True)
+        ep['ee_poses'] = ee_table.tolist()
+        ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
+
+        # 2. Table frame → Robot base frame
+        ee_robot = workspace_calibrator.transform_trajectory(ee_table, to_robot=True)
+
+        # 3. Normalize gripper states [0, 1]
+        grippers = np.array(ep.get("gripper_states", [100.0] * len(ee_robot)), dtype=np.float32)
+        if np.max(grippers) > 1.0 + 1e-3:
+            grippers = np.clip(grippers / 100.0, 0.0, 1.0)
+        else:
+            grippers = np.clip(grippers, 0.0, 1.0)
+
+        # 4. Solve Inverse Kinematics for each waypoint
+        joints = []
+        link_positions = []
+        prev_q = None
+        feasible_count = 0
+        ik_errors_cm = []
+        for i in range(len(ee_robot)):
+            try:
+                res = r_solver.solve_feasible_ik(ee_robot[i], gripper_state=float(grippers[i]), prev_joints=prev_q)
+                q = res["joints"]
+                prev_q = q[:5]
+                link_positions.append(res.get("link_positions", []))
+                feasible_count += int(bool(res.get("is_feasible", False)))
+                ik_errors_cm.append(float(res.get("error_distance_cm", 0.0)))
+            except Exception as exc:
+                raise ValueError(f"IK failed at frame {i}; refusing fabricated fallback joints") from exc
+            joints.append(q)
+        joints = np.array(joints, dtype=np.float32)
+        joints[:, -1] = grippers  # Ensure gripper column stays normalized
+
+        # 5. Smooth joint trajectory (Savitzky-Golay + slew-rate limiter)
+        if hasattr(r_solver, "smooth_joint_trajectory"):
+            joints = r_solver.smooth_joint_trajectory(joints)
+
+        ep['joint_states'] = joints.tolist()
+
+        # 6. Forward kinematics → robot_ee_poses (FK-synchronized, in robot base frame)
+        fk_robot = []
+        fk_links = []
+        for i in range(len(joints)):
+            q_rad = np.radians(joints[i, :5])
+            fk_p = r_solver.forward_kinematics(q_rad)
+            fk_robot.append(fk_p)
+            if hasattr(r_solver, "forward_kinematics_chain"):
+                chain = r_solver.forward_kinematics_chain(q_rad)
+                fk_links.append([p.tolist() for p in chain])
+        ep['robot_ee_poses'] = np.array(fk_robot, dtype=np.float32).tolist()
+        if fk_links:
+            ep['link_positions'] = fk_links
+        else:
+            ep['link_positions'] = link_positions
+        ep['reach_angle_deg'] = getattr(r_solver, "reach_angle_deg", 0.0)
+
+        # 6b. Reproject FK robot EE poses to table frame (for exact 3D preview tube parity)
+        fk_table = workspace_calibrator.transform_trajectory(fk_robot, to_robot=False)
+        ep['fk_table_poses'] = np.array(fk_table, dtype=np.float32).tolist()
+        # The mounted-camera preview must follow the same calibrated transform as
+        # the processed TCP, including after joint smoothing changes the FK pose.
+        fk_camera = camera_gripper_calibrator.transform_trajectory(fk_table, to_gripper=False)
+        ep['fk_camera_poses'] = np.array(fk_camera, dtype=np.float32).tolist()
+        ep['ik_feasibility'] = {
+            "feasible_percent": round(feasible_count / max(1, len(ee_robot)) * 100.0, 1),
+            "avg_error_cm": round(float(np.mean(ik_errors_cm)) if ik_errors_cm else 0.0, 2),
+        }
+        ep['kinematics_stale'] = False
+        ep.pop('kinematics_stale_reason', None)
+
+        # 7. Actions = next-step joint states (joint space, degrees + normalized gripper)
+        actions = np.roll(joints, -1, axis=0)
+        actions[-1] = joints[-1]
+        ep['actions'] = actions.tolist()
+
+        save_episode_meta(ep)
+        print(f"[{time.strftime('%H:%M:%S')}] ✅ Synced kinematics for episode {ep.get('episode_id', '?')} ({len(joints)} frames, reach={ep['reach_angle_deg']}°)")
+        return ep['ik_feasibility']
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] ⚠️  sync_episode_kinematics failed for {ep.get('episode_id', '?')}: {e}")
+        return None
+
 
 def load_episodes_from_disk():
     global EPISODES_DB
@@ -184,6 +405,9 @@ def load_episodes_from_disk():
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     ep_data = json.load(f)
+                    if "manifest" not in ep_data:
+                        # Never silently bless data produced before integrity checks.
+                        ep_data["manifest"] = legacy_manifest()
                     if 'dev_video_url' not in ep_data and os.path.exists(os.path.join(item_path, "dev_visualization.mp4")):
                         ep_data['dev_video_url'] = f"/recordings/{item}/dev_visualization.mp4"
                     if 'canny_video_url' not in ep_data and os.path.exists(os.path.join(item_path, "canny_visualization.mp4")):
@@ -248,36 +472,52 @@ def load_episodes_from_disk():
                 except Exception as e:
                     print(f"Error auto-processing {item}: {e}")
 
-    r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
+    r_solver = None
     for idx, ep in enumerate(loaded):
         ep['episode_index'] = idx
-        raw_p = ep.get('ee_poses') or ep.get('poses')
-        if raw_p and len(raw_p) > 0:
-            try:
-                poses_arr = np.asarray(raw_p, dtype=np.float64)
-                robot_poses = workspace_calibrator.transform_trajectory(poses_arr, to_robot=True)
-                f_start, f_end = find_feasible_window(robot_poses, r_solver)
-                ep['feasible_window'] = {
-                    "start": int(f_start),
-                    "end": int(f_end),
-                    "total": len(poses_arr),
-                    "is_trimmed": bool(f_start > 0 or f_end < len(poses_arr))
-                }
-            except Exception:
+        if 'feasible_window' not in ep or not ep['feasible_window']:
+            if r_solver is None:
+                r_solver = get_robot_solver(
+                    ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
+                    q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+                    custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
+                    custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+                )
+            raw_p = ep.get('ee_poses') or ep.get('poses')
+            if raw_p and len(raw_p) > 0:
+                try:
+                    poses_arr = np.asarray(raw_p, dtype=np.float64)
+                    robot_poses = workspace_calibrator.transform_trajectory(poses_arr, to_robot=True)
+                    f_start, f_end = find_feasible_window(robot_poses, r_solver)
+                    ep['feasible_window'] = {
+                        "start": int(f_start),
+                        "end": int(f_end),
+                        "total": len(poses_arr),
+                        "is_trimmed": bool(f_start > 0 or f_end < len(poses_arr))
+                    }
+                except Exception:
+                    ep['feasible_window'] = {
+                        "start": 0,
+                        "end": len(raw_p),
+                        "total": len(raw_p),
+                        "is_trimmed": False
+                    }
+            else:
                 ep['feasible_window'] = {
                     "start": 0,
-                    "end": len(raw_p),
-                    "total": len(raw_p),
+                    "end": 0,
+                    "total": 0,
                     "is_trimmed": False
                 }
-        else:
-            ep['feasible_window'] = {
-                "start": 0,
-                "end": 0,
-                "total": 0,
-                "is_trimmed": False
-            }
     EPISODES_DB = loaded
+
+    # Sync kinematics for episodes that don't have pre-computed joint_states / robot_ee_poses
+    needs_sync = [ep for ep in EPISODES_DB if not ep.get('joint_states') or not ep.get('robot_ee_poses')]
+    if needs_sync:
+        print(f"[{time.strftime('%H:%M:%S')}] 🔧 Computing kinematics for {len(needs_sync)} episode(s) missing joint_states...")
+        for ep in needs_sync:
+            sync_episode_kinematics(ep)
+
     print(f"[{time.strftime('%H:%M:%S')}] 📂 Loaded {len(EPISODES_DB)} saved episodes from disk.")
 
 # Load existing recordings on server initialization
@@ -308,6 +548,8 @@ def _sync_execute_processing_job(job):
     task = job.get("task", "demonstration")
     parsed_imu = job.get("parsed_imu", [])
     raw_gripper_list = job.get("parsed_gripper", [])
+    config_snapshot = job["config_snapshot"]
+    job_tracker = _new_tracker(config_snapshot)
 
     print(f"\n[{time.strftime('%H:%M:%S')}] ⚙️ Executing Server-Side Sensory Fusion for {ep_uid} ('{task}')...")
 
@@ -376,7 +618,7 @@ def _sync_execute_processing_job(job):
     canny_video_path = os.path.join(ep_dir, canny_video_filename)
     canny_video_url = f"/recordings/{ep_uid}/{canny_video_filename}"
 
-    anchored_poses, dev_telemetry = visual_tracker.process_video_and_imu(
+    anchored_poses, dev_telemetry = job_tracker.process_video_and_imu(
         video_path,
         parsed_imu,
         fps=fps,
@@ -386,11 +628,19 @@ def _sync_execute_processing_job(job):
     )
 
     num_pts = len(anchored_poses)
-    timestamps = np.linspace(0, num_pts / fps, num_pts)
+    if num_pts <= 0:
+        raise ValueError("Trajectory processing returned no poses")
+    timestamps = frame_timestamps(num_pts, fps)
 
-    # 3. Resolve Gripper States
+    # 3. Resolve Gripper States (Physical ArUco Jaw Markers -> Touch Events -> Open Default)
     gripper_states = []
-    if raw_gripper_list and len(raw_gripper_list) > 0:
+    resolved_from_markers = getattr(job_tracker, 'last_resolved_gripper_values', None)
+    has_marker_gripper = any(g.get('detected', False) for g in getattr(job_tracker, 'last_gripper_states', []))
+
+    if has_marker_gripper and resolved_from_markers and len(resolved_from_markers) == num_pts:
+        gripper_states = [round(float(v), 1) for v in resolved_from_markers]
+        print(f"[{time.strftime('%H:%M:%S')}] 🤏 Resolved Gripper Trajectory from Jaw ArUco Tags 2 & 3 (22mm)!")
+    elif raw_gripper_list and len(raw_gripper_list) > 0:
         try:
             if isinstance(raw_gripper_list[0], dict) and ('t' in raw_gripper_list[0] or 'timestamp' in raw_gripper_list[0]):
                 times = np.array([float(g.get('t', g.get('timestamp', 0.0))) for g in raw_gripper_list])
@@ -406,18 +656,13 @@ def _sync_execute_processing_job(job):
                     vals = vals * 100.0
                 gripper_states = vals.tolist()
             else:
-                for i in range(num_pts):
-                    g = 100.0 if i < (num_pts * 0.7) else 10.0
-                    gripper_states.append(g)
+                gripper_states = [100.0] * num_pts
         except Exception as grip_err:
-            print(f"Warning parsing gripper trajectory: {grip_err}")
-            for i in range(num_pts):
-                g = 100.0 if i < (num_pts * 0.7) else 10.0
-                gripper_states.append(g)
+            print(f"Warning parsing touch gripper trajectory: {grip_err}")
+            gripper_states = [100.0] * num_pts
     else:
-        for i in range(num_pts):
-            g = 100.0 if i < (num_pts * 0.7) else 10.0
-            gripper_states.append(g)
+        # Default rule: If markers not detected, do not fail - default to Open (100.0%)
+        gripper_states = [100.0] * num_pts
 
     anchored_poses = np.array(anchored_poses)
     # Apply 6-DoF Camera-to-Gripper Extrinsic Calibration
@@ -425,7 +670,8 @@ def _sync_execute_processing_job(job):
     actions = np.roll(ee_poses, -1, axis=0)
     actions[-1] = ee_poses[-1]
 
-    ep_idx = len(EPISODES_DB)
+    with EPISODE_LOCK:
+        ep_idx = len(EPISODES_DB)
     episode_data = {
         'episode_index': ep_idx,
         'episode_id': ep_uid,
@@ -441,18 +687,37 @@ def _sync_execute_processing_job(job):
         'anchor': 'aruco_feature_imu_fusion',
         'marker_size_cm': 10.0,
         'poses': anchored_poses.tolist(),
-        'raw_poses': safe_to_list(getattr(visual_tracker, 'last_raw_trajectory', None), anchored_poses),
+        'raw_poses': safe_to_list(getattr(job_tracker, 'last_raw_trajectory', None), anchored_poses),
         'ee_poses': ee_poses.tolist(),
         'gripper_states': gripper_states,
         'actions': actions.tolist(),
-        'timestamps': timestamps.tolist(),
+        'timestamps': timestamps,
         'imu_data': parsed_imu,
         'gripper_offset_applied': camera_gripper_calibrator.get_config(),
         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
     }
+    episode_data['manifest'] = episode_manifest(
+        source_sha256=job['source_sha256'], frame_count=job['source_frame_count'],
+        fps=job['source_fps'], imu_samples=len(parsed_imu),
+        config_snapshot=config_snapshot,
+        status="processed",
+        validation={"state": "passed", "errors": [], "trajectory_frames": num_pts},
+    )
 
-    EPISODES_DB.append(episode_data)
+    with EPISODE_LOCK:
+        EPISODES_DB.append(episode_data)
     save_episode_meta(episode_data)
+    _save_job_manifest(job, "processed")
+    sync_episode_kinematics(episode_data)
+    if not episode_data.get("joint_states") or not episode_data.get("robot_ee_poses"):
+        with EPISODE_LOCK:
+            EPISODES_DB.remove(episode_data)
+        episode_data["manifest"]["status"] = "failed"
+        episode_data["manifest"]["validation"] = {
+            "state": "failed", "errors": ["Authoritative IK synchronization failed"]
+        }
+        save_episode_meta(episode_data)
+        raise ValueError("Authoritative kinematics validation failed")
     print(f"[{time.strftime('%H:%M:%S')}] 🎉 Episode #{ep_idx} successfully calculated via ArUco+Feature+IMU fusion ({num_pts} frames)!\n")
     return episode_data
 
@@ -471,7 +736,8 @@ def _background_processing_worker_thread():
                 "job_id": job["job_id"],
                 "task": job["task"],
                 "client_take_id": job.get("client_take_id"),
-                "started_at": time.time()
+                "started_at": time.time(),
+                "phase": "processing"
             }
             print(f"\n[{time.strftime('%H:%M:%S')}] ⚙️ [Worker] Starting background processing for Job {job['job_id']} ('{job['task']}'). Queue remaining: {PROCESSING_QUEUE.qsize()}")
 
@@ -498,6 +764,10 @@ def _background_processing_worker_thread():
                     "error": str(e),
                     "failed_at": time.strftime("%Y-%m-%d %H:%M:%S")
                 })
+                try:
+                    _save_job_manifest(job, "failed", [str(e)])
+                except Exception:
+                    pass
                 print(f"[{time.strftime('%H:%M:%S')}] ❌ [Worker] Failed processing Job {job['job_id']}: {e}")
             finally:
                 if len(PROCESSING_STATUS["recent_jobs"]) > 20:
@@ -934,6 +1204,264 @@ async def print_dual_marker_page(
 </body>
 </html>"""
 
+@app.get("/api/marker/print_gripper", response_class=HTMLResponse)
+@app.get("/api/marker/gripper_sheet", response_class=HTMLResponse)
+async def print_gripper_markers_page(
+    tag_a_id: int = 2,
+    tag_b_id: int = 3,
+    size_mm: float = 22.0,
+    dict_name: str = "DICT_6X6_250"
+):
+    """
+    Returns an HTML print template for printing the two small gripper jaw ArUco markers
+    (Tag 2 & Tag 3) at EXACT 22.0mm physical scale with cutting guides and calibration ruler.
+    """
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Print Gripper ArUco Markers ({size_mm:.0f}mm - ID {tag_a_id} & {tag_b_id})</title>
+    <style>
+        @page {{
+            size: A4 portrait;
+            margin: 15mm;
+        }}
+        * {{
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }}
+        body {{
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #fff;
+            color: #000;
+        }}
+        .no-print {{
+            background: #f8fafc;
+            border: 1px solid #cbd5e1;
+            padding: 14px 20px;
+            border-radius: 8px;
+            margin-bottom: 24px;
+            text-align: center;
+            max-width: 600px;
+        }}
+        .print-btn {{
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            margin-top: 10px;
+        }}
+        .print-btn:hover {{
+            background: #1d4ed8;
+        }}
+        @media print {{
+            .no-print {{ display: none !important; }}
+            body {{ padding: 0; }}
+        }}
+
+        .sheet-card {{
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 620px;
+            width: 100%;
+            background: #ffffff;
+        }}
+
+        .sheet-title {{
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 4px;
+            color: #0f172a;
+        }}
+        .sheet-desc {{
+            font-size: 12px;
+            color: #64748b;
+            margin-bottom: 20px;
+            line-height: 1.5;
+        }}
+
+        .markers-flex {{
+            display: flex;
+            flex-direction: row;
+            justify-content: center;
+            gap: 25mm;
+            margin: 15mm 0;
+        }}
+
+        /* Individual Gripper Marker Cutout Box */
+        .cutout-box {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            border: 1.5px dashed #94a3b8;
+            padding: 4mm;
+            border-radius: 3mm;
+            position: relative;
+            background: #fafafa;
+        }}
+
+        .cut-label {{
+            font-size: 9px;
+            font-weight: 600;
+            color: #64748b;
+            margin-bottom: 2mm;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+
+        /* EXACT PHYSICAL MILLIMETER DIMENSIONS FOR BLACK ARUCO SQUARE */
+        .gripper-marker-img {{
+            width: {size_mm}mm;
+            height: {size_mm}mm;
+            display: block;
+            image-rendering: pixelated;
+            border: 1px solid #000;
+        }}
+
+        .marker-tag-name {{
+            font-size: 11px;
+            font-weight: 700;
+            color: #0f172a;
+            margin-top: 3mm;
+            text-align: center;
+        }}
+        .marker-tag-sub {{
+            font-size: 9px;
+            color: #64748b;
+            margin-top: 1mm;
+        }}
+
+        /* Verification Ruler matching the marker size */
+        .ruler-box {{
+            margin-top: 15mm;
+            padding-top: 8mm;
+            border-top: 1px solid #e2e8f0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+        .ruler-title {{
+            font-size: 11px;
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 3mm;
+        }}
+        .ruler-bar {{
+            width: {size_mm}mm;
+            height: 8mm;
+            border-top: 2px solid #000;
+            position: relative;
+        }}
+        .r-tick {{
+            position: absolute;
+            top: 0;
+            width: 1px;
+            background: #000;
+        }}
+        .r-lbl {{
+            position: absolute;
+            top: 4mm;
+            font-size: 8px;
+            font-family: monospace;
+            transform: translateX(-50%);
+        }}
+
+        .instructions-box {{
+            margin-top: 10mm;
+            background: #f1f5f9;
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 11px;
+            color: #334155;
+            line-height: 1.6;
+        }}
+        .instructions-box strong {{
+            color: #0f172a;
+        }}
+    </style>
+</head>
+<body>
+    <div class="no-print">
+        <h3 style="margin: 0 0 6px 0; color: #0f172a;">🤖 OmniKin Gripper Jaw ArUco Markers</h3>
+        <p style="margin: 0; font-size: 13px; color: #475569;">
+            Print at <strong>Scale: 100% (Actual Size)</strong> on standard A4 paper.<br>
+            Each black marker square is scaled to exactly <strong>{size_mm:.1f} mm</strong>.
+        </p>
+        <button class="print-btn" onclick="window.print()">PRINT 22MM GRIPPER MARKERS</button>
+        <div style="margin-top: 10px; font-size: 12px;">
+            <a href="/api/marker/print_dual" style="color: #2563eb; text-decoration: underline;">Switch to Dual-ArUco Table Board (10cm + 5cm)</a>
+        </div>
+    </div>
+
+    <div class="sheet-card">
+        <div class="sheet-title">OmniKin Gripper Jaw Markers ({size_mm:.0f} mm)</div>
+        <div class="sheet-desc">
+            ArUco Dictionary: <code>{dict_name}</code> &nbsp;|&nbsp; Target Size: <strong>{size_mm:.1f} mm × {size_mm:.1f} mm</strong>
+        </div>
+
+        <!-- Two Gripper Markers with scissor cut-lines -->
+        <div class="markers-flex">
+            <!-- Jaw A: Tag 2 -->
+            <div class="cutout-box">
+                <span class="cut-label">✂ Cut along dashed line</span>
+                <img class="gripper-marker-img" src="/api/marker/raw?marker_id={tag_a_id}&size=400&dict_name={dict_name}" alt="Jaw A (Tag {tag_a_id})">
+                <div class="marker-tag-name">Tag {tag_a_id} — Jaw A</div>
+                <div class="marker-tag-sub">Left / Fixed Finger ({size_mm:.0f}mm)</div>
+            </div>
+
+            <!-- Jaw B: Tag 3 -->
+            <div class="cutout-box">
+                <span class="cut-label">✂ Cut along dashed line</span>
+                <img class="gripper-marker-img" src="/api/marker/raw?marker_id={tag_b_id}&size=400&dict_name={dict_name}" alt="Jaw B (Tag {tag_b_id})">
+                <div class="marker-tag-name">Tag {tag_b_id} — Jaw B</div>
+                <div class="marker-tag-sub">Right / Moving Finger ({size_mm:.0f}mm)</div>
+            </div>
+        </div>
+
+        <!-- Calibration Verification Ruler -->
+        <div class="ruler-box">
+            <div class="ruler-title">Physical Ruler Calibration Check ({size_mm:.0f}mm)</div>
+            <div class="ruler-bar">
+                <div class="r-tick" style="left: 0; height: 5mm;"></div>
+                <div class="r-lbl" style="left: 0;">0</div>
+
+                <div class="r-tick" style="left: 22.7%; height: 3mm;"></div>
+                <div class="r-lbl" style="left: 22.7%;">5mm</div>
+
+                <div class="r-tick" style="left: 45.5%; height: 4mm;"></div>
+                <div class="r-lbl" style="left: 45.5%;">10mm</div>
+
+                <div class="r-tick" style="left: 68.2%; height: 3mm;"></div>
+                <div class="r-lbl" style="left: 68.2%;">15mm</div>
+
+                <div class="r-tick" style="right: 0; height: 5mm;"></div>
+                <div class="r-lbl" style="right: 0;">{size_mm:.0f}mm</div>
+            </div>
+        </div>
+
+        <!-- Mounting Instructions -->
+        <div class="instructions-box">
+            <strong>Mounting & Tracking Instructions:</strong>
+            <ol style="margin: 6px 0 0 0; padding-left: 18px;">
+                <li>Verify with a physical caliper or ruler that the black square is <strong>{size_mm:.0f} mm</strong> wide.</li>
+                <li>Cut out each marker along the dashed gray lines leaving a small white border.</li>
+                <li>Tape <strong>Tag {tag_a_id}</strong> to Jaw A and <strong>Tag {tag_b_id}</strong> to Jaw B facing forward towards the smartphone camera.</li>
+                <li><strong>Zero-Failure Guarantee:</strong> If the markers are occluded, out of frame, or not attached, the episode will never fail and the gripper state will safely default to <strong>Open (100%)</strong>.</li>
+            </ol>
+        </div>
+    </div>
+</body>
+</html>"""
+
 @app.get("/api/episodes")
 async def get_episodes():
     load_episodes_from_disk()
@@ -942,6 +1470,10 @@ async def get_episodes():
 @app.delete("/api/episodes/{episode_index}")
 async def delete_episode(episode_index: int):
     global EPISODES_DB
+    try:
+        _ensure_idle("delete episodes")
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
     found = False
     new_db = []
     for ep in EPISODES_DB:
@@ -973,6 +1505,10 @@ async def delete_episode(episode_index: int):
 @app.post("/api/episodes/clear")
 async def clear_all_episodes():
     global EPISODES_DB
+    try:
+        _ensure_idle("clear episodes")
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
     if os.path.exists(RECORDINGS_DIR):
         for item in os.listdir(RECORDINGS_DIR):
             p = os.path.join(RECORDINGS_DIR, item)
@@ -1007,8 +1543,8 @@ async def save_recording(
 ):
     """
     Receives raw sensor recording (video stream + high-frequency IMU telemetry) from mobile phone,
-    saves the raw files to disk, and executes the 3D Visual-Inertial EKF Reconstruction
-    synchronously in the background thread pool.
+    saves the raw files to disk and enqueues 3D Visual-Inertial reconstruction on the
+    single background processing worker, matching the high-throughput upload endpoint.
     """
     try:
         ep_uid = f"rec_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
@@ -1026,12 +1562,13 @@ async def save_recording(
 
         print(f"\n[{time.strftime('%H:%M:%S')}] 📥 Server received synchronous upload request ({video.filename}, {video.content_type})")
 
-        content = await video.read()
-        with open(video_path, "wb") as f:
-            f.write(content)
+        byte_count, source_sha256 = await _stream_upload_to_file(video, video_path)
+        source_frame_count, source_fps = _validate_video(video_path)
 
-        print(f"[{time.strftime('%H:%M:%S')}] 💾 Raw video payload saved to disk: {video_path} ({len(content)} bytes)")
+        print(f"[{time.strftime('%H:%M:%S')}] 💾 Raw video payload saved to disk: {video_path} ({byte_count} bytes)")
 
+        if len(imu_data.encode("utf-8")) > MAX_JSON_BYTES or len(gripper_data.encode("utf-8")) > MAX_JSON_BYTES:
+            raise ValueError("Telemetry payload exceeds the 2 MiB limit")
         try:
             parsed_imu = json.loads(imu_data)
         except Exception as imu_err:
@@ -1052,18 +1589,22 @@ async def save_recording(
             "video_url": video_url,
             "parsed_imu": parsed_imu,
             "parsed_gripper": parsed_gripper,
-            "enqueued_at": time.time()
+            "enqueued_at": time.time(),
+            "source_sha256": source_sha256,
+            "source_frame_count": source_frame_count,
+            "source_fps": source_fps,
+            "config_snapshot": _config_snapshot(),
         }
+        _save_job_manifest(job, "queued")
 
-        loop = asyncio.get_event_loop()
-        episode_data = await loop.run_in_executor(None, _sync_execute_processing_job, job)
-
+        PROCESSING_QUEUE.put(job)
+        queue_pos = PROCESSING_QUEUE.qsize()
         return JSONResponse({
-            "status": "success",
-            "episode_index": episode_data["episode_index"],
+            "status": "queued",
+            "job_id": ep_uid,
             "task": task,
-            "num_frames": episode_data["num_frames"],
-            "anchor": "ArUco + Feature Map + IMU Fusion (0,0,0) Origin"
+            "queue_position": queue_pos,
+            "message": "Recording uploaded and queued for background processing"
         })
 
     except Exception as err:
@@ -1103,10 +1644,11 @@ async def upload_recording_async(
         video_path = os.path.join(ep_dir, video_filename)
         video_url = f"/recordings/{ep_uid}/{video_filename}"
 
-        content = await video.read()
-        with open(video_path, "wb") as f:
-            f.write(content)
+        byte_count, source_sha256 = await _stream_upload_to_file(video, video_path)
+        source_frame_count, source_fps = _validate_video(video_path)
 
+        if len(imu_data.encode("utf-8")) > MAX_JSON_BYTES or len(gripper_data.encode("utf-8")) > MAX_JSON_BYTES:
+            raise ValueError("Telemetry payload exceeds the 2 MiB limit")
         try:
             parsed_imu = json.loads(imu_data)
         except Exception:
@@ -1125,7 +1667,11 @@ async def upload_recording_async(
             "video_url": video_url,
             "client_take_id": client_take_id,
             "uploaded_at": time.time(),
-            "bytes": len(content)
+            "bytes": byte_count,
+            "source_sha256": source_sha256,
+            "source_frame_count": source_frame_count,
+            "source_fps": source_fps,
+            "config_snapshot": _config_snapshot(),
         }
         with open(os.path.join(ep_dir, "upload_manifest.json"), "w", encoding="utf-8") as f:
             json.dump(upload_manifest, f, indent=2)
@@ -1140,13 +1686,18 @@ async def upload_recording_async(
             "parsed_imu": parsed_imu,
             "parsed_gripper": parsed_gripper,
             "client_take_id": client_take_id,
-            "enqueued_at": time.time()
+            "enqueued_at": time.time(),
+            "source_sha256": source_sha256,
+            "source_frame_count": source_frame_count,
+            "source_fps": source_fps,
+            "config_snapshot": _config_snapshot(),
         }
+        _save_job_manifest(job, "queued")
 
         PROCESSING_QUEUE.put(job)
         queue_pos = PROCESSING_QUEUE.qsize()
 
-        print(f"[{time.strftime('%H:%M:%S')}] 📥 Fast Ingestion: Take '{client_take_id or ep_uid}' ('{task}') enqueued at #{queue_pos} ({len(content)} bytes)")
+        print(f"[{time.strftime('%H:%M:%S')}] 📥 Fast Ingestion: Take '{client_take_id or ep_uid}' ('{task}') enqueued at #{queue_pos} ({byte_count} bytes)")
 
         return JSONResponse({
             "status": "queued",
@@ -1170,6 +1721,11 @@ async def get_processing_status():
     Returns the real-time background processing queue status,
     active job details, and recent job completion history.
     """
+    queued_jobs = [
+        {"job_id": item.get("job_id"), "task": item.get("task"),
+         "client_take_id": item.get("client_take_id"), "enqueued_at": item.get("enqueued_at")}
+        for item in list(PROCESSING_QUEUE.queue)
+    ]
     return JSONResponse({
         "status": "success",
         "is_processing": PROCESSING_STATUS["is_processing"],
@@ -1177,7 +1733,8 @@ async def get_processing_status():
         "completed_count": PROCESSING_STATUS["completed_count"],
         "failed_count": PROCESSING_STATUS["failed_count"],
         "current_job": PROCESSING_STATUS["current_job"],
-        "recent_jobs": PROCESSING_STATUS["recent_jobs"][-5:]
+        "queued_jobs": queued_jobs,
+        "recent_jobs": PROCESSING_STATUS["recent_jobs"][-10:]
     })
 
 @app.post("/api/recordings/sample")
@@ -1356,6 +1913,7 @@ async def generate_sample_recording(task: str = "draw 3d circle", shape: str = "
 
     EPISODES_DB.append(episode_data)
     save_episode_meta(episode_data)
+    sync_episode_kinematics(episode_data)
 
     return JSONResponse({
         "status": "success",
@@ -1385,6 +1943,10 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
     Re-filters an existing recorded episode with the current EKF parameters and adaptive calibration.
     """
     global EPISODES_DB
+    try:
+        _ensure_idle("reprocess episodes")
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
     target_ep = None
     for ep in EPISODES_DB:
         if ep['episode_index'] == episode_index:
@@ -1441,14 +2003,21 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
     target_ep['dev_telemetry'] = dev_telemetry
     target_ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
     target_ep['active_smoothing'] = {'method': smooth_method, 'time_window_ms': smooth_window_ms}
+
+    # Re-sync full kinematics (joint_states, robot_ee_poses, fk_table_poses, actions) on filtered poses
+    sync_episode_kinematics(target_ep)
     save_episode_meta(target_ep)
 
     return JSONResponse({
         "status": "success",
         "episode_index": episode_index,
         "num_frames": len(new_poses),
-        "poses": new_poses.tolist(),
-        "ee_poses": ee_poses.tolist(),
+        "poses": target_ep['poses'],
+        "ee_poses": target_ep['ee_poses'],
+        "joint_states": target_ep.get('joint_states', []),
+        "robot_ee_poses": target_ep.get('robot_ee_poses', []),
+        "fk_table_poses": target_ep.get('fk_table_poses', []),
+        "fk_camera_poses": target_ep.get('fk_camera_poses', []),
         "dev_video_url": dev_video_url,
         "canny_video_url": canny_video_url
     })
@@ -1486,17 +2055,21 @@ async def smooth_episode_trajectory(episode_index: int, payload: dict = Body(...
     ee_poses = camera_gripper_calibrator.transform_trajectory(smoothed_poses, to_gripper=True)
     target_ep['poses'] = smoothed_poses.tolist()
     target_ep['ee_poses'] = ee_poses.tolist()
-    actions = np.roll(ee_poses, -1, axis=0)
-    actions[-1] = ee_poses[-1]
-    target_ep['actions'] = actions.tolist()
     target_ep['active_smoothing'] = {'method': method, 'time_window_ms': time_window_ms}
+
+    # Re-sync full kinematics (joint_states, robot_ee_poses, fk_table_poses, actions) on smoothed poses
+    sync_episode_kinematics(target_ep)
     save_episode_meta(target_ep)
 
     return JSONResponse({
         "status": "success",
         "episode_index": episode_index,
-        "poses": smoothed_poses.tolist(),
-        "ee_poses": ee_poses.tolist(),
+        "poses": target_ep['poses'],
+        "ee_poses": target_ep['ee_poses'],
+        "joint_states": target_ep.get('joint_states', []),
+        "robot_ee_poses": target_ep.get('robot_ee_poses', []),
+        "fk_table_poses": target_ep.get('fk_table_poses', []),
+        "fk_camera_poses": target_ep.get('fk_camera_poses', []),
         "method": method,
         "time_window_ms": time_window_ms
     })
@@ -1595,12 +2168,24 @@ async def update_robot_config(request: Request):
     """
     global ROBOT_CONFIG
     try:
+        _ensure_idle("change robot configuration")
         payload = await request.json()
+        for field, minimum, maximum in (
+            ("offset_x", -5.0, 5.0), ("offset_y", -5.0, 5.0),
+            ("offset_z", -2.0, 2.0), ("yaw_deg", -360.0, 360.0),
+            ("q3_safe_max_deg", -180.0, 180.0),
+        ):
+            if field in payload:
+                payload[field] = ensure_finite_number(payload[field], field, minimum, maximum)
         if "robot_type" in payload:
             from robot_kinematics import normalize_robot_type
             r_type = normalize_robot_type(payload["robot_type"])
             if r_type in ROBOT_PRESETS:
                 ROBOT_CONFIG["robot_type"] = r_type
+                ROBOT_CONFIG["custom_urdf_enabled"] = False
+                ROBOT_CONFIG.pop("custom_dh_table", None)
+                ROBOT_CONFIG.pop("custom_specs", None)
+                ROBOT_CONFIG.pop("custom_urdf", None)
         if "offset_x" in payload:
             ROBOT_CONFIG["offset_x"] = float(payload["offset_x"])
         if "offset_y" in payload:
@@ -1616,14 +2201,28 @@ async def update_robot_config(request: Request):
                 ROBOT_CONFIG["gripper_offset"] = {}
             ROBOT_CONFIG["gripper_offset"].update(payload["gripper_offset"])
             camera_gripper_calibrator.update_config(**payload["gripper_offset"])
+        if "gripper_marker_tracking" in payload and isinstance(payload["gripper_marker_tracking"], dict):
+            if "gripper_marker_tracking" not in ROBOT_CONFIG:
+                ROBOT_CONFIG["gripper_marker_tracking"] = {}
+            ROBOT_CONFIG["gripper_marker_tracking"].update(payload["gripper_marker_tracking"])
+            visual_tracker.configure_gripper_markers(ROBOT_CONFIG["gripper_marker_tracking"])
 
+        r_solver_up = get_robot_solver(
+            ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+        )
+        reach_rad = getattr(r_solver_up, "reach_angle_rad", 0.0)
+        ROBOT_CONFIG["reach_angle_deg"] = getattr(r_solver_up, "reach_angle_deg", 0.0)
         save_robot_config(ROBOT_CONFIG)
 
         workspace_calibrator.update_config(
             offset_x=ROBOT_CONFIG["offset_x"],
             offset_y=ROBOT_CONFIG["offset_y"],
             offset_z=ROBOT_CONFIG["offset_z"],
-            yaw_deg=ROBOT_CONFIG["yaw_deg"]
+            yaw_deg=ROBOT_CONFIG["yaw_deg"],
+            reach_angle_rad=reach_rad
         )
 
         lerobot_exporter.set_robot_config(
@@ -1632,7 +2231,8 @@ async def update_robot_config(request: Request):
             offset_y=ROBOT_CONFIG["offset_y"],
             offset_z=ROBOT_CONFIG["offset_z"],
             yaw_deg=ROBOT_CONFIG["yaw_deg"],
-            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table")
         )
 
         print(f"[{time.strftime('%H:%M:%S')}] 🤖 Robot Config Updated: Model={ROBOT_CONFIG['robot_type']}, Offset=({ROBOT_CONFIG['offset_x']:.2f}m, {ROBOT_CONFIG['offset_y']:.2f}m, Yaw={ROBOT_CONFIG['yaw_deg']:.1f}°), q3_safe_max={ROBOT_CONFIG.get('q3_safe_max_deg', 0.0)}°")
@@ -1652,10 +2252,12 @@ async def update_robot_config(request: Request):
 async def update_gripper_offset_endpoint(request: Request):
     """
     Updates 6-DoF Camera-to-Gripper Extrinsic Offset (Forward, Height, Lateral, Pitch, Roll, Yaw).
-    Optionally recalculates ee_poses and actions for all recorded episodes.
+    Recalculates stored episode poses only when explicitly requested with
+    apply_to_episodes=true; normal preview calibration remains transient.
     """
     global ROBOT_CONFIG, EPISODES_DB
     try:
+        _ensure_idle("change gripper calibration")
         payload = await request.json()
         fwd = float(payload.get("forward_cm", 12.8))
         hgt = float(payload.get("height_cm", 10.9))
@@ -1682,7 +2284,7 @@ async def update_gripper_offset_endpoint(request: Request):
         ROBOT_CONFIG["gripper_offset"].update(camera_gripper_calibrator.get_config())
         save_robot_config(ROBOT_CONFIG)
 
-        apply_to_episodes = payload.get("apply_to_episodes", True)
+        apply_to_episodes = bool(payload.get("apply_to_episodes", False))
         updated_count = 0
         if apply_to_episodes:
             for ep in EPISODES_DB:
@@ -1791,9 +2393,12 @@ async def recalculate_trajectory_endpoint(request: Request):
 
         # 3. Solver for IK evaluation
         r_solver = get_robot_solver(
-            ROBOT_CONFIG.get("robot_type", "so101"),
-            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
+            ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
         )
+        workspace_calibrator.reach_angle_rad = getattr(r_solver, "reach_angle_rad", 0.0)
 
         updated_count = 0
         for ep in target_episodes:
@@ -1802,19 +2407,12 @@ async def recalculate_trajectory_endpoint(request: Request):
             if not base_poses or len(base_poses) == 0:
                 continue
 
-            # Transform camera trajectory to Gripper TCP frame
-            ee_poses = camera_gripper_calibrator.transform_trajectory(base_poses, to_gripper=True)
-            ep['ee_poses'] = ee_poses.tolist()
-
-            # Next-step action waypoints
-            actions = np.roll(ee_poses, -1, axis=0)
-            actions[-1] = ee_poses[-1]
-            ep['actions'] = actions.tolist()
-            ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
+            # Full kinematics sync: ee_poses, joint_states, robot_ee_poses, actions (FK-synchronized)
+            sync_episode_kinematics(ep)
 
             # Compute IK feasibility metrics in robot base frame
-            poses_arr = np.asarray(ee_poses, dtype=np.float64)
-            robot_poses = workspace_calibrator.transform_trajectory(poses_arr, to_robot=True)
+            ee_poses_arr = np.asarray(ep.get('ee_poses', base_poses), dtype=np.float64)
+            robot_poses = workspace_calibrator.transform_trajectory(ee_poses_arr, to_robot=True)
             feasible_count = 0
             errors = []
             for p in robot_poses:
@@ -1859,36 +2457,53 @@ async def auto_align_robot_endpoint(request: Request):
     """
     global ROBOT_CONFIG
     try:
+        _ensure_idle("auto-align the robot base")
         payload = await request.json()
         mode = str(payload.get("mode", "start")).lower()
         ep_id = payload.get("episode_id")
 
         target_ep = None
         if ep_id:
-            target_ep = next((ep for ep in EPISODES_DB if ep.get("episode_id") == ep_id), None)
+            target_ep = next((ep for ep in EPISODES_DB if str(ep.get("episode_id")) == str(ep_id)
+                              or str(ep.get("episode_index")) == str(ep_id)), None)
         if not target_ep and EPISODES_DB:
             target_ep = EPISODES_DB[-1]
 
-        if not target_ep:
-            return JSONResponse({"status": "error", "message": "No episodes available to align to."}, status_code=400)
-
-        # Prioritize Gripper TCP trajectory (ee_poses) so robot base aligns to where the gripper must reach
-        poses = target_ep.get("ee_poses") or target_ep.get("poses")
-        if not poses or len(poses) == 0:
-            return JSONResponse({"status": "error", "message": "Selected episode has no poses."}, status_code=400)
-
-        poses_arr = np.asarray(poses, dtype=np.float64)
-        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so101"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
-
+        # The recommended layout is deterministic and does not require an episode.
         if mode == "recommended":
             new_calib = workspace_calibrator.get_recommended_layout()
-        elif mode == "optimal":
-            new_calib = workspace_calibrator.auto_align_to_trajectory(poses_arr, nominal_reach=0.24, default_yaw=90.0)
-        else: # 'start'
-            new_calib = workspace_calibrator.auto_align_base_to_start(poses_arr[0], nominal_reach=0.22, default_yaw=90.0)
+        elif not target_ep:
+            return JSONResponse({"status": "error", "message": "No episodes available to align to."}, status_code=400)
+        else:
+            # Prioritize Gripper TCP trajectory (ee_poses) so robot base aligns to where the robot must reach.
+            poses = target_ep.get("ee_poses") or target_ep.get("poses")
+            if not poses or len(poses) == 0:
+                return JSONResponse({"status": "error", "message": "Selected episode has no poses."}, status_code=400)
+            poses_arr = np.asarray(poses, dtype=np.float64)
+            if poses_arr.ndim != 2 or poses_arr.shape[1] < 3 or not np.isfinite(poses_arr[:, :3]).all():
+                return JSONResponse({"status": "error", "message": "Selected episode contains invalid pose data."}, status_code=400)
+        r_solver = get_robot_solver(
+            ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+        )
+        reach_rad = getattr(r_solver, "reach_angle_rad", 0.0)
+        ROBOT_CONFIG["reach_angle_deg"] = getattr(r_solver, "reach_angle_deg", 0.0)
 
-        ROBOT_CONFIG.update(new_calib)
-        workspace_calibrator.update_config(**new_calib)
+        if mode == "optimal":
+            new_calib = workspace_calibrator.auto_align_to_trajectory(poses_arr, nominal_reach=0.24, default_yaw=90.0)
+        elif mode == "start":
+            new_calib = workspace_calibrator.auto_align_base_to_start(poses_arr[0], nominal_reach=0.22, default_yaw=90.0)
+        elif mode != "recommended":
+            return JSONResponse({"status": "error", "message": f"Unsupported auto-align mode: {mode}"}, status_code=400)
+
+        # get_config() includes the previous reach angle. Replace it with the
+        # active solver's value before passing the calibration exactly once.
+        calibrated_config = dict(new_calib)
+        calibrated_config["reach_angle_rad"] = reach_rad
+        ROBOT_CONFIG.update(calibrated_config)
+        workspace_calibrator.update_config(**calibrated_config)
         save_robot_config(ROBOT_CONFIG)
 
         lerobot_exporter.set_robot_config(
@@ -1900,27 +2515,17 @@ async def auto_align_robot_endpoint(request: Request):
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
         )
 
-        # Compute feasibility metrics across episode with this new base alignment
-        robot_poses = workspace_calibrator.transform_trajectory(poses_arr, to_robot=True)
-        feasible_count = 0
-        errors = []
-        for p in robot_poses:
-            res = r_solver.solve_feasible_ik(p)
-            if res["is_feasible"]:
-                feasible_count += 1
-            errors.append(res["error_distance_cm"])
-
-        feasibility_pct = round(feasible_count / len(robot_poses) * 100.0, 1)
-        avg_err_cm = round(float(np.mean(errors)), 2)
-
-        print(f"[{time.strftime('%H:%M:%S')}] 🎯 Auto-Aligned Robot Base ({mode}): Offset=({ROBOT_CONFIG['offset_x']:.3f}m, {ROBOT_CONFIG['offset_y']:.3f}m, Yaw={ROBOT_CONFIG['yaw_deg']}°) -> {feasibility_pct}% feasible, avg error={avg_err_cm}cm")
-
+        # Calibration-only API: return as soon as the base transform is stored.
+        # IK, smoothing, camera processing, and episode persistence are explicit
+        # operations and must never run as a side effect of this button.
+        print(f"[{time.strftime('%H:%M:%S')}] 🎯 Auto-Aligned Robot Base ({mode}): Offset=({ROBOT_CONFIG['offset_x']:.3f}m, {ROBOT_CONFIG['offset_y']:.3f}m, Yaw={ROBOT_CONFIG['yaw_deg']}°) [calibration-only]")
         return JSONResponse({
             "status": "success",
-            "message": f"Robot auto-aligned ({mode}) successfully",
+            "message": f"Robot base calibration applied ({mode})",
             "config": ROBOT_CONFIG,
-            "feasibility_percent": feasibility_pct,
-            "avg_error_cm": avg_err_cm
+            "calibration_only": True,
+            "feasibility_percent": None,
+            "avg_error_cm": None,
         })
     except Exception as err:
         return JSONResponse({
@@ -2105,8 +2710,7 @@ async def parse_urdf_endpoint(request: Request):
     try:
         payload = await request.json()
         urdf_text = payload.get("urdf_text", "")
-        if not urdf_text or not urdf_text.strip():
-            return JSONResponse({"status": "error", "message": "No URDF XML provided"}, status_code=400)
+        reject_unsafe_xml(urdf_text)
 
         q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
         dh_table, specs = URDFParser.parse_urdf(urdf_text, q3_safe_max_deg=q3_safe)
@@ -2128,23 +2732,32 @@ async def apply_urdf_endpoint(request: Request):
     """
     global ROBOT_CONFIG
     try:
+        _ensure_idle("apply a URDF")
         payload = await request.json()
         urdf_text = payload.get("urdf_text", "")
+        reject_unsafe_xml(urdf_text)
         q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
         dh_table, specs = URDFParser.parse_urdf(urdf_text, q3_safe_max_deg=q3_safe)
         robot_name = specs.get("robot_name", "custom_robot").lower()
 
         ROBOT_CONFIG["custom_dh_table"] = dh_table
         ROBOT_CONFIG["custom_specs"] = specs
+        ROBOT_CONFIG["custom_urdf"] = urdf_text
+        ROBOT_CONFIG["custom_urdf_enabled"] = True
+        r_solver_urdf = get_robot_solver(custom_urdf=urdf_text, q3_safe_max_deg=q3_safe)
+        reach_rad = getattr(r_solver_urdf, "reach_angle_rad", 0.0)
+        ROBOT_CONFIG["reach_angle_deg"] = getattr(r_solver_urdf, "reach_angle_deg", 0.0)
+        workspace_calibrator.reach_angle_rad = reach_rad
         save_robot_config(ROBOT_CONFIG)
 
-        print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Applied custom URDF kinematics: {robot_name} ({specs['reach_meters']}m reach)")
+        print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Applied custom URDF kinematics: {robot_name} ({specs['reach_meters']}m reach, reach_angle={ROBOT_CONFIG['reach_angle_deg']}°)")
 
         return JSONResponse({
             "status": "success",
             "message": f"Custom URDF '{robot_name}' applied successfully",
             "dh_table": dh_table,
-            "specs": specs
+            "specs": specs,
+            "config": ROBOT_CONFIG
         })
     except Exception as err:
         return JSONResponse({
@@ -2159,6 +2772,10 @@ async def export_lerobot(request: Request = None):
         return JSONResponse({"status": "error", "message": "No episodes recorded yet. Please record or sample an episode first."}, status_code=400)
 
     try:
+        unverified = [ep.get("episode_id", ep.get("episode_index")) for ep in EPISODES_DB
+                      if ep.get("manifest", {}).get("validation", {}).get("state") != "passed"]
+        if unverified:
+            return JSONResponse({"status": "error", "message": "Reprocess legacy or failed episodes before export", "episodes": unverified}, status_code=409)
         payload = {}
         if request:
             try:
@@ -2175,26 +2792,38 @@ async def export_lerobot(request: Request = None):
             offset_x=ROBOT_CONFIG["offset_x"],
             offset_y=ROBOT_CONFIG["offset_y"],
             offset_z=ROBOT_CONFIG["offset_z"],
-            yaw_deg=ROBOT_CONFIG["yaw_deg"]
+            yaw_deg=ROBOT_CONFIG["yaw_deg"],
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
         )
+        use_ts = bool(payload.get("use_timestamp", True))
+        ds_name = dataset_slug(payload.get("dataset_name", "mobile_aruco_3d_trajectories"))
         export_path = lerobot_exporter.export_dataset(
             EPISODES_DB,
-            dataset_name="mobile_aruco_3d_trajectories",
+            dataset_name=ds_name,
             trajectory_mode=traj_mode,
             initial_position=init_pos,
-            auto_trim=auto_trim
+            auto_trim=auto_trim,
+            use_timestamp=use_ts
         )
-        total_frames = sum(ep.get('num_frames', len(ep.get('poses', []))) for ep in EPISODES_DB)
+        export_folder = os.path.basename(export_path)
+        with open(os.path.join(export_path, "validation_report.json"), "r", encoding="utf-8") as report_file:
+            validation_report = json.load(report_file)
+        total_frames = validation_report["frames"]
         return JSONResponse({
             "status": "success",
             "export_path": export_path,
+            "export_folder": export_folder,
             "robot_type": ROBOT_CONFIG["robot_type"],
             "trajectory_mode": traj_mode,
             "auto_trim": auto_trim,
             "workspace_calibration": ROBOT_CONFIG,
             "total_episodes": len(EPISODES_DB),
             "total_frames": total_frames,
-            "message": f"LeRobot dataset ({ROBOT_CONFIG['robot_type'].upper()}, mode={traj_mode}, auto_trim={auto_trim}) exported successfully with {len(EPISODES_DB)} episodes!"
+            "validation_report": os.path.join(export_path, "validation_report.json"),
+            "validation": validation_report,
+            "message": f"LeRobot dataset version '{export_folder}' exported successfully with {len(EPISODES_DB)} episodes!"
         })
     except Exception as err:
         import traceback
@@ -2238,8 +2867,19 @@ async def get_server_info(request: Request):
         "http_port": 8000,
         "https_port": 8443 if has_ssl else 8000,
         "has_ssl": has_ssl,
-        "mobile_url": f"https://{local_ip}:8443/mobile" if has_ssl else f"http://{local_ip}:8000/mobile"
+        "mobile_url": (f"https://{local_ip}:8443/mobile?pair={PAIRING_TOKEN}" if has_ssl
+                       else f"http://{local_ip}:8000/mobile?pair={PAIRING_TOKEN}"),
+        # The dashboard is an operator surface on a trusted LAN. The value is
+        # deliberately supplied only for QR/session bootstrap, never persisted.
+        "pairing_code": PAIRING_TOKEN,
     })
+
+
+@app.get("/api/pairing/session")
+async def create_pairing_session(code: str = ""):
+    if not code or not secrets.compare_digest(code, PAIRING_TOKEN):
+        return JSONResponse({"status": "error", "message": "Invalid pairing code"}, status_code=401)
+    return JSONResponse({"status": "success", "operator_token": PAIRING_TOKEN})
 
 @app.get("/api/mobile/qr")
 async def get_mobile_qr(request: Request, host: str = None):
@@ -2254,7 +2894,8 @@ async def get_mobile_qr(request: Request, host: str = None):
         ssl_cert = os.path.join(BASE_DIR, "cert.pem")
         ssl_key = os.path.join(BASE_DIR, "key.pem")
         has_ssl = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
-        mobile_url = f"https://{local_ip}:8443/mobile" if has_ssl else f"http://{local_ip}:8000/mobile"
+        mobile_url = (f"https://{local_ip}:8443/mobile?pair={PAIRING_TOKEN}" if has_ssl
+                      else f"http://{local_ip}:8000/mobile?pair={PAIRING_TOKEN}")
 
         factory = qrcode.image.svg.SvgImage
         img = qrcode.make(mobile_url, image_factory=factory)
@@ -2337,7 +2978,8 @@ if __name__ == "__main__":
     if use_ssl and has_certs:
         print(f" 📱 Mobile Logger  (HTTPS): https://{local_ip}:{https_port}/mobile")
         print(f" 📱 Mobile Logger  (HTTP):  http://{local_ip}:{http_port}/mobile (auto-redirect)")
-        print(f" Print ArUco Marker:        http://localhost:{http_port}/api/marker/image")
+        print(f" Print Dual-ArUco Board:    http://localhost:{http_port}/api/marker/print_dual")
+        print(f" Print Gripper Markers:     http://localhost:{http_port}/api/marker/print_gripper")
         print(f" Mobile QR Code:            http://localhost:{http_port}/api/mobile/qr")
         print("\n [!] HTTPS Active on Port 8443 (Self-Signed SSL for Camera/IMU):")
         print("     When opening on your mobile browser, tap:")
@@ -2345,7 +2987,8 @@ if __name__ == "__main__":
         print("     - iOS Safari:     'Show Details' -> 'visit this website' -> 'Visit Website'")
     else:
         print(f" 📱 Phone Mobile URL:        http://{local_ip}:{http_port}/mobile")
-        print(f" Print ArUco Marker:        http://localhost:{http_port}/api/marker/image")
+        print(f" Print Dual-ArUco Board:    http://localhost:{http_port}/api/marker/print_dual")
+        print(f" Print Gripper Markers:     http://localhost:{http_port}/api/marker/print_gripper")
     print("="*65 + "\n")
 
     if use_ssl and has_certs:
@@ -2370,5 +3013,3 @@ if __name__ == "__main__":
         uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info", log_config=clean_log_config)
     else:
         uvicorn.run(app, host="0.0.0.0", port=http_port, log_level="info", log_config=clean_log_config)
-
-

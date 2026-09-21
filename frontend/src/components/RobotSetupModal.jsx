@@ -65,15 +65,13 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
       .then((data) => {
         if (data.config) {
           setConfig(data.config);
-          if (data.config.custom_dh_table) setCustomDhTable(data.config.custom_dh_table);
-          if (data.config.custom_specs) setCustomSpecs(data.config.custom_specs);
+          if (data.config.custom_urdf_enabled && data.config.custom_dh_table) setCustomDhTable(data.config.custom_dh_table);
+          if (data.config.custom_urdf_enabled && data.config.custom_specs) setCustomSpecs(data.config.custom_specs);
         }
         if (data.presets) {
           setPresets(data.presets);
           const activeP = data.presets.find((p) => p.robot_type === data.config?.robot_type) || data.presets[0];
-          if (activeP && activeP.urdf) {
-            setUrdfText(activeP.urdf);
-          }
+          if (!data.config?.custom_urdf_enabled) setUrdfText('');
           if (activeP && activeP.components && !data.config?.custom_specs) {
             setCustomSpecs(activeP);
           }
@@ -102,10 +100,8 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
     handleFieldChange('robot_type', rType);
     setCustomDhTable(null);
     setCustomSpecs(null);
-    const selectedP = presets.find((p) => p.robot_type === rType);
-    if (selectedP && selectedP.urdf) {
-      setUrdfText(selectedP.urdf);
-    }
+    // Preset selection never implicitly activates or replaces a custom URDF.
+    setUrdfText('');
   };
 
   const handleSave = async () => {
@@ -259,7 +255,7 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
     }));
   };
 
-  const handleSaveGripperOffset = async (applyToEpisodes = true) => {
+  const handleSaveGripperOffset = async (applyToEpisodes = false) => {
     setIsSaving(true);
     setGripperApplySuccess(false);
     try {
@@ -333,6 +329,10 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
       if (data.status === 'success') {
         setCustomDhTable(data.dh_table);
         setCustomSpecs(data.specs);
+        if (data.config) {
+          setConfig(data.config);
+          if (onConfigSaved) onConfigSaved(data.config);
+        }
         setUrdfStatus({
           type: 'success',
           message: 'Custom URDF kinematics applied active.'
@@ -822,15 +822,27 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                   </button>
                 </div>
 
-                <button
-                  type="button"
-                  disabled={isSaving}
-                  onClick={() => handleSaveGripperOffset(true)}
-                  className="px-3 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 text-[11px] font-medium border border-neutral-800 transition-colors flex items-center gap-1.5"
-                >
-                  <Sparkles className="w-3 h-3 text-neutral-400" />
-                  <span>{gripperApplySuccess ? '✓ Applied!' : 'Apply to Recorded Takes'}</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isSaving}
+                    onClick={() => handleSaveGripperOffset(false)}
+                    className="px-3 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 text-[11px] font-medium border border-neutral-800 transition-colors flex items-center gap-1.5"
+                    title="Updates the live 3D preview without modifying stored recordings"
+                  >
+                    <Sparkles className="w-3 h-3 text-neutral-400" />
+                    <span>{gripperApplySuccess ? '✓ Preview Updated!' : 'Update Live Preview'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSaving}
+                    onClick={() => handleSaveGripperOffset(true)}
+                    className="px-3 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 text-[11px] font-medium border border-neutral-800 transition-colors flex items-center gap-1.5"
+                    title="Explicitly recomputes stored gripper poses for recorded takes"
+                  >
+                    <span>Apply to Recorded Takes</span>
+                  </button>
+                </div>
               </div>
 
               {/* Collapsible CAD Schematic */}

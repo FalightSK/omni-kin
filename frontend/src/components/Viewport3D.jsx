@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d, Crosshair, Sparkles, CheckCircle2, AlertTriangle, Layers, Bot, Camera } from 'lucide-react';
@@ -418,6 +418,7 @@ function createCircleRing(radius, colorHex, dashed = true) {
 export default function Viewport3D({
   trajectoryPoses = [],
   eePoses = [],
+  trajectoryRevision = 0,
   gripperStates = [],
   currentFrameIndex = 0,
   robotConfig = { robot_type: 'so_arm101_omni_kin', offset_x: 0.038, offset_y: -0.406, offset_z: 0.00, yaw_deg: 90.0 },
@@ -437,6 +438,7 @@ export default function Viewport3D({
   const tubeMeshRef = useRef(null);
   const approachTubeRef = useRef(null);
   const cameraLineRef = useRef(null);
+  const trajectoryLineRef = useRef(null);
   const cursorMeshRef = useRef(null);
   const camWaypointRef = useRef(null);
   const startMarkerRef = useRef(null);
@@ -470,6 +472,9 @@ export default function Viewport3D({
   const [showZones, setShowZones] = useState(true);
   const [showCameraPath, setShowCameraPath] = useState(true);
   const [showComponentBreakdown, setShowComponentBreakdown] = useState(false);
+  // Imperative WebGL setup can finish in the same commit as episode hydration.
+  // This signal schedules one guaranteed draw after the scene exists.
+  const [sceneReady, setSceneReady] = useState(false);
 
   const [ikStatus, setIkStatus] = useState({
     isFeasible: true,
@@ -478,13 +483,16 @@ export default function Viewport3D({
     jointsDeg: [0, 0, 0, 0, 0]
   });
 
-  useEffect(() => {
+  // Create the WebGL scene before passive trajectory effects run.  This keeps
+  // the first in-memory trajectory render from being lost during hydration.
+  useLayoutEffect(() => {
     const container = mountRef.current;
     if (!container) return;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0a0e17);
     sceneRef.current = scene;
+    setSceneReady(true);
 
     const width = container.clientWidth || 400;
     const height = container.clientHeight || 300;
@@ -735,6 +743,7 @@ export default function Viewport3D({
 
     return () => {
       cancelAnimationFrame(animId);
+      sceneRef.current = null;
       resizeObserver.disconnect();
       container.removeEventListener('wheel', handleWheel);
       controls.dispose();
@@ -846,6 +855,12 @@ export default function Viewport3D({
       cameraLineRef.current.material?.dispose();
       cameraLineRef.current = null;
     }
+    if (trajectoryLineRef.current) {
+      scene.remove(trajectoryLineRef.current);
+      trajectoryLineRef.current.geometry?.dispose();
+      trajectoryLineRef.current.material?.dispose();
+      trajectoryLineRef.current = null;
+    }
     if (startMarkerRef.current) {
       scene.remove(startMarkerRef.current);
       startMarkerRef.current.geometry?.dispose();
@@ -860,7 +875,6 @@ export default function Viewport3D({
     }
 
     const activePoses = (eePoses && eePoses.length > 0) ? eePoses : trajectoryPoses;
-
     // 1. Render Gripper TCP Main Trajectory (Solid Tube)
     if (activePoses.length > 1) {
       const points = activePoses.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
@@ -912,11 +926,33 @@ export default function Viewport3D({
       const tubeMat = new THREE.MeshStandardMaterial({
         vertexColors: true,
         roughness: 0.3,
-        metalness: 0.2
+        metalness: 0.2,
+        // The trajectory is an operator aid, so it must remain visible above
+        // the tabletop and workspace overlays at every filter setting.
+        depthTest: false,
+        depthWrite: false
       });
       const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat);
+      tubeMesh.renderOrder = 20;
       tubeMeshRef.current = tubeMesh;
       scene.add(tubeMesh);
+
+      // A basic line is intentionally paired with the tube.  It is cheap to
+      // redraw while a filter slider is moving and remains legible on GPUs
+      // that defer the first TubeGeometry material upload.
+      const trajectoryLine = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(points),
+        new THREE.LineBasicMaterial({
+          color: 0x34d399,
+          transparent: true,
+          opacity: 0.95,
+          depthTest: false,
+          depthWrite: false
+        })
+      );
+      trajectoryLine.renderOrder = 21;
+      trajectoryLineRef.current = trajectoryLine;
+      scene.add(trajectoryLine);
 
       // 🟢 Start Waypoint Marker (Green Sphere)
       const startGeo = new THREE.SphereGeometry(0.008, 20, 20);
@@ -1001,7 +1037,7 @@ export default function Viewport3D({
       cameraLineRef.current = camLine;
       scene.add(camLine);
     }
-  }, [trajectoryPoses, eePoses, showCameraPath, robotConfig, trajectoryMode, approachEePoses]);
+  }, [sceneReady, trajectoryRevision, trajectoryPoses, eePoses, showCameraPath, robotConfig, trajectoryMode, approachEePoses]);
 
   useEffect(() => {
     const scene = sceneRef.current;
@@ -1218,7 +1254,7 @@ export default function Viewport3D({
     maxLabel.visible = showZones;
     robotGroup.add(maxLabel);
 
-  }, [robotConfig]);
+  }, [sceneReady, robotConfig]);
 
   // Sync workspace layout zones and reach ring visibility when user toggles 'showZones'
   useEffect(() => {
@@ -1267,32 +1303,6 @@ export default function Viewport3D({
 
   const activePoses = (eePoses && eePoses.length > 0) ? eePoses : trajectoryPoses;
 
-  const smoothedTrajectory = useMemo(() => {
-    return computeSmoothTrajectory(
-      activePoses,
-      robotConfig,
-      kinematicSpecs.L1,
-      kinematicSpecs.L2,
-      kinematicSpecs.L3,
-      kinematicSpecs.L4,
-      kinematicSpecs.jointLimits,
-      kinematicSpecs.q3SafeMaxDeg
-    );
-  }, [activePoses, robotConfig, kinematicSpecs]);
-
-  const smoothedApproachTrajectory = useMemo(() => {
-    return computeSmoothTrajectory(
-      approachEePoses,
-      robotConfig,
-      kinematicSpecs.L1,
-      kinematicSpecs.L2,
-      kinematicSpecs.L3,
-      kinematicSpecs.L4,
-      kinematicSpecs.jointLimits,
-      kinematicSpecs.q3SafeMaxDeg
-    );
-  }, [approachEePoses, robotConfig, kinematicSpecs]);
-
   useEffect(() => {
     if (!robotGroupRef.current) return;
 
@@ -1324,7 +1334,6 @@ export default function Viewport3D({
       if (approachCamPoses && approachCamPoses.length > idx) {
         targetCam = approachCamPoses[idx];
       }
-      ikRes = smoothedApproachTrajectory[idx];
     } else {
       if (activePoses && activePoses.length > 0) {
         const idx = Math.min(currentFrameIndex, activePoses.length - 1);
@@ -1332,7 +1341,6 @@ export default function Viewport3D({
         if (gripperStates && gripperStates.length > idx && gripperStates[idx] !== undefined) {
           activeGripVal = Number(gripperStates[idx]);
         }
-        ikRes = smoothedTrajectory[idx];
       }
       if (trajectoryPoses && trajectoryPoses.length > 0) {
         const cIdx = Math.min(currentFrameIndex, trajectoryPoses.length - 1);
@@ -1362,11 +1370,11 @@ export default function Viewport3D({
     const robotY = -sinY * dx + cosY * dy;
     const robotZ = dz;
 
-    if (!ikRes) {
-      const targetPitch = targetGripper[4] || 0;
-      const targetRoll = targetGripper[3] || 0;
-      ikRes = solve5DofIK(robotX, robotY, robotZ, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3_safe_max_deg);
-    }
+    // Preview IK is deliberately per-frame.  Refiltering the cached capture
+    // must not run a full episode-wide IK precomputation or background job.
+    const targetPitch = targetGripper[4] || 0;
+    const targetRoll = targetGripper[3] || 0;
+    ikRes = solve5DofIK(robotX, robotY, robotZ, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3_safe_max_deg);
 
     const [q0, q1, q2, q3, q4] = ikRes.q;
 
@@ -1511,6 +1519,7 @@ export default function Viewport3D({
     });
 
   }, [
+    sceneReady,
     trajectoryPoses,
     eePoses,
     gripperStates,
@@ -1524,8 +1533,6 @@ export default function Viewport3D({
     approachCamPoses,
     isApproachPhase,
     approachFrameIndex,
-    smoothedTrajectory,
-    smoothedApproachTrajectory,
     kinematicSpecs
   ]);
 
