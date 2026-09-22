@@ -1,7 +1,6 @@
 node_modules
-dist/*
-!dist/index.html
-!dist/manifest.json
-!dist/assets
-!dist/assets/*
+dist/assets/index-*
+dist/assets/*.js
+dist/assets/*.css
+dist/assets/*.map
 .DS_Store

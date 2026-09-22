@@ -12,6 +12,7 @@ import pandas as pd
 from robot_kinematics import SO100Kinematics
 from trajectory_estimator import TrajectoryEstimator
 from lerobot_exporter import LeRobotExporter
+from visual_tracker import VisualInertialTracker
 
 # Ensure UTF-8 output formatting
 sys.stdout.reconfigure(encoding='utf-8')
@@ -41,6 +42,19 @@ def test_trajectory_estimator():
     assert poses.shape == (60, 6), f"Expected (60, 6), got {poses.shape}"
     print(f"[OK] Estimated Poses Shape: {poses.shape}")
     print(f"[OK] Pose Sample [x,y,z,r,p,y]: {np.round(poses[30], 3)}")
+
+
+def test_cartesian_speed_limit():
+    """A visual outlier must not become an unsafe one-frame TCP jump."""
+    positions = np.array([
+        [0.00, 0.00, 0.10],
+        [0.005, 0.00, 0.10],
+        [0.150, 0.00, 0.10],  # 14.5 cm visual re-acquisition spike
+        [0.155, 0.00, 0.10],
+    ])
+    limited = VisualInertialTracker.limit_cartesian_speed(positions, fps=30.0, max_speed_mps=0.25)
+    max_step = np.linalg.norm(np.diff(limited, axis=0), axis=1).max()
+    assert max_step <= (0.25 / 30.0) + 1e-9
 
 def _write_test_video(path, frame_count, fps=30):
     """Create a small, decodable MP4 fixture with an exact frame count."""

@@ -73,7 +73,7 @@ function solve5DofIK(targetX, targetY, targetZ, targetPitch, targetRoll, L1, L2,
     const beta = Math.atan2(L3 * Math.sin(q2), L2 + L3 * Math.cos(q2));
     const q1 = alpha - beta;
     const q3 = pClamped - (q1 + q2);
-    const q4 = targetRoll || 0;
+    const q4 = THREE.MathUtils.clamp(targetRoll || 0, -0.5236, 0.5236);
 
     const qRad = [q0, q1, q2, q3, q4];
     let inLimits = true;
@@ -222,23 +222,87 @@ function solve5DofIK(targetX, targetY, targetZ, targetPitch, targetRoll, L1, L2,
   };
 }
 
+// Universal Forward Kinematics chain in robot base frame (returns 7 3D points matching URDF link positions):
+// [pBase, pTurret, pShoulder, pElbow, pWrist, pRollBase, pTip]
+function computeFKChain(q, L1, L2, L3, L4, effectiveReachRad = 0.0) {
+  const [q0, q1, q2, q3, q4] = q;
+  const cosB = Math.cos(effectiveReachRad);
+  const sinB = Math.sin(effectiveReachRad);
+  const rotZ = (x, y, z) => [cosB * x - sinB * y, sinB * x + cosB * y, z];
+
+  const pBase = [0, 0, 0];
+  const pTurret = [0, 0, 0.005];
+  const pShoulder = [0, 0, L1];
+
+  const rElbow = L2 * Math.cos(q1);
+  const pElbow = rotZ(rElbow * Math.cos(q0), rElbow * Math.sin(q0), L1 + L2 * Math.sin(q1));
+
+  const th2 = q1 + q2;
+  const rForearm = L3 * Math.cos(th2);
+  const pWrist = rotZ(
+    rElbow * Math.cos(q0) + rForearm * Math.cos(q0),
+    rElbow * Math.sin(q0) + rForearm * Math.sin(q0),
+    L1 + L2 * Math.sin(q1) + L3 * Math.sin(th2)
+  );
+
+  const th3 = q1 + q2 + q3;
+  const rTip = L4 * Math.cos(th3);
+  const pTip = rotZ(
+    rElbow * Math.cos(q0) + rForearm * Math.cos(q0) + rTip * Math.cos(q0),
+    rElbow * Math.sin(q0) + rForearm * Math.sin(q0) + rTip * Math.sin(q0),
+    L1 + L2 * Math.sin(q1) + L3 * Math.sin(th2) + L4 * Math.sin(th3)
+  );
+
+  const rollDir = [pTip[0] - pWrist[0], pTip[1] - pWrist[1], pTip[2] - pWrist[2]];
+  const tipDist = Math.hypot(...rollDir);
+  const dRoll = Math.min(0.0585, L4 * 0.45);
+  const rollScale = tipDist > 1e-4 ? dRoll / tipDist : 0;
+  const pRollBase = [pWrist[0] + rollDir[0] * rollScale, pWrist[1] + rollDir[1] * rollScale, pWrist[2] + rollDir[2] * rollScale];
+
+  return [pBase, pTurret, pShoulder, pElbow, pWrist, pRollBase, pTip];
+}
+
 // Universal Robot-Agnostic Trajectory Precomputer with Slew-Rate Limiter (Max 6.0 deg/frame)
-function computeSmoothTrajectory(poses, robotConfig, L1, L2, L3, L4, jointLimits, q3SafeMaxDeg) {
-  if (!poses || poses.length === 0) return [];
+function computeSmoothTrajectory(
+  poses,
+  robotConfig,
+  L1,
+  L2,
+  L3,
+  L4,
+  jointLimits,
+  q3SafeMaxDeg,
+  effectiveReachRad = 0.0,
+  effectiveYawRad = null
+) {
+  if (!poses || poses.length === 0) return null;
 
   const {
     offset_x = 0.038,
     offset_y = -0.406,
     offset_z = 0.00,
-    yaw_deg = 90.0
+    yaw_deg = 90.0,
+    reach_angle_deg = 0.0
   } = robotConfig || {};
 
-  const yawRad = THREE.MathUtils.degToRad(yaw_deg);
+  const reachDeg = effectiveReachRad !== undefined && effectiveReachRad !== null
+    ? THREE.MathUtils.radToDeg(effectiveReachRad)
+    : Number(reach_angle_deg || 0.0);
+  const reachRad = THREE.MathUtils.degToRad(reachDeg);
+
+  const yawRad = effectiveYawRad !== undefined && effectiveYawRad !== null
+    ? effectiveYawRad
+    : THREE.MathUtils.degToRad(Number(yaw_deg || 90.0) - reachDeg);
+
   const cosY = Math.cos(yawRad);
   const sinY = Math.sin(yawRad);
 
+  const cosR = Math.cos(-reachRad);
+  const sinR = Math.sin(-reachRad);
+
   const results = [];
   let prevQ = null;
+
   for (let i = 0; i < poses.length; i++) {
     const pose = poses[i];
     const dx = pose[0] - offset_x;
@@ -249,11 +313,19 @@ function computeSmoothTrajectory(poses, robotConfig, L1, L2, L3, L4, jointLimits
     const ry = -sinY * dx + cosY * dy;
     const rz = dz;
 
+    const planarX = cosR * rx - sinR * ry;
+    const planarY = sinR * rx + cosR * ry;
+
     const targetPitch = pose[4] || 0;
     const targetRoll = pose[3] || 0;
 
-    const res = solve5DofIK(rx, ry, rz, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3SafeMaxDeg, prevQ);
-    results.push(res);
+    const res = solve5DofIK(planarX, planarY, rz, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3SafeMaxDeg, prevQ);
+    results.push({
+      ...res,
+      rx,
+      ry,
+      rz
+    });
     prevQ = res.q;
   }
 
@@ -281,10 +353,44 @@ function computeSmoothTrajectory(poses, robotConfig, L1, L2, L3, L4, jointLimits
     }
   }
 
-  return results.map((r, idx) => ({
-    ...r,
-    q: qSmoothed[idx]
-  }));
+  // Compute FK link positions and metrics for each frame
+  const linkPositions = [];
+  const jointStates = [];
+  let feasibleCount = 0;
+  let totalErrCm = 0;
+
+  for (let i = 0; i < results.length; i++) {
+    const q = qSmoothed[i];
+    const chain = computeFKChain(q, L1, L2, L3, L4, reachRad);
+    linkPositions.push(chain);
+
+    const tip = chain[6];
+    const targetRobotX = results[i].rx;
+    const targetRobotY = results[i].ry;
+    const targetRobotZ = results[i].rz;
+    const errCm = Math.hypot(tip[0] - targetRobotX, tip[1] - targetRobotY, tip[2] - targetRobotZ) * 100.0;
+    totalErrCm += errCm;
+
+    const isFeasible = !results[i].isClamped && errCm < 1.5;
+    if (isFeasible) feasibleCount++;
+
+    const qDeg = q.map(r => Math.round(THREE.MathUtils.radToDeg(r)));
+    jointStates.push(qDeg);
+  }
+
+  const n = results.length;
+  return {
+    results,
+    jointStates,
+    linkPositions,
+    qSmoothed,
+    feasibility: {
+      feasiblePercent: n > 0 ? Math.round((feasibleCount / n) * 1000) / 10 : 0,
+      avgErrorCm: n > 0 ? Math.round((totalErrCm / n) * 10) / 10 : 0,
+      feasibleCount,
+      totalCount: n
+    }
+  };
 }
 
 const _up = new THREE.Vector3(0, 1, 0);
@@ -419,7 +525,9 @@ export default function Viewport3D({
   trajectoryPoses = [],
   eePoses = [],
   trajectoryRevision = 0,
+  taskPrompt = '',
   gripperStates = [],
+  jointStates = [],
   currentFrameIndex = 0,
   robotConfig = { robot_type: 'so_arm101_omni_kin', offset_x: 0.038, offset_y: -0.406, offset_z: 0.00, yaw_deg: 90.0 },
   onUpdateRobotConfig = null,
@@ -429,7 +537,12 @@ export default function Viewport3D({
   approachGripperStates = [],
   approachCamPoses = [],
   isApproachPhase = false,
-  approachFrameIndex = 0
+  approachFrameIndex = 0,
+  robotEePoses = [],
+  fkTablePoses = [],
+  fkCameraPoses = [],
+  linkPositions = [],
+  reachAngleDeg = null
 }) {
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
@@ -456,6 +569,8 @@ export default function Viewport3D({
   const mountedToolRodRef = useRef(null);
 
   // Dynamic Articulated Robot Arm & End-Effector Meshes
+  const pillarMeshRef = useRef(null);
+  const shoulderSphereRef = useRef(null);
   const turretMeshRef = useRef(null);
   const upperArmMeshRef = useRef(null);
   const forearmMeshRef = useRef(null);
@@ -927,13 +1042,10 @@ export default function Viewport3D({
         vertexColors: true,
         roughness: 0.3,
         metalness: 0.2,
-        // The trajectory is an operator aid, so it must remain visible above
-        // the tabletop and workspace overlays at every filter setting.
-        depthTest: false,
-        depthWrite: false
+        depthTest: true,
+        depthWrite: true
       });
       const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat);
-      tubeMesh.renderOrder = 20;
       tubeMeshRef.current = tubeMesh;
       scene.add(tubeMesh);
 
@@ -946,11 +1058,10 @@ export default function Viewport3D({
           color: 0x34d399,
           transparent: true,
           opacity: 0.95,
-          depthTest: false,
+          depthTest: true,
           depthWrite: false
         })
       );
-      trajectoryLine.renderOrder = 21;
       trajectoryLineRef.current = trajectoryLine;
       scene.add(trajectoryLine);
 
@@ -1062,9 +1173,15 @@ export default function Viewport3D({
 
     const L1 = is100 ? 0.115 : 0.119;
 
+    const effectiveReachDeg = (reachAngleDeg !== undefined && reachAngleDeg !== null)
+      ? Number(reachAngleDeg)
+      : (robotConfig?.reach_angle_deg !== undefined ? Number(robotConfig.reach_angle_deg) : 0.0);
+    const effectiveReachRad = THREE.MathUtils.degToRad(effectiveReachDeg);
+    const effectiveYawRad = yawRad - effectiveReachRad;
+
     const robotGroup = new THREE.Group();
     robotGroup.position.set(offset_x, offset_y, offset_z + 0.001);
-    robotGroup.rotation.z = yawRad;
+    robotGroup.rotation.z = effectiveYawRad;
     robotGroupRef.current = robotGroup;
     scene.add(robotGroup);
 
@@ -1091,7 +1208,7 @@ export default function Viewport3D({
     turretMeshRef.current = turret;
     robotGroup.add(turret);
 
-    const headingDir = new THREE.Vector3(1, 0, 0);
+    const headingDir = new THREE.Vector3(Math.cos(effectiveReachRad), Math.sin(effectiveReachRad), 0);
     const arrowHelper = new THREE.ArrowHelper(
       headingDir,
       new THREE.Vector3(0, 0, 0.012),
@@ -1120,18 +1237,18 @@ export default function Viewport3D({
       metalness: 0.5
     });
 
-    const pillarGeo = new THREE.CylinderGeometry(0.015, 0.017, L1, 16);
-    pillarGeo.rotateX(Math.PI / 2);
-    const pillar = new THREE.Mesh(pillarGeo, armMat);
-    pillar.position.set(0, 0, L1 / 2);
+    const unitCylGeo = new THREE.CylinderGeometry(1, 1, 1, 16);
+
+    const pillar = new THREE.Mesh(unitCylGeo, armMat);
+    pillarMeshRef.current = pillar;
+    orientCylinder(pillar, new THREE.Vector3(0, 0, 0.005), new THREE.Vector3(0, 0, L1), 0.016);
     robotGroup.add(pillar);
 
     const shoulderSphereGeo = new THREE.SphereGeometry(0.018, 16, 16);
     const shoulderSphere = new THREE.Mesh(shoulderSphereGeo, armJointMat);
     shoulderSphere.position.set(0, 0, L1);
+    shoulderSphereRef.current = shoulderSphere;
     robotGroup.add(shoulderSphere);
-
-    const unitCylGeo = new THREE.CylinderGeometry(1, 1, 1, 16);
 
     const upperArm = new THREE.Mesh(unitCylGeo, armMat);
     upperArmMeshRef.current = upperArm;
@@ -1187,12 +1304,36 @@ export default function Viewport3D({
     mountedClampRef.current = clampMesh;
     mountedCamGroup.add(clampMesh);
 
-    // 2. Camera Optical Focal Node (Sleek spherical focal point, zero box artifacts)
+    // 2. Camera Optical Focal Node & Sleek Phone/Camera Assembly
     const camBodyGroup = new THREE.Group();
     mountedCamMeshRef.current = camBodyGroup;
     mountedCamGroup.add(camBodyGroup);
 
-    const camFocalSphereGeo = new THREE.SphereGeometry(0.007, 16, 16);
+    // 2a. Sleek camera body housing (compact smartphone / sensor head)
+    const camBodyGeo = new THREE.BoxGeometry(0.060, 0.032, 0.008);
+    const camBodyMat = new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      metalness: 0.7,
+      roughness: 0.3
+    });
+    const camBody = new THREE.Mesh(camBodyGeo, camBodyMat);
+    camBody.position.set(0, 0, -0.004);
+    camBodyGroup.add(camBody);
+
+    // 2b. Camera lens barrel ring
+    const lensBezelGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.004, 16);
+    lensBezelGeo.rotateX(Math.PI / 2);
+    const lensBezelMat = new THREE.MeshStandardMaterial({
+      color: 0x0f172a,
+      metalness: 0.9,
+      roughness: 0.2
+    });
+    const lensBezel = new THREE.Mesh(lensBezelGeo, lensBezelMat);
+    lensBezel.position.set(0, 0, 0.002);
+    camBodyGroup.add(lensBezel);
+
+    // 2c. Glowing cyan focal lens optic
+    const camFocalSphereGeo = new THREE.SphereGeometry(0.005, 16, 16);
     const camFocalMat = new THREE.MeshStandardMaterial({
       color: 0x06b6d4,
       emissive: 0x0891b2,
@@ -1201,7 +1342,14 @@ export default function Viewport3D({
       metalness: 0.8
     });
     const camFocalMesh = new THREE.Mesh(camFocalSphereGeo, camFocalMat);
+    camFocalMesh.position.set(0, 0, 0.004);
     camBodyGroup.add(camFocalMesh);
+
+    // 2d. Mount hinge collar connecting to bracket
+    const hingeGeo = new THREE.CylinderGeometry(0.005, 0.005, 0.010, 12);
+    const hinge = new THREE.Mesh(hingeGeo, armJointMat);
+    hinge.position.set(0, -0.016, -0.004);
+    camBodyGroup.add(hinge);
 
     // 3. Rigid Tool Center Point (TCP) Connecting Rod / Sightline
     const toolRodGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
@@ -1241,20 +1389,20 @@ export default function Viewport3D({
 
     // 4. Reach Ring Diagnostic Labels
     const nominalLabel = createTextSprite("Nominal Reach (22cm)", "#064e3b", "#34d399", "#059669");
-    nominalLabel.position.set(0, 0.22, 0.003);
+    nominalLabel.position.set(0.22 * Math.cos(effectiveReachRad), 0.22 * Math.sin(effectiveReachRad), 0.003);
     nominalLabel.scale.set(0.14, 0.022, 1);
     nominalLabel.name = 'nominalLabel';
     nominalLabel.visible = showZones;
     robotGroup.add(nominalLabel);
 
     const maxLabel = createTextSprite(`Max Reach (${(maxReachRadius * 100).toFixed(1)}cm)`, "#78350f", "#fcd34d", "#d97706");
-    maxLabel.position.set(0, maxReachRadius, 0.003);
+    maxLabel.position.set(maxReachRadius * Math.cos(effectiveReachRad), maxReachRadius * Math.sin(effectiveReachRad), 0.003);
     maxLabel.scale.set(0.15, 0.022, 1);
     maxLabel.name = 'maxLabel';
     maxLabel.visible = showZones;
     robotGroup.add(maxLabel);
 
-  }, [sceneReady, robotConfig]);
+  }, [sceneReady, robotConfig, reachAngleDeg]);
 
   // Sync workspace layout zones and reach ring visibility when user toggles 'showZones'
   useEffect(() => {
@@ -1273,7 +1421,8 @@ export default function Viewport3D({
   const kinematicSpecs = useMemo(() => {
     const {
       robot_type = 'so_arm101_omni_kin',
-      q3_safe_max_deg = 0.0
+      q3_safe_max_deg = 0.0,
+      gripper_offset = {}
     } = robotConfig || {};
     const safeRad = THREE.MathUtils.degToRad(q3_safe_max_deg !== undefined ? Number(q3_safe_max_deg) : 0.0);
     const rType = (robot_type || 'so_arm101_omni_kin').toLowerCase();
@@ -1283,7 +1432,9 @@ export default function Viewport3D({
     const L1 = is100 ? 0.115 : 0.119;
     const L2 = is100 ? 0.135 : 0.140;
     const L3 = isOmni ? 0.135 : (is100 ? 0.140 : 0.145);
-    const L4 = is100 ? 0.105 : 0.110;
+    const L4 = (gripper_offset?.forward_cm !== undefined
+      ? Number(gripper_offset.forward_cm)
+      : (is100 ? 10.5 : 12.8)) / 100.0;
 
     const jointLimits = isOmni ? [
       [-1.833, 1.833],
@@ -1303,6 +1454,30 @@ export default function Viewport3D({
 
   const activePoses = (eePoses && eePoses.length > 0) ? eePoses : trajectoryPoses;
 
+  const effectiveReachDeg = (reachAngleDeg !== undefined && reachAngleDeg !== null)
+    ? Number(reachAngleDeg)
+    : (robotConfig?.reach_angle_deg !== undefined ? Number(robotConfig.reach_angle_deg) : 0.0);
+  const effectiveReachRad = THREE.MathUtils.degToRad(effectiveReachDeg);
+  const yawRad = THREE.MathUtils.degToRad(robotConfig?.yaw_deg !== undefined ? Number(robotConfig.yaw_deg) : 90.0);
+  const effectiveYawRad = yawRad - effectiveReachRad;
+
+  // On-the-fly analytical trajectory & joint calculation (sub-millisecond full trajectory solve)
+  const onTheFlyTrajectory = useMemo(() => {
+    if (!activePoses || activePoses.length === 0) return null;
+    return computeSmoothTrajectory(
+      activePoses,
+      robotConfig,
+      kinematicSpecs.L1,
+      kinematicSpecs.L2,
+      kinematicSpecs.L3,
+      kinematicSpecs.L4,
+      kinematicSpecs.jointLimits,
+      kinematicSpecs.q3SafeMaxDeg,
+      effectiveReachRad,
+      effectiveYawRad
+    );
+  }, [activePoses, robotConfig, kinematicSpecs, effectiveReachRad, effectiveYawRad]);
+
   useEffect(() => {
     if (!robotGroupRef.current) return;
 
@@ -1313,7 +1488,6 @@ export default function Viewport3D({
       yaw_deg = 90.0,
       q3_safe_max_deg = 0.0
     } = robotConfig || {};
-    const yawRad = THREE.MathUtils.degToRad(yaw_deg);
     const { L1, L2, L3, L4, jointLimits } = kinematicSpecs;
 
     const isApproachActive = trajectoryMode === 'initial_aware' && isApproachPhase && approachEePoses && approachEePoses.length > 0;
@@ -1322,6 +1496,7 @@ export default function Viewport3D({
     let activeGripVal = 50.0;
     let targetCam = null;
     let ikRes = null;
+    let activeLinkPositions = null;
 
     if (isApproachActive) {
       const idx = Math.min(Math.max(0, approachFrameIndex), (approachEePoses?.length || 1) - 1);
@@ -1340,6 +1515,31 @@ export default function Viewport3D({
         targetGripper = activePoses[idx];
         if (gripperStates && gripperStates.length > idx && gripperStates[idx] !== undefined) {
           activeGripVal = Number(gripperStates[idx]);
+        }
+
+        // 1. Prioritize on-the-fly dynamically calculated joints & link positions
+        // This recalculates in real-time as the user moves base (X,Y,Yaw), adjusts filters, or modifies offsets
+        if (onTheFlyTrajectory && onTheFlyTrajectory.linkPositions.length > idx) {
+          activeLinkPositions = onTheFlyTrajectory.linkPositions[idx];
+          const qRad = onTheFlyTrajectory.qSmoothed[idx];
+          const resInfo = onTheFlyTrajectory.results[idx];
+          ikRes = {
+            q: qRad,
+            isClamped: resInfo.isClamped,
+            errorDist: resInfo.errorDist,
+            clampedReason: resInfo.clampedReason
+          };
+        } else if (linkPositions && linkPositions.length > idx && Array.isArray(linkPositions[idx]) && linkPositions[idx].length >= 6) {
+          activeLinkPositions = linkPositions[idx];
+          const serverJoints = jointStates[idx];
+          if (Array.isArray(serverJoints) && serverJoints.length >= 5) {
+            ikRes = {
+              q: serverJoints.slice(0, 5).map((degrees) => THREE.MathUtils.degToRad(Number(degrees))),
+              isClamped: false,
+              errorDist: 0,
+              clampedReason: 'SERVER_VALIDATED'
+            };
+          }
         }
       }
       if (trajectoryPoses && trajectoryPoses.length > 0) {
@@ -1364,47 +1564,86 @@ export default function Viewport3D({
     const dy = targetGripper[1] - offset_y;
     const dz = targetGripper[2] - offset_z;
 
-    const cosY = Math.cos(yawRad);
-    const sinY = Math.sin(yawRad);
+    const cosY = Math.cos(effectiveYawRad);
+    const sinY = Math.sin(effectiveYawRad);
     const robotX = cosY * dx + sinY * dy;
     const robotY = -sinY * dx + cosY * dy;
     const robotZ = dz;
 
-    // Preview IK is deliberately per-frame.  Refiltering the cached capture
-    // must not run a full episode-wide IK precomputation or background job.
-    const targetPitch = targetGripper[4] || 0;
-    const targetRoll = targetGripper[3] || 0;
-    ikRes = solve5DofIK(robotX, robotY, robotZ, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3_safe_max_deg);
+    let pShoulder, pElbow, pWrist, pTip;
+    const gripperLenM = (robotConfig?.gripper_offset?.forward_cm !== undefined
+      ? Number(robotConfig.gripper_offset.forward_cm)
+      : 12.8) / 100.0;
 
-    const [q0, q1, q2, q3, q4] = ikRes.q;
+    if (activeLinkPositions) {
+      // 1. Authoritative 3D joint link positions from URDF forward kinematics chain
+      pShoulder = new THREE.Vector3(activeLinkPositions[2][0], activeLinkPositions[2][1], activeLinkPositions[2][2]);
+      pElbow = new THREE.Vector3(activeLinkPositions[3][0], activeLinkPositions[3][1], activeLinkPositions[3][2]);
+      pWrist = new THREE.Vector3(activeLinkPositions[4][0], activeLinkPositions[4][1], activeLinkPositions[4][2]);
+      if (activeLinkPositions.length >= 7) {
+        pTip = new THREE.Vector3(activeLinkPositions[6][0], activeLinkPositions[6][1], activeLinkPositions[6][2]);
+      } else {
+        const pRollBase = new THREE.Vector3(activeLinkPositions[5][0], activeLinkPositions[5][1], activeLinkPositions[5][2]);
+        const rollDir = new THREE.Vector3().subVectors(pRollBase, pWrist);
+        const rollAxisDir = rollDir.lengthSq() > 1e-6 ? rollDir.normalize() : new THREE.Vector3(0, -1, 0);
+        pTip = pWrist.clone().addScaledVector(rollAxisDir, gripperLenM);
+      }
+    } else {
+      // 2. Procedural solve for unverified episodes, rotated into reach plane
+      if (!ikRes) {
+        const cosR = Math.cos(-effectiveReachRad);
+        const sinR = Math.sin(-effectiveReachRad);
+        const planarX = cosR * robotX - sinR * robotY;
+        const planarY = sinR * robotX + cosR * robotY;
+        const targetPitch = targetGripper[4] || 0;
+        const targetRoll = targetGripper[3] || 0;
+        ikRes = solve5DofIK(planarX, planarY, robotZ, targetPitch, targetRoll, L1, L2, L3, L4, jointLimits, q3_safe_max_deg);
+      }
 
-    const pShoulder = new THREE.Vector3(0, 0, L1);
+      const [q0, q1, q2, q3, q4] = ikRes.q;
+      pShoulder = new THREE.Vector3(0, 0, L1);
 
-    const rElbow = L2 * Math.cos(q1);
-    const pElbow = new THREE.Vector3(
-      rElbow * Math.cos(q0),
-      rElbow * Math.sin(q0),
-      L1 + L2 * Math.sin(q1)
-    );
+      const rElbow = L2 * Math.cos(q1);
+      const pElbowPlanar = new THREE.Vector3(
+        rElbow * Math.cos(q0),
+        rElbow * Math.sin(q0),
+        L1 + L2 * Math.sin(q1)
+      );
 
-    const th2 = q1 + q2;
-    const rForearm = L3 * Math.cos(th2);
-    const pWrist = new THREE.Vector3(
-      pElbow.x + rForearm * Math.cos(q0),
-      pElbow.y + rForearm * Math.sin(q0),
-      pElbow.z + L3 * Math.sin(th2)
-    );
+      const th2 = q1 + q2;
+      const rForearm = L3 * Math.cos(th2);
+      const pWristPlanar = new THREE.Vector3(
+        pElbowPlanar.x + rForearm * Math.cos(q0),
+        pElbowPlanar.y + rForearm * Math.sin(q0),
+        pElbowPlanar.z + L3 * Math.sin(th2)
+      );
 
-    const th3 = q1 + q2 + q3;
-    const rTip = L4 * Math.cos(th3);
-    const pTip = new THREE.Vector3(
-      pWrist.x + rTip * Math.cos(q0),
-      pWrist.y + rTip * Math.sin(q0),
-      pWrist.z + L4 * Math.sin(th3)
-    );
+      const th3 = q1 + q2 + q3;
+      const rTip = L4 * Math.cos(th3);
+      const pTipPlanar = new THREE.Vector3(
+        pWristPlanar.x + rTip * Math.cos(q0),
+        pWristPlanar.y + rTip * Math.sin(q0),
+        pWristPlanar.z + L4 * Math.sin(th3)
+      );
 
+      const cosB = Math.cos(effectiveReachRad);
+      const sinB = Math.sin(effectiveReachRad);
+      const rotZ = (v) => new THREE.Vector3(cosB * v.x - sinB * v.y, sinB * v.x + cosB * v.y, v.z);
+      pElbow = rotZ(pElbowPlanar);
+      pWrist = rotZ(pWristPlanar);
+      pTip = rotZ(pTipPlanar);
+    }
+
+    const pBaseMount = new THREE.Vector3(0, 0, 0.005);
+    if (pillarMeshRef.current) {
+      orientCylinder(pillarMeshRef.current, pBaseMount, pShoulder, 0.015);
+    }
+    if (shoulderSphereRef.current) {
+      shoulderSphereRef.current.position.copy(pShoulder);
+    }
     if (turretMeshRef.current) {
-      turretMeshRef.current.rotation.z = q0;
+      const yawAngle = Math.atan2(pElbow.y, pElbow.x);
+      turretMeshRef.current.rotation.z = yawAngle;
     }
     if (upperArmMeshRef.current) {
       orientCylinder(upperArmMeshRef.current, pShoulder, pElbow, 0.012);
@@ -1423,19 +1662,60 @@ export default function Viewport3D({
     }
     if (gripperTipRef.current) {
       gripperTipRef.current.position.copy(pTip);
-      const isFeasible = !ikRes.isClamped && ikRes.errorDist < 0.02;
+    }
+
+    const tipDir = new THREE.Vector3().subVectors(pTip, pWrist).normalize();
+    const q0 = ikRes ? ikRes.q[0] : Math.atan2(pTip.y, pTip.x);
+    const q4 = ikRes ? (ikRes.q[4] || 0) : 0;
+
+    // Transverse pitch axis of the arm: perpendicular to the sagittal reach plane
+    const armPhi = q0 + effectiveReachRad;
+    const pitchAxis = new THREE.Vector3(-Math.sin(armPhi), Math.cos(armPhi), 0).normalize();
+
+    // Gripper dorsal normal before roll (points out of the 'top' of the gripper where camera bracket is mounted)
+    // When gripper points horizontally along reach, dorsal normal is +Z (0,0,1).
+    // tipDir x pitchAxis is always unit length and perpendicular to tipDir without any degenerate singularity.
+    let uDorsal0 = new THREE.Vector3().crossVectors(tipDir, pitchAxis);
+    if (uDorsal0.lengthSq() < 1e-4) {
+      uDorsal0 = new THREE.Vector3(0, 0, 1);
+    } else {
+      uDorsal0.normalize();
+    }
+
+    // Apply wrist roll q4 around tipDir via Rodrigues' rotation formula:
+    const cosRoll = Math.cos(q4);
+    const sinRoll = Math.sin(q4);
+    const kCrossDorsal = new THREE.Vector3().crossVectors(tipDir, uDorsal0);
+    const upDir = new THREE.Vector3()
+      .copy(uDorsal0).multiplyScalar(cosRoll)
+      .addScaledVector(kCrossDorsal, sinRoll)
+      .normalize();
+
+    // Lateral direction across the gripper (+X_g, to the right)
+    const lateralDir = new THREE.Vector3().crossVectors(tipDir, upDir).normalize();
+
+    // Compute true tip world position and error distance relative to targetGripper
+    const robotGroup = robotGroupRef.current;
+    let errDistCm = 0;
+    if (robotGroup) {
+      robotGroup.updateMatrixWorld(true);
+      const pTipWorld = pTip.clone().applyMatrix4(robotGroup.matrixWorld);
+      errDistCm = Math.hypot(
+        pTipWorld.x - targetGripper[0],
+        pTipWorld.y - targetGripper[1],
+        pTipWorld.z - targetGripper[2]
+      ) * 100.0;
+    }
+
+    const isFeasible = (ikRes && !ikRes.isClamped && errDistCm < 1.5);
+
+    if (gripperTipRef.current) {
       gripperTipRef.current.material.color.setHex(isFeasible ? 0x10b981 : 0xf59e0b);
       gripperTipRef.current.material.emissive.setHex(isFeasible ? 0x059669 : 0xd97706);
     }
 
-    const tipDir = new THREE.Vector3().subVectors(pTip, pWrist).normalize();
-    const lateralDir = new THREE.Vector3(-Math.sin(q0), Math.cos(q0), 0).normalize();
-    const upDir = new THREE.Vector3().crossVectors(tipDir, lateralDir).normalize();
-
-
-
     if (reachLineRef.current) {
-      if (ikRes.isClamped) {
+      if (!isFeasible && errDistCm > 1.5) {
         reachLineRef.current.visible = true;
         const targetRobotVec = new THREE.Vector3(robotX, robotY, robotZ);
         const pts = [pTip, targetRobotVec];
@@ -1462,7 +1742,7 @@ export default function Viewport3D({
 
     // 1. Update Mounting Bracket from wrist joint to camera mount base
     if (mountedBracketRef.current) {
-      orientCylinder(mountedBracketRef.current, pWrist, pCamRobot, 0.005);
+      orientCylinder(mountedBracketRef.current, pWrist, pCamRobot, 0.004);
       mountedBracketRef.current.visible = isOffsetEnabled;
     }
 
@@ -1480,10 +1760,10 @@ export default function Viewport3D({
       if (isOffsetEnabled) {
         // Line-of-sight pointing from camera lens toward gripper TCP pTip:
         const camLookDir = new THREE.Vector3().subVectors(pTip, pCamRobot).normalize();
-        const camLatDir = lateralDir.clone();
-        const camUpDir = new THREE.Vector3().crossVectors(camLatDir, camLookDir).normalize();
+        const camRightDir = lateralDir.clone();
+        const camUpDir = new THREE.Vector3().crossVectors(camLookDir, camRightDir).normalize();
 
-        const camRotMatrix = new THREE.Matrix4().makeBasis(camLatDir, camUpDir, camLookDir);
+        const camRotMatrix = new THREE.Matrix4().makeBasis(camRightDir, camUpDir, camLookDir);
         mountedCamMeshRef.current.quaternion.setFromRotationMatrix(camRotMatrix);
       }
     }
@@ -1509,12 +1789,14 @@ export default function Viewport3D({
       }
     }
 
-    const qDeg = [q0, q1, q2, q3, q4].map((rad) => Math.round(THREE.MathUtils.radToDeg(rad)));
-    const errDistCm = Math.hypot(pTip.x - robotX, pTip.y - robotY, pTip.z - robotZ) * 100.0;
+    const qDeg = ikRes
+      ? ikRes.q.map((rad) => Math.round(THREE.MathUtils.radToDeg(rad)))
+      : [0, 0, 0, 0, 0];
+
     setIkStatus({
-      isFeasible: !ikRes.isClamped && errDistCm < 1.5,
+      isFeasible,
       errorDistCm: Math.round(errDistCm * 10) / 10,
-      clampedReason: ikRes.clampedReason,
+      clampedReason: isFeasible ? 'OK' : (ikRes?.clampedReason || 'OUT_OF_REACH'),
       jointsDeg: qDeg
     });
 
@@ -1523,6 +1805,9 @@ export default function Viewport3D({
     trajectoryPoses,
     eePoses,
     gripperStates,
+    jointStates,
+    linkPositions,
+    reachAngleDeg,
     currentFrameIndex,
     robotConfig,
     showCameraPath,
@@ -1533,7 +1818,8 @@ export default function Viewport3D({
     approachCamPoses,
     isApproachPhase,
     approachFrameIndex,
-    kinematicSpecs
+    kinematicSpecs,
+    onTheFlyTrajectory
   ]);
 
   const handleAutoAlign = async (mode = 'start') => {
@@ -1582,6 +1868,13 @@ export default function Viewport3D({
           </span>
         </div>
 
+        {taskPrompt && (
+          <div className="bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 px-2.5 py-1.5 rounded-xl text-[11px] text-neutral-200 shadow-xl w-fit max-w-full">
+            <span className="text-neutral-500 font-mono mr-1.5">Task:</span>
+            <span className="font-medium">{taskPrompt}</span>
+          </div>
+        )}
+
         {/* Set Robot Initial Position (Auto-Align Base Controls) */}
         <div className="flex items-center gap-1 bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 p-1 rounded-xl shadow-xl pointer-events-auto w-fit flex-wrap">
           <span className="text-[10px] font-semibold text-neutral-400 px-1 font-mono">Base:</span>
@@ -1615,8 +1908,8 @@ export default function Viewport3D({
 
         {/* Phase Indicator Badge (Approach vs Demo) */}
         {trajectoryMode === 'initial_aware' && (
-          <div className="backdrop-blur-md border border-neutral-800 bg-[#0a0a0a]/90 px-2.5 py-1 rounded-xl text-[11px] font-mono font-medium flex items-center gap-2 shadow-xl transition-all w-fit text-neutral-200">
-            <span className={`w-1.5 h-1.5 rounded-full ${isApproachPhase ? 'bg-amber-400 animate-pulse' : 'bg-emerald-400'}`} />
+          <div className="bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 px-2.5 py-1 rounded-xl text-[11px] font-mono flex items-center gap-2 shadow-xl w-fit text-neutral-200">
+            <span className="w-2 h-2 rounded-full bg-purple-500 animate-pulse shrink-0" />
             <span className="font-bold">
               {isApproachPhase ? 'AUTO APPROACH' : 'DEMO PHASE'}
             </span>
@@ -1648,6 +1941,23 @@ export default function Viewport3D({
           <span className="text-[10px] text-neutral-400">
             q: [{ikStatus.jointsDeg.join('°, ')}°]
           </span>
+          {onTheFlyTrajectory?.feasibility && (
+            <>
+              <span className="text-neutral-700">|</span>
+              <span
+                className={`text-[10px] ${
+                  onTheFlyTrajectory.feasibility.feasiblePercent >= 95
+                    ? 'text-emerald-400 font-medium'
+                    : onTheFlyTrajectory.feasibility.feasiblePercent >= 80
+                    ? 'text-amber-400'
+                    : 'text-rose-400 font-semibold'
+                }`}
+                title={`Trajectory Feasibility across ${onTheFlyTrajectory.feasibility.totalCount} frames`}
+              >
+                Path: {onTheFlyTrajectory.feasibility.feasiblePercent}% OK (avg {onTheFlyTrajectory.feasibility.avgErrorCm}cm)
+              </span>
+            </>
+          )}
         </div>
       </div>
 

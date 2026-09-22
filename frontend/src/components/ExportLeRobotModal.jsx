@@ -7,12 +7,14 @@ export default function ExportLeRobotModal({
   episodes = [],
   robotConfig = {},
   trajectoryMode = 'free_form',
-  onTrajectoryModeChange = () => {}
+  onTrajectoryModeChange = () => {},
+  onEpisodesChanged = () => {}
 }) {
   const [autoTrim, setAutoTrim] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
   const [exportResult, setExportResult] = useState(null);
   const [errorMessage, setErrorMessage] = useState(null);
+  const [isReprocessing, setIsReprocessing] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -24,6 +26,9 @@ export default function ExportLeRobotModal({
 
   const totalFrames = episodes.reduce((acc, ep) => acc + (ep.num_frames || (ep.poses ? ep.poses.length : 0)), 0);
   const robotType = (robotConfig?.robot_type || 'so_arm101_omni_kin').toUpperCase();
+  const unverifiedEpisodes = episodes.filter(
+    (episode) => episode?.manifest?.validation?.state !== 'passed'
+  );
 
   const handleExport = async () => {
     setIsExporting(true);
@@ -47,6 +52,31 @@ export default function ExportLeRobotModal({
       setErrorMessage(err.message || 'Export failed');
     } finally {
       setIsExporting(false);
+    }
+  };
+
+  const handleReprocessAndExport = async () => {
+    setIsReprocessing(true);
+    setErrorMessage(null);
+    setExportResult(null);
+    try {
+      for (const episode of unverifiedEpisodes) {
+        const response = await fetch(`/api/episodes/${episode.episode_index}/reprocess`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ smooth: true, smooth_method: 'savgol', smooth_window_ms: 250 })
+        });
+        const data = await response.json();
+        if (!response.ok || data.status === 'error') {
+          throw new Error(data.message || `Could not reprocess episode ${episode.episode_index}`);
+        }
+      }
+      await onEpisodesChanged();
+      await handleExport();
+    } catch (error) {
+      setErrorMessage(error.message || 'Reprocess failed');
+    } finally {
+      setIsReprocessing(false);
     }
   };
 
@@ -118,6 +148,16 @@ export default function ExportLeRobotModal({
               <div className="text-xs font-semibold text-emerald-400 mt-0.5">{totalFrames}</div>
             </div>
           </div>
+
+          {unverifiedEpisodes.length > 0 && (
+            <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-900/40 text-amber-200 text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+              <div>
+                <div className="font-semibold">{unverifiedEpisodes.length} episode{unverifiedEpisodes.length === 1 ? '' : 's'} need validation</div>
+                <p className="mt-0.5 text-[11px] text-amber-200/75 leading-relaxed">Reprocess validates the original video, frame parity, and authoritative kinematics before export.</p>
+              </div>
+            </div>
+          )}
 
           {/* Trajectory Mode Selection */}
           <div className="flex flex-col gap-1.5">
@@ -206,18 +246,18 @@ export default function ExportLeRobotModal({
             </button>
             <button
               type="button"
-              onClick={handleExport}
-              disabled={isExporting || episodes.length === 0}
+              onClick={unverifiedEpisodes.length ? handleReprocessAndExport : handleExport}
+              disabled={isExporting || isReprocessing || episodes.length === 0}
               className="px-4 py-2 rounded-xl bg-white hover:bg-neutral-200 text-black text-xs font-semibold shadow-sm flex items-center gap-1.5 transition-all disabled:opacity-50"
             >
-              {isExporting ? (
+              {isExporting || isReprocessing ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>Exporting Dataset...</span>
+                  <span>{isReprocessing ? 'Reprocessing Episodes...' : 'Exporting Dataset...'}</span>
                 </>
               ) : (
                 <>
-                  <span>{exportResult ? 'Export Again (New Version)' : 'Export LeRobot Dataset'}</span>
+                  <span>{unverifiedEpisodes.length ? `Reprocess ${unverifiedEpisodes.length} & Export` : (exportResult ? 'Export Again (New Version)' : 'Export LeRobot Dataset')}</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </>
               )}

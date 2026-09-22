@@ -451,6 +451,8 @@ class DHKinematics:
         """Updates camera mounting extrinsics for universal 3D geometric clearance checks."""
         if forward_cm is not None:
             self.cam_forward_m = float(forward_cm) / 100.0
+            self.L4 = self.cam_forward_m
+            self.max_reach = self.L2 + self.L3 + self.L4
         if height_cm is not None:
             self.cam_height_m = float(height_cm) / 100.0
         if lateral_cm is not None:
@@ -664,7 +666,7 @@ class DHKinematics:
                 beta = np.arctan2(self.L3 * np.sin(q2), self.L2 + self.L3 * np.cos(q2))
                 q1 = alpha - beta
                 q3 = p_clamped - (q1 + q2)
-                q4 = roll
+                q4 = float(np.clip(roll, -np.radians(30.0), np.radians(30.0)))
 
                 q_rad = [q0, q1, q2, q3, q4]
                 in_limits = True
@@ -771,7 +773,7 @@ class DHKinematics:
             beta = np.arctan2(self.L3 * np.sin(q2), self.L2 + self.L3 * np.cos(q2))
             q1 = alpha - beta
             q3 = fallback_pitch - (q1 + q2)
-            q4 = roll
+            q4 = float(np.clip(roll, -np.radians(30.0), np.radians(30.0)))
             best_q = [q0, q1, q2, q3, q4]
             wrist_idx = getattr(self, "wrist_pitch_idx", 3)
             collision_sign = getattr(self, "wrist_collision_sign", 1)
@@ -834,7 +836,7 @@ class DHKinematics:
 
         return np.array([arm_x, arm_y, arm_z, proll, ppitch, pyaw])
 
-    def smooth_joint_trajectory(self, joint_trajectory, fps=30.0, time_window_ms=200, soft_margin_ratio=0.08, max_deg_per_sec=180.0):
+    def smooth_joint_trajectory(self, joint_trajectory, fps=30.0, time_window_ms=200, soft_margin_ratio=0.08, max_deg_per_sec=120.0):
         """
         Universal Robot-Agnostic Joint Trajectory Smoother.
         Works across arbitrary robot topologies, DOF counts, and joint limits.
@@ -870,6 +872,9 @@ class DHKinematics:
                     hi_deg = min(hi_deg, float(safe_max_deg))
                 else:
                     lo_deg = max(lo_deg, -float(safe_max_deg))
+            if j == 4:
+                lo_deg = max(lo_deg, -35.0)
+                hi_deg = min(hi_deg, 35.0)
 
             arm_joints[:, j] = universal_soft_saturation(
                 arm_joints[:, j], lo_deg, hi_deg, margin_ratio=soft_margin_ratio
@@ -909,9 +914,21 @@ class DHKinematics:
                     hi_deg = min(hi_deg, float(safe_max_deg))
                 else:
                     lo_deg = max(lo_deg, -float(safe_max_deg))
+            if j == 4:
+                lo_deg = max(lo_deg, -35.0)
+                hi_deg = min(hi_deg, 35.0)
             arm_joints[:, j] = universal_soft_saturation(
                 arm_joints[:, j], lo_deg, hi_deg, margin=0.5
             )
+
+        # Savitzky-Golay can overshoot between adjacent frames.  Reapply the
+        # physical velocity bound after filtering; this is the final command
+        # trajectory used by preview and export.
+        if n_frames >= 2 and max_deg_per_sec is not None:
+            max_delta = float(max_deg_per_sec) / max(5.0, float(fps))
+            for t in range(1, n_frames):
+                delta = arm_joints[t] - arm_joints[t - 1]
+                arm_joints[t] = arm_joints[t - 1] + np.clip(delta, -max_delta, max_delta)
 
         if extra is not None:
             return np.hstack([arm_joints, extra]).astype(joint_arr.dtype)
@@ -1684,7 +1701,14 @@ class URDFKinematics:
         self.L1 = float(np.linalg.norm(self.arm_joints[0]["xyz"])) if len(self.arm_joints) > 0 else 0.119
         self.L2 = float(np.linalg.norm(self.arm_joints[1]["xyz"])) if len(self.arm_joints) > 1 else 0.140
         self.L3 = float(np.linalg.norm(self.arm_joints[2]["xyz"])) if len(self.arm_joints) > 2 else 0.135
-        self.L4 = float(np.linalg.norm(self.arm_joints[3]["xyz"])) if len(self.arm_joints) > 3 else 0.110
+        # L4 is Tool Center Point (TCP) gripper length from wrist joint to fingertips (default 12.8 cm)
+        forward_cm = kwargs.get("forward_cm")
+        if forward_cm is not None:
+            self.L4 = float(forward_cm) / 100.0
+        else:
+            self.L4 = 0.128
+        self.cam_forward_m = self.L4
+        self.max_reach = self.L2 + self.L3 + self.L4
         self.wrist_pitch_idx = min(3, self.num_joints - 1)
 
         # 3. Detect nominal reach vector from FK at mid joint configuration
@@ -1704,7 +1728,14 @@ class URDFKinematics:
         self.update_q3_safe_max(safe_max_deg)
 
     def update_camera_extrinsics(self, forward_cm=None, height_cm=None, lateral_cm=None):
-        pass
+        if forward_cm is not None:
+            self.L4 = float(forward_cm) / 100.0
+            self.cam_forward_m = self.L4
+            self.max_reach = self.L2 + self.L3 + self.L4
+        if height_cm is not None:
+            self.cam_height_m = float(height_cm) / 100.0
+        if lateral_cm is not None:
+            self.cam_lateral_m = float(lateral_cm) / 100.0
 
     def get_dh_table(self):
         return getattr(self, "dh_table", [])
@@ -1717,7 +1748,19 @@ class URDFKinematics:
             T_j[:3, :3] = rodrigues_rot(j["axis"], th)
             T = T @ j["T_orig"] @ T_j
 
-        pos = T[:3, 3]
+        # Tool Center Point (TCP): extend along the roll axis of joint 4 by (L4 - d_roll)
+        if len(self.active_joints) >= 5:
+            j_roll = self.active_joints[4]
+            axis = np.array(j_roll["axis"], dtype=np.float64)
+            d_roll = float(np.linalg.norm(j_roll["xyz"]))
+            u_tool = T[:3, :3] @ axis
+            norm_u = np.linalg.norm(u_tool)
+            if norm_u > 1e-6:
+                u_tool /= norm_u
+            pos = T[:3, 3] + u_tool * (self.L4 - d_roll)
+        else:
+            pos = T[:3, 3]
+
         try:
             r = R.from_matrix(T[:3, :3])
             euler = r.as_euler('xyz')
@@ -1734,6 +1777,18 @@ class URDFKinematics:
             T_j[:3, :3] = rodrigues_rot(j["axis"], th)
             T = T @ j["T_orig"] @ T_j
             positions.append(T[:3, 3].copy())
+
+        # Extend chain to Tool Center Point (TCP) tip at distance L4
+        if len(self.active_joints) >= 5 and len(positions) >= 6:
+            j_roll = self.active_joints[4]
+            axis = np.array(j_roll["axis"], dtype=np.float64)
+            d_roll = float(np.linalg.norm(j_roll["xyz"]))
+            u_tool = T[:3, :3] @ axis
+            norm_u = np.linalg.norm(u_tool)
+            if norm_u > 1e-6:
+                u_tool /= norm_u
+            p_tcp = T[:3, 3] + u_tool * (self.L4 - d_roll)
+            positions.append(p_tcp)
         return positions
 
     def clip_joint_limits(self, joints_deg):
@@ -1749,18 +1804,28 @@ class URDFKinematics:
         target_pos_eff = target_pos.copy()
         target_pos_eff[2] = max(0.012, target_pos[2])
 
+        target_roll = 0.0
+        if len(target_pose) > 3 and np.isfinite(target_pose[3]):
+            target_roll = float(np.clip(target_pose[3], -np.radians(30.0), np.radians(30.0)))
+
         candidate_seeds = []
         if prev_joints is not None and len(prev_joints) >= self.num_joints:
-            candidate_seeds.append(np.radians(np.asarray(prev_joints[:self.num_joints], dtype=np.float64)))
+            prev_seed = np.radians(np.asarray(prev_joints[:self.num_joints], dtype=np.float64))
+            if len(prev_seed) > 4:
+                prev_seed[4] = float(np.clip(prev_seed[4], -np.radians(30.0), np.radians(30.0)))
+            candidate_seeds.append(prev_seed)
 
         # Natural heuristic seeds based on target quadrant and reach direction
         base_yaw = float(np.arctan2(target_pos[1], target_pos[0]) - self.reach_angle_rad)
         base_yaw = (base_yaw + np.pi) % (2 * np.pi) - np.pi
 
-        candidate_seeds.append(np.array([base_yaw, -0.52, 1.05, -0.52, 0.0][:self.num_joints]))
-        candidate_seeds.append(np.array([base_yaw, 0.52, -1.05, 0.52, 0.0][:self.num_joints]))
-        candidate_seeds.append(np.array([base_yaw, -1.05, 1.57, -0.52, 0.0][:self.num_joints]))
-        candidate_seeds.append(np.array([(lo + up) / 2.0 for lo, up in self.joint_limits]))
+        candidate_seeds.append(np.array([base_yaw, -0.52, 1.05, -0.52, target_roll][:self.num_joints]))
+        candidate_seeds.append(np.array([base_yaw, 0.52, -1.05, 0.52, target_roll][:self.num_joints]))
+        candidate_seeds.append(np.array([base_yaw, -1.05, 1.57, -0.52, target_roll][:self.num_joints]))
+        mid_seed = np.array([(lo + up) / 2.0 for lo, up in self.joint_limits])
+        if len(mid_seed) > 4:
+            mid_seed[4] = target_roll
+        candidate_seeds.append(mid_seed)
 
         wrist_idx = self.wrist_pitch_idx
         safe_max_rad = np.radians(self.q3_safe_max_deg)
@@ -1781,8 +1846,11 @@ class URDFKinematics:
                     w_val = q[wrist_idx]
                     if w_val > safe_max_rad:
                         wrist_penalty = 50.0 * ((w_val - safe_max_rad)**2)
+                roll_penalty = 0.0
+                if len(q) > 4:
+                    roll_penalty = 1.0 * ((q[4] - target_roll)**2)
                 reg = 1e-4 * np.sum((q - q_init)**2)
-                return pos_err + wrist_penalty + reg
+                return pos_err + wrist_penalty + roll_penalty + reg
 
             res = minimize(loss, q_init, method='L-BFGS-B', bounds=self.joint_limits, tol=1e-6)
             achieved_pose = self.forward_kinematics(res.x)
@@ -1822,7 +1890,7 @@ class URDFKinematics:
         res = self.solve_feasible_ik(target_pose, gripper_state=gripper_state, prev_joints=prev_joints)
         return res["joints"]
 
-    def smooth_joint_trajectory(self, joint_trajectory, fps=30.0, time_window_ms=200, soft_margin_ratio=0.08, max_deg_per_sec=180.0):
+    def smooth_joint_trajectory(self, joint_trajectory, fps=30.0, time_window_ms=200, soft_margin_ratio=0.08, max_deg_per_sec=120.0):
         joint_arr = np.asarray(joint_trajectory, dtype=np.float64)
         if len(joint_arr) == 0:
             return joint_arr.copy()
@@ -1838,6 +1906,9 @@ class URDFKinematics:
             hi_deg = float(np.degrees(self.joint_limits[j][1]))
             if j == self.wrist_pitch_idx and self.q3_safe_max_deg is not None:
                 hi_deg = min(hi_deg, float(self.q3_safe_max_deg))
+            if j == 4:
+                lo_deg = max(lo_deg, -35.0)
+                hi_deg = min(hi_deg, 35.0)
             arm_joints[:, j] = universal_soft_saturation(arm_joints[:, j], lo_deg, hi_deg, margin=0.5)
 
         # 2. Velocity slew rate limit
@@ -1869,7 +1940,18 @@ class URDFKinematics:
             hi_deg = float(np.degrees(self.joint_limits[j][1]))
             if j == self.wrist_pitch_idx and self.q3_safe_max_deg is not None:
                 hi_deg = min(hi_deg, float(self.q3_safe_max_deg))
+            if j == 4:
+                lo_deg = max(lo_deg, -35.0)
+                hi_deg = min(hi_deg, 35.0)
             arm_joints[:, j] = universal_soft_saturation(arm_joints[:, j], lo_deg, hi_deg, margin=0.5)
+
+        # Enforce the command-rate limit after smoothing as well: polynomial
+        # filtering must never reintroduce a motor jump.
+        if n_frames >= 2 and max_deg_per_sec is not None:
+            max_delta = float(max_deg_per_sec) / max(5.0, float(fps))
+            for i in range(1, n_frames):
+                delta = arm_joints[i] - arm_joints[i - 1]
+                arm_joints[i] = arm_joints[i - 1] + np.clip(delta, -max_delta, max_delta)
 
         if extra is not None:
             return np.hstack([arm_joints, extra]).astype(joint_arr.dtype)
@@ -2528,4 +2610,3 @@ if __name__ == "__main__":
     print("Roundtrip:   ", np.round(p_back, 3))
     assert np.allclose(p_aruco, p_back, atol=1e-5), "Calibrator roundtrip mismatch!"
     print("Calibrator Roundtrip PASSED!")
-

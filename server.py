@@ -257,6 +257,37 @@ def _validate_video(path: str):
         cap.release()
 
 
+def _validate_and_mark_reprocessed_episode(ep: dict):
+    """Fail closed, then promote a legacy episode only after a complete reprocess."""
+    video_path = ep.get("video_path", "")
+    frame_count, fps = _validate_video(video_path)
+    expected_lengths = {
+        "poses": len(ep.get("poses") or []),
+        "ee_poses": len(ep.get("ee_poses") or []),
+        "actions": len(ep.get("actions") or []),
+        "joint_states": len(ep.get("joint_states") or []),
+        "robot_ee_poses": len(ep.get("robot_ee_poses") or []),
+    }
+    errors = [f"{name} has {length} frames; video has {frame_count}"
+              for name, length in expected_lengths.items() if length != frame_count]
+    if errors:
+        raise ValueError("Reprocess validation failed: " + "; ".join(errors))
+
+    ep["num_frames"] = frame_count
+    ep["fps"] = fps
+    ep["duration"] = frame_count / fps
+    ep["timestamps"] = frame_timestamps(frame_count, fps)
+    ep["manifest"] = episode_manifest(
+        source_sha256=sha256_file(video_path),
+        frame_count=frame_count,
+        fps=fps,
+        imu_samples=len(ep.get("imu_data") or []),
+        config_snapshot=_config_snapshot(),
+        status="processed",
+        validation={"state": "passed", "errors": [], "trajectory_frames": frame_count},
+    )
+
+
 def _ensure_idle(operation: str):
     if PROCESSING_STATUS["is_processing"] or not PROCESSING_QUEUE.empty():
         raise ValueError(f"Cannot {operation} while recording processing is active")
@@ -298,6 +329,13 @@ def sync_episode_kinematics(ep):
             custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
             custom_urdf=ROBOT_CONFIG.get("custom_urdf")
         )
+        gripper_cfg = ROBOT_CONFIG.get("gripper_offset", {})
+        if hasattr(r_solver, "update_camera_extrinsics"):
+            r_solver.update_camera_extrinsics(
+                forward_cm=gripper_cfg.get("forward_cm"),
+                height_cm=gripper_cfg.get("height_cm"),
+                lateral_cm=gripper_cfg.get("lateral_cm")
+            )
         workspace_calibrator.reach_angle_rad = getattr(r_solver, "reach_angle_rad", 0.0)
         # Prioritize active (smoothed/filtered) poses over raw un-filtered poses
         base_poses = ep.get("poses") or ep.get("raw_poses", [])
@@ -343,7 +381,7 @@ def sync_episode_kinematics(ep):
 
         # 5. Smooth joint trajectory (Savitzky-Golay + slew-rate limiter)
         if hasattr(r_solver, "smooth_joint_trajectory"):
-            joints = r_solver.smooth_joint_trajectory(joints)
+            joints = r_solver.smooth_joint_trajectory(joints, fps=float(ep.get("fps", 30.0)))
 
         ep['joint_states'] = joints.tolist()
 
@@ -511,10 +549,16 @@ def load_episodes_from_disk():
                 }
     EPISODES_DB = loaded
 
-    # Sync kinematics for episodes that don't have pre-computed joint_states / robot_ee_poses
-    needs_sync = [ep for ep in EPISODES_DB if not ep.get('joint_states') or not ep.get('robot_ee_poses')]
+    # Sync kinematics for episodes that don't have pre-computed joint_states / robot_ee_poses or are missing TCP link positions
+    needs_sync = [
+        ep for ep in EPISODES_DB
+        if not ep.get('joint_states')
+        or not ep.get('robot_ee_poses')
+        or not ep.get('link_positions')
+        or (ep.get('link_positions') and len(ep['link_positions'][0]) < 7)
+    ]
     if needs_sync:
-        print(f"[{time.strftime('%H:%M:%S')}] 🔧 Computing kinematics for {len(needs_sync)} episode(s) missing joint_states...")
+        print(f"[{time.strftime('%H:%M:%S')}] 🔧 Computing kinematics for {len(needs_sync)} episode(s) needing TCP sync...")
         for ep in needs_sync:
             sync_episode_kinematics(ep)
 
@@ -2005,7 +2049,9 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
     target_ep['active_smoothing'] = {'method': smooth_method, 'time_window_ms': smooth_window_ms}
 
     # Re-sync full kinematics (joint_states, robot_ee_poses, fk_table_poses, actions) on filtered poses
-    sync_episode_kinematics(target_ep)
+    if sync_episode_kinematics(target_ep) is None:
+        raise ValueError("Authoritative kinematics validation failed")
+    _validate_and_mark_reprocessed_episode(target_ep)
     save_episode_meta(target_ep)
 
     return JSONResponse({
@@ -2288,14 +2334,9 @@ async def update_gripper_offset_endpoint(request: Request):
         updated_count = 0
         if apply_to_episodes:
             for ep in EPISODES_DB:
-                poses = ep.get("poses", [])
+                poses = ep.get("poses") or ep.get("raw_poses", [])
                 if poses and len(poses) > 0:
-                    ee_poses = camera_gripper_calibrator.transform_trajectory(poses, to_gripper=True)
-                    ep['ee_poses'] = ee_poses.tolist()
-                    actions = np.roll(ee_poses, -1, axis=0)
-                    actions[-1] = ee_poses[-1]
-                    ep['actions'] = actions.tolist()
-                    ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
+                    sync_episode_kinematics(ep)
                     save_episode_meta(ep)
                     updated_count += 1
 

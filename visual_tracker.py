@@ -1106,6 +1106,30 @@ class VisualInertialTracker:
         print("[Adaptive Calibration Tier 3] Using general smartphone prior (HFOV=78.0deg)")
         return self.estimate_camera_matrix(width, height, hfov_degrees=78.0)
 
+    @staticmethod
+    def limit_cartesian_speed(positions, fps=30.0, max_speed_mps=0.25):
+        """Apply a hard, frame-time-aware TCP speed limit without changing rotations.
+
+        Vision re-acquisition can yield a plausible-looking but physically unsafe
+        single-frame translation.  A polynomial smoother reduces noise but does
+        not guarantee a speed bound, so make that bound explicit for the path
+        used by preview, IK, and export.
+        """
+        limited = np.asarray(positions, dtype=np.float64).copy()
+        if len(limited) < 2:
+            return limited
+
+        safe_fps = max(5.0, float(fps))
+        max_step = max(1e-4, float(max_speed_mps) / safe_fps)
+        for index in range(1, len(limited)):
+            step = limited[index] - limited[index - 1]
+            distance = float(np.linalg.norm(step))
+            if not np.isfinite(distance):
+                limited[index] = limited[index - 1]
+            elif distance > max_step:
+                limited[index] = limited[index - 1] + step * (max_step / distance)
+        return limited
+
     def smooth_trajectory(self, poses, fps=30.0, method="savgol", time_window_ms=250):
         """
         Generalized Zero-Phase Trajectory Smoother for variable smartphone FPS:
@@ -1149,8 +1173,12 @@ class VisualInertialTracker:
             for d in range(3):
                 rot_smooth[:, d] = np.convolve(rot_pad[:, d], kernel, mode="valid")
 
+        # The arm must never inherit an unsafe visual re-acquisition jump.  This
+        # is deliberately after zero-phase smoothing so it is a final physical
+        # constraint, not a display-only cosmetic filter.
+        pos_safe = self.limit_cartesian_speed(pos_smooth, fps=fps_val, max_speed_mps=0.25)
         rot_normalized = (rot_smooth + np.pi) % (2 * np.pi) - np.pi
-        return np.hstack([pos_smooth, rot_normalized])
+        return np.hstack([pos_safe, rot_normalized])
 
     def _bridge_occlusion_intervals_umi(self, trajectory, video_detections, fps):
         """

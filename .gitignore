@@ -31,3 +31,9 @@ test_export_output/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Frontend build bundles
+frontend/dist/assets/index-*
+frontend/dist/assets/*.js
+frontend/dist/assets/*.css
+frontend/dist/assets/*.map

@@ -485,26 +485,27 @@ export default function Dashboard({
   const currentTcpZ = currentEePose[2] || 0;
   const distTcpToOrigin = Math.hypot(currentTcpX, currentTcpY, currentTcpZ);
 
+  function THREE_to_rad(deg) {
+    return (deg * Math.PI) / 180;
+  }
+
   // Compute Robot-Relative Coordinates using true Gripper TCP
   const ox = robotConfig?.offset_x ?? 0.038;
   const oy = robotConfig?.offset_y ?? -0.406;
   const oz = robotConfig?.offset_z ?? 0.00;
-  const yawRad = THREE_to_rad(robotConfig?.yaw_deg ?? 90.0);
+  const reachDeg = activeEp?.reach_angle_deg ?? robotConfig?.reach_angle_deg ?? 0.0;
+  const effectiveYawRad = THREE_to_rad((robotConfig?.yaw_deg ?? 90.0) - reachDeg);
 
   const dx = currentTcpX - ox;
   const dy = currentTcpY - oy;
   const dz = currentTcpZ - oz;
 
-  const cosY = Math.cos(yawRad);
-  const sinY = Math.sin(yawRad);
+  const cosY = Math.cos(effectiveYawRad);
+  const sinY = Math.sin(effectiveYawRad);
   const robotTcpX = cosY * dx + sinY * dy;
   const robotTcpY = -sinY * dx + cosY * dy;
   const robotTcpZ = dz;
   const distToRobot = Math.hypot(robotTcpX, robotTcpY, robotTcpZ);
-
-  function THREE_to_rad(deg) {
-    return (deg * Math.PI) / 180;
-  }
 
   const robotName = (robotConfig?.robot_type || 'so_arm101_omni_kin').toUpperCase().replace(/_/g, '-');
 
@@ -773,6 +774,7 @@ export default function Dashboard({
                 trajectoryPoses={poses}
                 eePoses={eePoses}
                 trajectoryRevision={previewRevision}
+                taskPrompt={activeEp?.task || ''}
                 gripperStates={activeEp?.gripper_states || []}
                 currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}
@@ -887,6 +889,7 @@ export default function Dashboard({
                 trajectoryPoses={poses}
                 eePoses={eePoses}
                 trajectoryRevision={previewRevision}
+                taskPrompt={activeEp?.task || ''}
                 gripperStates={activeEp?.gripper_states || []}
                 currentFrameIndex={safeFrameIndex}
                 robotConfig={robotConfig}

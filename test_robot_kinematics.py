@@ -259,6 +259,10 @@ def test_universal_soft_barrier_and_multi_robot_smoothing():
 
     assert np.all(smoothed_q[:, 3] <= 0.0 + 1e-4), f'Wrist pitch exceeded ceiling: {np.max(smoothed_q[:, 3])}'
     assert np.std(smooth_wrist_jerk) < np.std(raw_wrist_jerk) * 0.35, 'Smoothing must suppress jerk by >65%'
+    jumpy_q = np.zeros((T, 6))
+    jumpy_q[T // 2:, 1] = 70.0
+    bounded_q = solver_omni.smooth_joint_trajectory(jumpy_q, fps=30.0)
+    assert np.max(np.abs(np.diff(bounded_q[:, :5], axis=0))) <= 4.0 + 1e-5, 'Final trajectory must obey 120 deg/s slew cap'
     print(f'  OMNI-KIN Joint Smoothing Passed: Jerk std reduced from {np.std(raw_wrist_jerk):.3f} to {np.std(smooth_wrist_jerk):.3f} [OK]')
 
     # 3. Test on Custom 6-DOF Robot with wrist pitch at joint 4
@@ -281,6 +285,47 @@ def test_universal_soft_barrier_and_multi_robot_smoothing():
     print('[PASS] Universal Soft-Barrier & Multi-Robot Joint Smoothing verified!')
 
 
+def test_wrist_roll_regularization_and_gripper_extrinsics():
+    print('\n=== Test 8: Wrist Roll Regularization & Gripper Extrinsics ===')
+    solver = get_robot_solver('so_arm101_omni_kin')
+
+    # 1. Target with excessive positive roll (+80 deg) must be damped and clamped to <= 30 deg
+    target_high_roll = [0.0, -0.22, 0.15, float(np.radians(80.0)), 0.0, 0.0]
+    res_high = solver.solve_feasible_ik(target_high_roll)
+    roll_q4_high = res_high['joints'][4]
+    assert abs(roll_q4_high) <= 30.5, f'Wrist roll exceeded 30 deg: got {roll_q4_high:.2f} deg'
+    print(f'  Target roll=+80.0° -> Solved q4={roll_q4_high:.2f}° (properly bounded <= 30°) [OK]')
+
+    # 2. Target with excessive negative roll (-75 deg) must be damped and clamped to >= -30 deg
+    target_low_roll = [0.0, -0.22, 0.15, float(-np.radians(75.0)), 0.0, 0.0]
+    res_low = solver.solve_feasible_ik(target_low_roll)
+    roll_q4_low = res_low['joints'][4]
+    assert abs(roll_q4_low) <= 30.5, f'Wrist roll exceeded -30 deg: got {roll_q4_low:.2f} deg'
+    print(f'  Target roll=-75.0° -> Solved q4={roll_q4_low:.2f}° (properly bounded >= -30°) [OK]')
+
+    # 3. Gripper extrinsics update on URDFKinematics
+    solver.update_camera_extrinsics(forward_cm=15.0)
+    assert abs(solver.L4 - 0.15) < 1e-6, f'Expected L4=0.15, got {solver.L4}'
+    print('  URDFKinematics update_camera_extrinsics(forward_cm=15.0) sets L4=0.15m [OK]')
+
+    # 4. Gripper extrinsics update on DHKinematics
+    from robot_kinematics import SO101_DH_TABLE
+    solver_dh = DHKinematics(SO101_DH_TABLE, model_name="SO-101-DH")
+    solver_dh.update_camera_extrinsics(forward_cm=14.5)
+    assert abs(solver_dh.L4 - 0.145) < 1e-6, f'Expected DH L4=0.145, got {solver_dh.L4}'
+    assert abs(solver_dh.max_reach - (solver_dh.L2 + solver_dh.L3 + 0.145)) < 1e-6
+    print('  DHKinematics update_camera_extrinsics(forward_cm=14.5) sets L4=0.145m and updates max_reach [OK]')
+
+    # 5. Trajectory smoother bounds wild roll jumps
+    wild_traj = np.zeros((30, 6))
+    wild_traj[:, 4] = np.linspace(-60.0, 60.0, 30)
+    smoothed = solver.smooth_joint_trajectory(wild_traj, fps=30.0)
+    assert np.all(np.abs(smoothed[:, 4]) <= 35.5), f'Smoothed roll exceeded 35 deg: {np.max(np.abs(smoothed[:, 4]))}'
+    print(f'  Wild roll trajectory (-60° to +60°) smoothed to max {np.max(np.abs(smoothed[:, 4])):.2f}° <= 35° [OK]')
+
+    print('[PASS] Wrist Roll Regularization & Gripper Extrinsics verified!')
+
+
 if __name__ == '__main__':
     test_dh_tables_and_specs()
     test_omnikin_forward_inverse_consistency()
@@ -290,6 +335,7 @@ if __name__ == '__main__':
     test_feasible_ik_and_auto_align()
     test_camera_gripper_calibrator()
     test_universal_soft_barrier_and_multi_robot_smoothing()
+    test_wrist_roll_regularization_and_gripper_extrinsics()
     print('\nALL ROBOT KINEMATICS & WORKSPACE CALIBRATION TESTS PASSED!')
 
 

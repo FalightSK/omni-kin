@@ -274,6 +274,7 @@ export default function App() {
             robotConfig={robotConfig}
             trajectoryMode={trajectoryMode}
             onTrajectoryModeChange={setTrajectoryMode}
+            onEpisodesChanged={fetchEpisodes}
           />
         </div>
       )}
