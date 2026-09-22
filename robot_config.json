@@ -1,7 +1,7 @@
 {
   "robot_type": "so_arm101_omni_kin",
-  "offset_x": 0.12,
-  "offset_y": -0.305,
+  "offset_x": 0.116,
+  "offset_y": -0.326,
   "offset_z": 0.0,
   "yaw_deg": 90.0,
   "q3_safe_max_deg": 45.0,
@@ -23,6 +23,12 @@
     "yaw_deg": 0,
     "gripper": 100,
     "enabled": true
+  },
+  "base_preset": {
+    "offset_x": 0.038,
+    "offset_y": -0.406,
+    "offset_z": 0.0,
+    "yaw_deg": 90.0
   },
   "gripper_marker_tracking": {
     "enabled": true,

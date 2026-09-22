@@ -117,6 +117,119 @@ def test_lerobot_export(tmp_path):
     assert info_json['total_episodes'] == 2
     print(f"[OK] meta/info.json validated. Robot: {info_json['robot_type']}, Total Episodes: {info_json['total_episodes']}")
 
+
+def test_export_recalculates_on_base_position_change(tmp_path):
+    print("\n=== Testing Export Recalculates on Base Position Change ===")
+    video_path = tmp_path / "ep.mp4"
+    _write_test_video(video_path, 30)
+
+    # 30 frames of Cartesian waypoints in table frame
+    poses = np.zeros((30, 6), dtype=np.float64)
+    poses[:, 0] = np.linspace(0.0, 0.15, 30)
+    poses[:, 1] = np.linspace(0.1, 0.25, 30)
+    poses[:, 2] = 0.10
+
+    episode = {
+        'episode_index': 0,
+        'task': 'reach to marker',
+        'video_path': str(video_path),
+        'poses': poses.tolist(),
+        'gripper_states': [100.0] * 30,
+        'timestamps': np.linspace(0, 1.0, 30).tolist()
+    }
+
+    exporter = LeRobotExporter(output_dir=str(tmp_path / "exports_base_a"), fps=30)
+    exporter.set_robot_config(
+        robot_type="so_arm101_omni_kin",
+        offset_x=0.038,
+        offset_y=-0.406,
+        offset_z=0.00,
+        yaw_deg=90.0
+    )
+    export_path_a = exporter.export_dataset([episode], dataset_name="base_a_dataset", use_timestamp=False)
+    df_a = pd.read_parquet(os.path.join(export_path_a, "data", "chunk-000", "file-000.parquet"))
+    joints_a = np.array(df_a["observation.state"].tolist())
+    assert episode.get("workspace_calibration") is not None
+    assert episode["workspace_calibration"]["offset_x"] == 0.038
+
+    # Now change base position for this episode to Base B
+    episode["workspace_calibration"] = {
+        "offset_x": 0.100,
+        "offset_y": -0.350,
+        "offset_z": 0.02,
+        "yaw_deg": 80.0
+    }
+    episode["kinematics_stale"] = True
+    export_path_b = exporter.export_dataset([episode], dataset_name="base_b_dataset", use_timestamp=False)
+    df_b = pd.read_parquet(os.path.join(export_path_b, "data", "chunk-000", "file-000.parquet"))
+    joints_b = np.array(df_b["observation.state"].tolist())
+
+    # Joint trajectories MUST differ because base position changed
+    diff = np.max(np.abs(joints_a[:, :5] - joints_b[:, :5]))
+    assert diff > 1.0, f"Expected joint angles to change with base position, but max diff was {diff}°"
+    assert episode["workspace_calibration"]["offset_x"] == 0.100
+    print(f"[OK] Export successfully recalculated joint states for new base (max delta: {diff:.2f}°)")
+
+
+def test_multi_episode_independent_base_export(tmp_path):
+    print("\n=== Testing Multi-Episode Independent Base Export ===")
+    video_a = tmp_path / "ep_a.mp4"
+    video_b = tmp_path / "ep_b.mp4"
+    _write_test_video(video_a, 30)
+    _write_test_video(video_b, 30)
+
+    poses = np.zeros((30, 6), dtype=np.float64)
+    poses[:, 0] = np.linspace(0.0, 0.15, 30)
+    poses[:, 1] = np.linspace(0.1, 0.25, 30)
+    poses[:, 2] = 0.10
+
+    ep_a = {
+        'episode_index': 0,
+        'task': 'reach A',
+        'video_path': str(video_a),
+        'poses': poses.tolist(),
+        'gripper_states': [100.0] * 30,
+        'timestamps': np.linspace(0, 1.0, 30).tolist(),
+        'workspace_calibration': {
+            'offset_x': 0.038,
+            'offset_y': -0.406,
+            'offset_z': 0.00,
+            'yaw_deg': 90.0
+        }
+    }
+
+    ep_b = {
+        'episode_index': 1,
+        'task': 'reach B',
+        'video_path': str(video_b),
+        'poses': poses.tolist(),
+        'gripper_states': [100.0] * 30,
+        'timestamps': np.linspace(0, 1.0, 30).tolist(),
+        'workspace_calibration': {
+            'offset_x': 0.150,
+            'offset_y': -0.350,
+            'offset_z': 0.05,
+            'yaw_deg': 60.0
+        }
+    }
+
+    exporter = LeRobotExporter(output_dir=str(tmp_path / "exports_multi"), fps=30)
+    export_path = exporter.export_dataset([ep_a, ep_b], dataset_name="multi_base_dataset", use_timestamp=False)
+    df = pd.read_parquet(os.path.join(export_path, "data", "chunk-000", "file-000.parquet"))
+
+    df_a = df[df["episode_index"] == 0]
+    df_b = df[df["episode_index"] == 1]
+
+    joints_a = np.array(df_a["observation.state"].tolist())
+    joints_b = np.array(df_b["observation.state"].tolist())
+
+    diff = np.max(np.abs(joints_a[:, :5] - joints_b[:, :5]))
+    assert diff > 1.0, f"Expected different joints for different base calibrations, got max diff {diff}°"
+    assert ep_a["workspace_calibration"]["offset_x"] == 0.038
+    assert ep_b["workspace_calibration"]["offset_x"] == 0.150
+    print(f"[OK] Multi-episode export preserved independent base calibrations and distinct joint trajectories (diff: {diff:.2f}°)")
+
+
 if __name__ == "__main__":
     test_kinematics()
     test_trajectory_estimator()

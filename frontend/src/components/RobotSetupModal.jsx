@@ -18,7 +18,9 @@ import {
   AlertTriangle,
   ShieldCheck,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Bookmark,
+  Save
 } from 'lucide-react';
 
 export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfigSaved, initialTab = 'offset' }) {
@@ -111,7 +113,7 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
       const res = await fetch('/api/robot/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
+        body: JSON.stringify({ ...config, apply_to_episodes: true })
       });
       const data = await res.json();
       if (data.status === 'success') {
@@ -596,29 +598,50 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                 <span className="text-[11px] text-neutral-400 mr-1">Presets:</span>
                 <button
                   type="button"
-                  onClick={() => applyPresetPosition(0.038, -0.406, 90)}
-                  className="px-2.5 py-1 rounded-lg bg-white hover:bg-neutral-200 text-black text-[11px] font-medium transition-colors shadow-sm"
+                  onClick={() => applyPresetPosition(
+                    config.base_preset?.offset_x ?? 0.038,
+                    config.base_preset?.offset_y ?? -0.406,
+                    config.base_preset?.yaw_deg ?? 90
+                  )}
+                  className="px-2.5 py-1 rounded-lg bg-white hover:bg-neutral-200 text-black text-[11px] font-semibold transition-colors shadow-sm flex items-center gap-1"
+                  title="Apply current preset base position"
                 >
-                  ⭐ Front Table (-41cm, 90°)
+                  <Bookmark className="w-3 h-3 text-neutral-700" />
+                  <span>Preset ({((config.base_preset?.offset_x ?? 0.038) * 100).toFixed(0)}cm, {((config.base_preset?.offset_y ?? -0.406) * 100).toFixed(0)}cm, {(config.base_preset?.yaw_deg ?? 90).toFixed(0)}°)</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => applyPresetPosition(0.20, 0.00, 0)}
-                  className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-[11px] border border-neutral-800 transition-colors"
+                  onClick={() => {
+                    const newPreset = {
+                      offset_x: config.offset_x,
+                      offset_y: config.offset_y,
+                      offset_z: config.offset_z,
+                      yaw_deg: config.yaw_deg
+                    };
+                    setConfig((prev) => ({ ...prev, base_preset: newPreset }));
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 text-[11px] border border-neutral-700 transition-colors flex items-center gap-1"
+                  title="Save current slider values as the default Preset position"
                 >
-                  Right (+20cm)
+                  <Save className="w-3 h-3 text-neutral-400" />
+                  <span>Set Current as Preset</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => applyPresetPosition(0.00, 0.20, -90)}
-                  className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-[11px] border border-neutral-800 transition-colors"
+                  onClick={() => {
+                    const defPreset = { offset_x: 0.038, offset_y: -0.406, offset_z: 0.0, yaw_deg: 90.0 };
+                    setConfig((prev) => ({ ...prev, base_preset: defPreset }));
+                    applyPresetPosition(0.038, -0.406, 90);
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-400 text-[11px] border border-neutral-800 transition-colors"
+                  title="Reset preset to default front table position (-41cm, 90°)"
                 >
-                  Behind (+20cm)
+                  Reset Default (-41cm, 90°)
                 </button>
                 <button
                   type="button"
                   onClick={() => applyPresetPosition(0.00, 0.00, 0)}
-                  className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-[11px] border border-neutral-800 transition-colors flex items-center gap-1"
+                  className="px-2.5 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-400 text-[11px] border border-neutral-800 transition-colors flex items-center gap-1"
                 >
                   <RotateCcw className="w-3 h-3 text-neutral-500" />
                   <span>Origin (0,0)</span>

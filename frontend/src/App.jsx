@@ -236,7 +236,10 @@ export default function App() {
               onUpdateEpisodePoses={handleReprocessComplete}
               onUpdateEpisodeTask={handleUpdateEpisodeTask}
               robotConfig={robotConfig}
-              onUpdateRobotConfig={(newCfg) => setRobotConfig(newCfg)}
+              onUpdateRobotConfig={(newCfg) => {
+                setRobotConfig(newCfg);
+                fetchEpisodes();
+              }}
               onOpenRobotModal={handleOpenRobotModal}
               onOpenEkfModal={() => setIsEkfModalOpen(true)}
               trajectoryMode={trajectoryMode}

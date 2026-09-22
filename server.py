@@ -101,7 +101,13 @@ def load_robot_config():
             "yaw_deg": 0.0,
             "enabled": True
         },
-        "initial_position": dict(DEFAULT_INITIAL_POSITION)
+        "initial_position": dict(DEFAULT_INITIAL_POSITION),
+        "base_preset": {
+            "offset_x": 0.038,
+            "offset_y": -0.406,
+            "offset_z": 0.00,
+            "yaw_deg": 90.0
+        }
     }
     if os.path.exists(ROBOT_CONFIG_FILE):
         try:
@@ -118,6 +124,16 @@ def load_robot_config():
                     saved["initial_position"] = default_cfg["initial_position"]
                 else:
                     default_cfg["initial_position"].update(saved["initial_position"])
+                # Ensure base_preset subkeys exist (defaults to recommended layout)
+                if "base_preset" not in saved:
+                    default_cfg["base_preset"] = {
+                        "offset_x": 0.038,
+                        "offset_y": -0.406,
+                        "offset_z": 0.00,
+                        "yaw_deg": 90.0
+                    }
+                else:
+                    default_cfg["base_preset"].update(saved["base_preset"])
         except Exception as e:
             print(f"Warning loading {ROBOT_CONFIG_FILE}: {e}")
     return default_cfg
@@ -316,11 +332,12 @@ def save_episode_meta(ep_data):
     except Exception as e:
         print(f"Error saving episode metadata: {e}")
 
-def sync_episode_kinematics(ep):
+def sync_episode_kinematics(ep, calib=None):
     """
     Computes and stores server-side joint_states, robot_ee_poses, and actions for an episode.
     These are used by the frontend Viewport3D for 1:1 export/preview parity without client-side IK re-solve.
-    Dynamically adheres to any loaded URDF data / custom_dh_table.
+    Dynamically adheres to any loaded URDF data / custom_dh_table and respects each episode's
+    independent optimal workspace base position.
     """
     try:
         r_solver = get_robot_solver(
@@ -336,7 +353,9 @@ def sync_episode_kinematics(ep):
                 height_cm=gripper_cfg.get("height_cm"),
                 lateral_cm=gripper_cfg.get("lateral_cm")
             )
-        workspace_calibrator.reach_angle_rad = getattr(r_solver, "reach_angle_rad", 0.0)
+        reach_rad = getattr(r_solver, "reach_angle_rad", 0.0)
+        workspace_calibrator.reach_angle_rad = reach_rad
+
         # Prioritize active (smoothed/filtered) poses over raw un-filtered poses
         base_poses = ep.get("poses") or ep.get("raw_poses", [])
         if not base_poses or len(base_poses) == 0:
@@ -349,8 +368,31 @@ def sync_episode_kinematics(ep):
         ep['ee_poses'] = ee_table.tolist()
         ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
 
-        # 2. Table frame → Robot base frame
-        ee_robot = workspace_calibrator.transform_trajectory(ee_table, to_robot=True)
+        # Resolve episode's independent base calibration
+        if calib is not None:
+            active_calib = dict(calib)
+        elif ep.get('workspace_calibration'):
+            active_calib = dict(ep['workspace_calibration'])
+        else:
+            # Default base position is OPTIMAL, computed independently for this episode's trajectory
+            temp_calibrator = WorkspaceCalibrator(reach_angle_rad=reach_rad)
+            opt = temp_calibrator.auto_align_to_trajectory(ee_table, nominal_reach=0.24, default_yaw=90.0)
+            active_calib = dict(opt)
+
+        active_calib["reach_angle_rad"] = reach_rad
+        active_calib["reach_angle_deg"] = float(np.degrees(reach_rad))
+        ep_calibrator = WorkspaceCalibrator(
+            offset_x=float(active_calib.get("offset_x", 0.038)),
+            offset_y=float(active_calib.get("offset_y", -0.406)),
+            offset_z=float(active_calib.get("offset_z", 0.00)),
+            yaw_deg=float(active_calib.get("yaw_deg", 90.0)),
+            reach_angle_rad=reach_rad
+        )
+
+        # 2. Table frame → Robot base frame (using episode-specific independent calibration)
+        ee_robot = ep_calibrator.transform_trajectory(ee_table, to_robot=True)
+        ep['workspace_calibration'] = copy.deepcopy(ep_calibrator.get_config())
+        ep['robot_type'] = ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin")
 
         # 3. Normalize gripper states [0, 1]
         grippers = np.array(ep.get("gripper_states", [100.0] * len(ee_robot)), dtype=np.float32)
@@ -403,7 +445,7 @@ def sync_episode_kinematics(ep):
         ep['reach_angle_deg'] = getattr(r_solver, "reach_angle_deg", 0.0)
 
         # 6b. Reproject FK robot EE poses to table frame (for exact 3D preview tube parity)
-        fk_table = workspace_calibrator.transform_trajectory(fk_robot, to_robot=False)
+        fk_table = ep_calibrator.transform_trajectory(fk_robot, to_robot=False)
         ep['fk_table_poses'] = np.array(fk_table, dtype=np.float32).tolist()
         # The mounted-camera preview must follow the same calibrated transform as
         # the processed TCP, including after joint smoothing changes the FK pose.
@@ -555,6 +597,7 @@ def load_episodes_from_disk():
         if not ep.get('joint_states')
         or not ep.get('robot_ee_poses')
         or not ep.get('link_positions')
+        or not ep.get('workspace_calibration')
         or (ep.get('link_positions') and len(ep['link_positions'][0]) < 7)
     ]
     if needs_sync:
@@ -752,6 +795,20 @@ def _sync_execute_processing_job(job):
         EPISODES_DB.append(episode_data)
     save_episode_meta(episode_data)
     _save_job_manifest(job, "processed")
+
+    # Default base position as optimal for the new episode trajectory
+    poses_for_opt = episode_data.get("ee_poses") or episode_data.get("poses")
+    if poses_for_opt and len(poses_for_opt) > 0:
+        opt_arr = np.asarray(poses_for_opt, dtype=np.float64)
+        if opt_arr.ndim == 2 and opt_arr.shape[1] >= 3 and np.isfinite(opt_arr[:, :3]).all():
+            opt_calib = workspace_calibrator.auto_align_to_trajectory(opt_arr, nominal_reach=0.24, default_yaw=90.0)
+            calibrated = dict(opt_calib)
+            r_solver_ep = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"))
+            calibrated["reach_angle_rad"] = getattr(r_solver_ep, "reach_angle_rad", 0.0)
+            ROBOT_CONFIG.update(calibrated)
+            workspace_calibrator.update_config(**calibrated)
+            save_robot_config(ROBOT_CONFIG)
+
     sync_episode_kinematics(episode_data)
     if not episode_data.get("joint_states") or not episode_data.get("robot_ee_poses"):
         with EPISODE_LOCK:
@@ -2252,6 +2309,12 @@ async def update_robot_config(request: Request):
                 ROBOT_CONFIG["gripper_marker_tracking"] = {}
             ROBOT_CONFIG["gripper_marker_tracking"].update(payload["gripper_marker_tracking"])
             visual_tracker.configure_gripper_markers(ROBOT_CONFIG["gripper_marker_tracking"])
+        if "base_preset" in payload and isinstance(payload["base_preset"], dict):
+            if "base_preset" not in ROBOT_CONFIG:
+                ROBOT_CONFIG["base_preset"] = {}
+            for k in ("offset_x", "offset_y", "offset_z", "yaw_deg"):
+                if k in payload["base_preset"]:
+                    ROBOT_CONFIG["base_preset"][k] = float(payload["base_preset"][k])
 
         r_solver_up = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
@@ -2281,12 +2344,21 @@ async def update_robot_config(request: Request):
             custom_dh_table=ROBOT_CONFIG.get("custom_dh_table")
         )
 
-        print(f"[{time.strftime('%H:%M:%S')}] 🤖 Robot Config Updated: Model={ROBOT_CONFIG['robot_type']}, Offset=({ROBOT_CONFIG['offset_x']:.2f}m, {ROBOT_CONFIG['offset_y']:.2f}m, Yaw={ROBOT_CONFIG['yaw_deg']:.1f}°), q3_safe_max={ROBOT_CONFIG.get('q3_safe_max_deg', 0.0)}°")
+        updated_count = 0
+        if payload.get("apply_to_episodes", False) or payload.get("recalculate", False):
+            for ep in EPISODES_DB:
+                poses = ep.get("poses") or ep.get("raw_poses", [])
+                if poses and len(poses) > 0:
+                    sync_episode_kinematics(ep)
+                    updated_count += 1
+
+        print(f"[{time.strftime('%H:%M:%S')}] 🤖 Robot Config Updated: Model={ROBOT_CONFIG['robot_type']}, Offset=({ROBOT_CONFIG['offset_x']:.2f}m, {ROBOT_CONFIG['offset_y']:.2f}m, Yaw={ROBOT_CONFIG['yaw_deg']:.1f}°), q3_safe_max={ROBOT_CONFIG.get('q3_safe_max_deg', 0.0)}° (Synced {updated_count} episodes)")
 
         return JSONResponse({
             "status": "success",
             "message": "Robot configuration updated successfully",
-            "config": ROBOT_CONFIG
+            "config": ROBOT_CONFIG,
+            "episodes_updated": updated_count
         })
     except Exception as err:
         return JSONResponse({
@@ -2443,33 +2515,22 @@ async def recalculate_trajectory_endpoint(request: Request):
 
         updated_count = 0
         for ep in target_episodes:
-            # Use raw_poses if available or poses
             base_poses = ep.get("raw_poses") or ep.get("poses", [])
             if not base_poses or len(base_poses) == 0:
                 continue
 
+            target_calib = None
+            if new_config and isinstance(new_config, dict) and any(k in new_config for k in ("offset_x", "offset_y", "offset_z", "yaw_deg")):
+                target_calib = {
+                    "offset_x": float(new_config.get("offset_x", ROBOT_CONFIG["offset_x"])),
+                    "offset_y": float(new_config.get("offset_y", ROBOT_CONFIG["offset_y"])),
+                    "offset_z": float(new_config.get("offset_z", ROBOT_CONFIG["offset_z"])),
+                    "yaw_deg": float(new_config.get("yaw_deg", ROBOT_CONFIG["yaw_deg"])),
+                    "reach_angle_rad": getattr(r_solver, "reach_angle_rad", 0.0)
+                }
+
             # Full kinematics sync: ee_poses, joint_states, robot_ee_poses, actions (FK-synchronized)
-            sync_episode_kinematics(ep)
-
-            # Compute IK feasibility metrics in robot base frame
-            ee_poses_arr = np.asarray(ep.get('ee_poses', base_poses), dtype=np.float64)
-            robot_poses = workspace_calibrator.transform_trajectory(ee_poses_arr, to_robot=True)
-            feasible_count = 0
-            errors = []
-            for p in robot_poses:
-                res = r_solver.solve_feasible_ik(p)
-                if res.get("is_feasible"):
-                    feasible_count += 1
-                errors.append(res.get("error_distance_cm", 0.0))
-
-            feasibility_pct = round(feasible_count / max(1, len(robot_poses)) * 100.0, 1)
-            avg_err_cm = round(float(np.mean(errors)) if errors else 0.0, 2)
-            ep['ik_feasibility'] = {
-                "feasible_percent": feasibility_pct,
-                "avg_error_cm": avg_err_cm
-            }
-
-            save_episode_meta(ep)
+            sync_episode_kinematics(ep, calib=target_calib)
             updated_count += 1
 
         print(f"[{time.strftime('%H:%M:%S')}] 🔄 Recalculated trajectories for {updated_count} episode(s) based on active robot setup: {ROBOT_CONFIG.get('robot_type')} @ ({ROBOT_CONFIG.get('offset_x')}m, {ROBOT_CONFIG.get('offset_y')}m, Yaw={ROBOT_CONFIG.get('yaw_deg')}°)")
@@ -2500,19 +2561,31 @@ async def auto_align_robot_endpoint(request: Request):
     try:
         _ensure_idle("auto-align the robot base")
         payload = await request.json()
-        mode = str(payload.get("mode", "start")).lower()
+        mode = str(payload.get("mode", "optimal")).lower()
         ep_id = payload.get("episode_id")
 
         target_ep = None
-        if ep_id:
+        if ep_id is not None and str(ep_id).strip() != "":
             target_ep = next((ep for ep in EPISODES_DB if str(ep.get("episode_id")) == str(ep_id)
                               or str(ep.get("episode_index")) == str(ep_id)), None)
         if not target_ep and EPISODES_DB:
             target_ep = EPISODES_DB[-1]
 
-        # The recommended layout is deterministic and does not require an episode.
-        if mode == "recommended":
-            new_calib = workspace_calibrator.get_recommended_layout()
+        # Preset mode: applies user-adjusted preset (defaults to recommended layout: X=0.038, Y=-0.406, Yaw=90)
+        if mode in ("preset", "recommended"):
+            preset = ROBOT_CONFIG.get("base_preset") or {
+                "offset_x": 0.038,
+                "offset_y": -0.406,
+                "offset_z": 0.00,
+                "yaw_deg": 90.0
+            }
+            workspace_calibrator.update_config(
+                offset_x=float(preset.get("offset_x", 0.038)),
+                offset_y=float(preset.get("offset_y", -0.406)),
+                offset_z=float(preset.get("offset_z", 0.00)),
+                yaw_deg=float(preset.get("yaw_deg", 90.0))
+            )
+            new_calib = workspace_calibrator.get_config()
         elif not target_ep:
             return JSONResponse({"status": "error", "message": "No episodes available to align to."}, status_code=400)
         else:
@@ -2523,6 +2596,7 @@ async def auto_align_robot_endpoint(request: Request):
             poses_arr = np.asarray(poses, dtype=np.float64)
             if poses_arr.ndim != 2 or poses_arr.shape[1] < 3 or not np.isfinite(poses_arr[:, :3]).all():
                 return JSONResponse({"status": "error", "message": "Selected episode contains invalid pose data."}, status_code=400)
+
         r_solver = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
@@ -2536,7 +2610,7 @@ async def auto_align_robot_endpoint(request: Request):
             new_calib = workspace_calibrator.auto_align_to_trajectory(poses_arr, nominal_reach=0.24, default_yaw=90.0)
         elif mode == "start":
             new_calib = workspace_calibrator.auto_align_base_to_start(poses_arr[0], nominal_reach=0.22, default_yaw=90.0)
-        elif mode != "recommended":
+        elif mode not in ("preset", "recommended"):
             return JSONResponse({"status": "error", "message": f"Unsupported auto-align mode: {mode}"}, status_code=400)
 
         # get_config() includes the previous reach angle. Replace it with the
@@ -2556,17 +2630,37 @@ async def auto_align_robot_endpoint(request: Request):
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
         )
 
-        # Calibration-only API: return as soon as the base transform is stored.
-        # IK, smoothing, camera processing, and episode persistence are explicit
-        # operations and must never run as a side effect of this button.
-        print(f"[{time.strftime('%H:%M:%S')}] 🎯 Auto-Aligned Robot Base ({mode}): Offset=({ROBOT_CONFIG['offset_x']:.3f}m, {ROBOT_CONFIG['offset_y']:.3f}m, Yaw={ROBOT_CONFIG['yaw_deg']}°) [calibration-only]")
+        # Recalculate kinematics for target episode (and all episodes if requested)
+        feasibility = None
+        if target_ep:
+            feasibility = sync_episode_kinematics(target_ep, calib=calibrated_config)
+
+        if payload.get("all_episodes", False):
+            for ep in EPISODES_DB:
+                if ep != target_ep:
+                    if mode == "optimal":
+                        ep_poses = ep.get("ee_poses") or ep.get("poses")
+                        if ep_poses and len(ep_poses) > 0:
+                            ep_arr = np.asarray(ep_poses, dtype=np.float64)
+                            if ep_arr.ndim == 2 and ep_arr.shape[1] >= 3 and np.isfinite(ep_arr[:, :3]).all():
+                                ep_opt = workspace_calibrator.auto_align_to_trajectory(ep_arr, nominal_reach=0.24, default_yaw=90.0)
+                                ep_calib = dict(ep_opt)
+                                ep_calib["reach_angle_rad"] = reach_rad
+                                sync_episode_kinematics(ep, calib=ep_calib)
+                                continue
+                    sync_episode_kinematics(ep, calib=calibrated_config if mode != "optimal" else None)
+
+        feas_pct = feasibility.get("feasible_percent") if feasibility else None
+        avg_err = feasibility.get("avg_error_cm") if feasibility else None
+        print(f"[{time.strftime('%H:%M:%S')}] 🎯 Auto-Aligned Robot Base ({mode}): Offset=({ROBOT_CONFIG['offset_x']:.3f}m, {ROBOT_CONFIG['offset_y']:.3f}m, Yaw={ROBOT_CONFIG['yaw_deg']}°) & Synced Kinematics (Feasible={feas_pct}%)")
         return JSONResponse({
             "status": "success",
-            "message": f"Robot base calibration applied ({mode})",
+            "message": f"Robot base calibration applied and kinematics synced ({mode})",
             "config": ROBOT_CONFIG,
-            "calibration_only": True,
-            "feasibility_percent": None,
-            "avg_error_cm": None,
+            "feasibility_percent": feas_pct,
+            "avg_error_cm": avg_err,
+            "episode_id": target_ep.get("episode_id") if target_ep else None,
+            "episode_index": target_ep.get("episode_index") if target_ep else None
         })
     except Exception as err:
         return JSONResponse({
@@ -2840,6 +2934,13 @@ async def export_lerobot(request: Request = None):
         )
         use_ts = bool(payload.get("use_timestamp", True))
         ds_name = dataset_slug(payload.get("dataset_name", "mobile_aruco_3d_trajectories"))
+
+        # Ensure each episode has its own workspace calibration and synchronized kinematics
+        for ep in EPISODES_DB:
+            if not ep.get("workspace_calibration") or ep.get("joint_states") is None:
+                print(f"[{time.strftime('%H:%M:%S')}] 🔄 Auto-syncing kinematics for episode {ep.get('episode_id', '?')} before export...")
+                sync_episode_kinematics(ep)
+
         export_path = lerobot_exporter.export_dataset(
             EPISODES_DB,
             dataset_name=ds_name,

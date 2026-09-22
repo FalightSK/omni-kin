@@ -177,6 +177,26 @@ class LeRobotExporter:
             num_frames = 30
 
         orig_num_frames = num_frames
+
+        # Resolve episode's independent workspace calibration
+        ep_calib = ep.get('workspace_calibration')
+        if ep_calib and isinstance(ep_calib, dict):
+            ep_calibrator = WorkspaceCalibrator(
+                offset_x=float(ep_calib.get("offset_x", 0.038)),
+                offset_y=float(ep_calib.get("offset_y", -0.406)),
+                offset_z=float(ep_calib.get("offset_z", 0.00)),
+                yaw_deg=float(ep_calib.get("yaw_deg", 90.0)),
+                reach_angle_rad=getattr(self.ik_solver, "reach_angle_rad", 0.0)
+            )
+        else:
+            ep_calibrator = self.workspace_calibrator
+            ep['workspace_calibration'] = ep_calibrator.get_config()
+
+        # Invalidate cached kinematics if explicitly marked stale
+        if ep.get('kinematics_stale', False) and raw_poses is not None and len(raw_poses) > 0:
+            raw_robot_ee = None
+            raw_joints = None
+
         has_server_parity = bool(
             raw_joints is not None and len(raw_joints) == orig_num_frames and
             raw_robot_ee is not None and len(raw_robot_ee) == orig_num_frames
@@ -187,7 +207,7 @@ class LeRobotExporter:
             ee_poses = np.asarray(raw_robot_ee, dtype=np.float32)
         elif raw_poses is not None and len(raw_poses) == num_frames:
             raw_arr = np.asarray(raw_poses, dtype=np.float64)
-            ee_poses = self.workspace_calibrator.transform_trajectory(raw_arr, to_robot=True).astype(np.float32)
+            ee_poses = ep_calibrator.transform_trajectory(raw_arr, to_robot=True).astype(np.float32)
         else:
             ee_poses = np.zeros((num_frames, 6), dtype=np.float32)
             ee_poses[:, 0] = 0.24
@@ -265,7 +285,7 @@ class LeRobotExporter:
         prepend_approach_frames = 0
         if str(trajectory_mode).lower() == "initial_aware" and len(ee_poses) > 0:
             try:
-                planner = TrajectoryPlanner(solver=self.ik_solver, workspace_calibrator=self.workspace_calibrator)
+                planner = TrajectoryPlanner(solver=self.ik_solver, workspace_calibrator=ep_calibrator)
                 p_start_robot = ee_poses[0]
                 start_grip = float(grippers[0]) if len(grippers) > 0 else 1.0
 
@@ -311,6 +331,7 @@ class LeRobotExporter:
         actions[-1] = joint_states[-1]
         # 7. Resolve Timestamps
         timestamps = np.asarray(frame_timestamps(num_frames, self.fps), dtype=np.float32)
+        ep['workspace_calibration'] = ep_calibrator.get_config()
 
         return joint_states, ee_poses, actions, timestamps, num_frames, trim_info, prepend_approach_frames
 

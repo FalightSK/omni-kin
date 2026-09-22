@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d, Crosshair, Sparkles, CheckCircle2, AlertTriangle, Layers, Bot, Camera } from 'lucide-react';
+import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d, Crosshair, Sparkles, CheckCircle2, AlertTriangle, Layers, Bot, Camera, Bookmark } from 'lucide-react';
 
 // ==============================================================================
 // 5-DOF Robot Inverse Kinematics Engine (with Impossible Kinematics Handling)
@@ -1822,7 +1822,7 @@ export default function Viewport3D({
     onTheFlyTrajectory
   ]);
 
-  const handleAutoAlign = async (mode = 'start') => {
+  const handleAutoAlign = async (mode = 'optimal') => {
     setIsAligning(true);
     try {
       const resp = await fetch('/api/robot/auto_align', {
@@ -1835,7 +1835,7 @@ export default function Viewport3D({
         if (onUpdateRobotConfig) {
           onUpdateRobotConfig(data.config);
         }
-        if (mode === 'recommended') {
+        if (mode === 'preset' || mode === 'recommended') {
           setViewPreset('iso');
         }
       }
@@ -1875,34 +1875,26 @@ export default function Viewport3D({
           </div>
         )}
 
-        {/* Set Robot Initial Position (Auto-Align Base Controls) */}
+        {/* Set Robot Base Position (Auto-Align Base Controls) */}
         <div className="flex items-center gap-1 bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 p-1 rounded-xl shadow-xl pointer-events-auto w-fit flex-wrap">
           <span className="text-[10px] font-semibold text-neutral-400 px-1 font-mono">Base:</span>
           <button
-            onClick={() => handleAutoAlign('recommended')}
-            disabled={isAligning}
-            className="px-2 py-0.5 rounded-lg bg-white hover:bg-neutral-200 text-black font-semibold text-[10px] flex items-center gap-1 shadow-sm transition-all active:scale-95 disabled:opacity-50"
-            title="Set Recommended Workspace Layout: Base at Y=-40.6cm, Yaw=90°, facing tags beyond reach"
-          >
-            <Sparkles className="w-3 h-3 text-neutral-700" />
-            <span>Recommended</span>
-          </button>
-          <button
-            onClick={() => handleAutoAlign('start')}
-            disabled={isAligning || trajectoryPoses.length === 0}
-            className="px-2 py-0.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 font-medium text-[10px] flex items-center gap-1 border border-neutral-800 shadow-sm transition-all active:scale-95 disabled:opacity-50"
-            title="Set Robot Base so the gripper starts directly at the first point of the trajectory"
-          >
-            <Crosshair className="w-3 h-3 text-neutral-400" />
-            <span>To Start</span>
-          </button>
-          <button
             onClick={() => handleAutoAlign('optimal')}
             disabled={isAligning || trajectoryPoses.length === 0}
-            className="px-2 py-0.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 font-medium text-[10px] flex items-center gap-1 border border-neutral-800 transition-all active:scale-95 disabled:opacity-50"
-            title="Optimize Robot Base position for maximum reach across the entire demonstration"
+            className="px-2 py-0.5 rounded-lg bg-white hover:bg-neutral-200 text-black font-semibold text-[10px] flex items-center gap-1 shadow-sm transition-all active:scale-95 disabled:opacity-50"
+            title="Optimize Robot Base position for maximum reach across the entire demonstration (Default)"
           >
+            <Sparkles className="w-3 h-3 text-neutral-700" />
             <span>Optimal</span>
+          </button>
+          <button
+            onClick={() => handleAutoAlign('preset')}
+            disabled={isAligning}
+            className="px-2 py-0.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 font-medium text-[10px] flex items-center gap-1 border border-neutral-800 shadow-sm transition-all active:scale-95 disabled:opacity-50"
+            title="Set Base position to user-adjusted preset (Default: Front Table Y=-40.6cm, Yaw=90°)"
+          >
+            <Bookmark className="w-3 h-3 text-neutral-400" />
+            <span>Preset</span>
           </button>
         </div>
 

@@ -489,12 +489,20 @@ export default function Dashboard({
     return (deg * Math.PI) / 180;
   }
 
+  // Episode-specific active robot configuration (respects independent base placement)
+  const activeRobotConfig = useMemo(() => {
+    if (activeEp?.workspace_calibration) {
+      return { ...robotConfig, ...activeEp.workspace_calibration };
+    }
+    return robotConfig;
+  }, [robotConfig, activeEp?.workspace_calibration]);
+
   // Compute Robot-Relative Coordinates using true Gripper TCP
-  const ox = robotConfig?.offset_x ?? 0.038;
-  const oy = robotConfig?.offset_y ?? -0.406;
-  const oz = robotConfig?.offset_z ?? 0.00;
-  const reachDeg = activeEp?.reach_angle_deg ?? robotConfig?.reach_angle_deg ?? 0.0;
-  const effectiveYawRad = THREE_to_rad((robotConfig?.yaw_deg ?? 90.0) - reachDeg);
+  const ox = activeRobotConfig?.offset_x ?? 0.038;
+  const oy = activeRobotConfig?.offset_y ?? -0.406;
+  const oz = activeRobotConfig?.offset_z ?? 0.00;
+  const reachDeg = activeEp?.reach_angle_deg ?? activeRobotConfig?.reach_angle_deg ?? 0.0;
+  const effectiveYawRad = THREE_to_rad((activeRobotConfig?.yaw_deg ?? 90.0) - reachDeg);
 
   const dx = currentTcpX - ox;
   const dy = currentTcpY - oy;
@@ -507,7 +515,7 @@ export default function Dashboard({
   const robotTcpZ = dz;
   const distToRobot = Math.hypot(robotTcpX, robotTcpY, robotTcpZ);
 
-  const robotName = (robotConfig?.robot_type || 'so_arm101_omni_kin').toUpperCase().replace(/_/g, '-');
+  const robotName = (activeRobotConfig?.robot_type || 'so_arm101_omni_kin').toUpperCase().replace(/_/g, '-');
 
   // Anchor status calculation for intuitive Dev View visualization
   const isTagADetected = currTelemetry?.tags_detected?.includes(0);
@@ -777,7 +785,7 @@ export default function Dashboard({
                 taskPrompt={activeEp?.task || ''}
                 gripperStates={activeEp?.gripper_states || []}
                 currentFrameIndex={safeFrameIndex}
-                robotConfig={robotConfig}
+                robotConfig={activeRobotConfig}
                 onUpdateRobotConfig={onUpdateRobotConfig}
                 episodeId={activeEp?.episode_id}
                 trajectoryMode={trajectoryMode}
@@ -791,7 +799,7 @@ export default function Dashboard({
                 fkTablePoses={fkTablePoses}
                 fkCameraPoses={fkCameraPoses}
                 linkPositions={activeEp?.link_positions || []}
-                reachAngleDeg={activeEp?.reach_angle_deg ?? robotConfig?.reach_angle_deg}
+                reachAngleDeg={activeEp?.reach_angle_deg ?? activeRobotConfig?.reach_angle_deg}
               />
             </div>
 
@@ -892,7 +900,7 @@ export default function Dashboard({
                 taskPrompt={activeEp?.task || ''}
                 gripperStates={activeEp?.gripper_states || []}
                 currentFrameIndex={safeFrameIndex}
-                robotConfig={robotConfig}
+                robotConfig={activeRobotConfig}
                 onUpdateRobotConfig={onUpdateRobotConfig}
                 episodeId={activeEp?.episode_id}
                 trajectoryMode={trajectoryMode}
@@ -906,7 +914,7 @@ export default function Dashboard({
                 fkTablePoses={fkTablePoses}
                 fkCameraPoses={fkCameraPoses}
                 linkPositions={activeEp?.link_positions || []}
-                reachAngleDeg={activeEp?.reach_angle_deg ?? robotConfig?.reach_angle_deg}
+                reachAngleDeg={activeEp?.reach_angle_deg ?? activeRobotConfig?.reach_angle_deg}
               />
             </div>
 
