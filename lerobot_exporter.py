@@ -136,17 +136,15 @@ class LeRobotExporter:
         if hasattr(self.ik_solver, "reach_angle_rad"):
             self.workspace_calibrator.reach_angle_rad = self.ik_solver.reach_angle_rad
 
-    def set_robot_config(self, robot_type="so_arm101_omni_kin", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0, q3_safe_max_deg=None, custom_dh_table=None, custom_urdf=None):
+    def set_robot_config(self, robot_type="so_arm101_omni_kin", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0, q3_safe_max_deg=None, custom_dh_table=None, custom_urdf=None, **kwargs):
         """
         Updates the active robot model preset, workspace offset, and camera safe wrist limits.
         """
         self.robot_type = robot_type
         if q3_safe_max_deg is not None:
             self.q3_safe_max_deg = float(q3_safe_max_deg)
-        if custom_dh_table is not None:
-            self.custom_dh_table = custom_dh_table
-        if custom_urdf is not None:
-            self.custom_urdf = custom_urdf
+        self.custom_dh_table = custom_dh_table
+        self.custom_urdf = custom_urdf
         self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg, custom_dh_table=self.custom_dh_table, custom_urdf=self.custom_urdf)
         reach_rad = getattr(self.ik_solver, "reach_angle_rad", 0.0)
         self.workspace_calibrator.update_config(offset_x, offset_y, offset_z, yaw_deg, reach_angle_rad=reach_rad)
@@ -192,8 +190,10 @@ class LeRobotExporter:
             ep_calibrator = self.workspace_calibrator
             ep['workspace_calibration'] = ep_calibrator.get_config()
 
-        # Invalidate cached kinematics if explicitly marked stale
-        if ep.get('kinematics_stale', False) and raw_poses is not None and len(raw_poses) > 0:
+        # Invalidate cached kinematics if explicitly marked stale or if episode robot_type does not match active embodiment
+        active_robot_id = "custom_urdf" if (self.custom_dh_table or self.custom_urdf) else self.robot_type
+        robot_mismatch = (ep.get('robot_type') is not None and ep.get('robot_type') != active_robot_id)
+        if (ep.get('kinematics_stale', False) or robot_mismatch) and raw_poses is not None and len(raw_poses) > 0:
             raw_robot_ee = None
             raw_joints = None
 
@@ -556,17 +556,19 @@ class LeRobotExporter:
 
         # 5. Save Info Configuration (meta/info.json)
         robot_specs = get_robot_specs(self.robot_type)
+        active_dh = self.custom_dh_table or getattr(self.ik_solver, "dh_table", None) or robot_specs["dh_table"]
+        robot_name = getattr(self.ik_solver, "robot_name", None) or ("Custom URDF" if self.custom_dh_table else robot_specs["name"])
         # Derive joint names from DH table (generalized for any embodiment), append "gripper"
-        dh_joint_names = [row.get("name", f"q{i}") for i, row in enumerate(robot_specs["dh_table"])]
+        dh_joint_names = [row.get("name", f"q{i}") for i, row in enumerate(active_dh)]
         joint_feature_names = dh_joint_names + ["gripper"]
         num_joints = len(joint_feature_names)
         info = {
             "codebase_version": "v2.0",
             "robot_type": self.robot_type,
-            "robot_name": robot_specs["name"],
+            "robot_name": robot_name,
             "trajectory_mode": str(trajectory_mode).lower(),
             "workspace_calibration": self.workspace_calibrator.get_config(),
-            "dh_table": robot_specs["dh_table"],
+            "dh_table": active_dh,
             "fps": self.fps,
             "total_episodes": len(episodes_data),
             "total_frames": global_frame_idx,

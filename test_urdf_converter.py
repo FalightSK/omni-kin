@@ -94,9 +94,97 @@ def test_urdf_helper_and_error_handling():
     except ValueError as e:
         print(f"  [OK] Caught missing joints error: {e}")
 
+def test_custom_urdf_persistence_and_episode_recalculation():
+    print("\n=== Test 5: Custom URDF Persistence & Episode Recalculation ===")
+    from server import ROBOT_CONFIG, sync_episode_kinematics, lerobot_exporter
+    from robot_kinematics import get_robot_solver
+
+    # 1. Baseline episode with default robot setup
+    ROBOT_CONFIG["custom_urdf_enabled"] = False
+    ROBOT_CONFIG.pop("custom_dh_table", None)
+    ROBOT_CONFIG.pop("custom_specs", None)
+    ROBOT_CONFIG.pop("custom_urdf", None)
+    ROBOT_CONFIG["robot_type"] = "so_arm101_omni_kin"
+
+    poses = [
+        [0.05, 0.00, 0.15, 0.0, 0.0, 0.0],
+        [0.06, 0.02, 0.16, 0.0, 0.0, 0.0],
+        [0.07, 0.04, 0.17, 0.0, 0.0, 0.0]
+    ]
+    test_ep = {
+        "episode_id": "test_ep_urdf_persist",
+        "episode_index": 999,
+        "raw_poses": [list(p) for p in poses],
+        "poses": [list(p) for p in poses],
+        "fps": 30.0,
+        "gripper_states": [100.0, 100.0, 100.0]
+    }
+
+    sync_episode_kinematics(test_ep)
+    base_joints = np.array(test_ep["joint_states"])
+    base_link_pos = np.array(test_ep["link_positions"])
+    assert base_joints.shape == (3, 6)
+    assert test_ep["robot_type"] == "so_arm101_omni_kin"
+
+    # 2. Synthesize custom URDF with elongated links
+    custom_dh = [dict(row) for row in SO101_DH_TABLE]
+    custom_dh[1]["a"] = 0.220  # 22cm instead of 14cm
+    custom_dh[2]["a"] = 0.220  # 22cm instead of 14.5cm
+    custom_urdf = URDFParser.dh_to_urdf(custom_dh, robot_name="long_arm_robot")
+
+    parsed_dh, parsed_specs = URDFParser.parse_urdf(custom_urdf)
+    assert np.isclose(parsed_dh[1]["a"], 0.220, atol=1e-4)
+    assert np.isclose(parsed_dh[2]["a"], 0.220, atol=1e-4)
+
+    # 3. Apply custom URDF to server configuration
+    ROBOT_CONFIG["custom_dh_table"] = parsed_dh
+    ROBOT_CONFIG["custom_specs"] = parsed_specs
+    ROBOT_CONFIG["custom_urdf"] = custom_urdf
+    ROBOT_CONFIG["custom_urdf_enabled"] = True
+
+    # Recalculate kinematics for the episode
+    sync_episode_kinematics(test_ep)
+    new_joints = np.array(test_ep["joint_states"])
+    new_link_pos = np.array(test_ep["link_positions"])
+
+    # Verify joint states and link positions changed to fit the new embodiment
+    joint_diff = np.max(np.abs(new_joints[:, :4] - base_joints[:, :4]))
+    print(f"  Max joint difference after new embodiment: {joint_diff:.2f}°")
+    assert joint_diff > 1.0, "Joint trajectory should significantly change with new URDF link lengths"
+    assert test_ep["robot_type"] == "custom_urdf"
+    assert test_ep["custom_urdf_enabled"] is True
+
+    # 4. Verify lerobot_exporter uses custom parameters
+    lerobot_exporter.set_robot_config(
+        robot_type=ROBOT_CONFIG["robot_type"],
+        custom_dh_table=ROBOT_CONFIG["custom_dh_table"],
+        custom_urdf=ROBOT_CONFIG["custom_urdf"]
+    )
+    assert lerobot_exporter.custom_dh_table is not None
+    assert lerobot_exporter.custom_urdf is not None
+
+    # 5. Clean reset back to preset
+    ROBOT_CONFIG["custom_urdf_enabled"] = False
+    ROBOT_CONFIG.pop("custom_dh_table", None)
+    ROBOT_CONFIG.pop("custom_specs", None)
+    ROBOT_CONFIG.pop("custom_urdf", None)
+    lerobot_exporter.set_robot_config(
+        robot_type="so_arm101_omni_kin",
+        custom_dh_table=None,
+        custom_urdf=None
+    )
+    assert lerobot_exporter.custom_dh_table is None
+    import shutil, os
+    from server import RECORDINGS_DIR
+    test_dir = os.path.join(RECORDINGS_DIR, "test_ep_urdf_persist")
+    if os.path.exists(test_dir):
+        shutil.rmtree(test_dir, ignore_errors=True)
+    print("  [OK] Custom URDF persistence & automatic episode recalculation validated.")
+
 if __name__ == "__main__":
     test_parse_so101_urdf()
     test_parse_so100_urdf()
     test_bidirectional_roundtrip()
     test_urdf_helper_and_error_handling()
+    test_custom_urdf_persistence_and_episode_recalculation()
     print("\n[ALL URDF CONVERTER TESTS PASSED SUCCESSFULLY!]")

@@ -1847,6 +1847,10 @@ export default function Viewport3D({
   };
 
   const { offset_x = 0.038, offset_y = -0.406, yaw_deg = 90.0, robot_type = 'so_arm101_omni_kin' } = robotConfig || {};
+  const isCustomUrdf = Boolean(robotConfig?.custom_urdf_enabled || robotConfig?.robot_type === 'custom_urdf' || robotConfig?.custom_dh_table);
+  const displayRobotName = isCustomUrdf
+    ? (robotConfig?.custom_specs?.robot_name || 'CUSTOM-URDF').toUpperCase()
+    : robot_type.toUpperCase().replace(/_/g, '-');
 
   return (
     <div className="w-full h-full relative select-none overflow-hidden group">
@@ -1864,7 +1868,7 @@ export default function Viewport3D({
           <span>ArUco (0,0)</span>
           <span className="text-neutral-700">|</span>
           <span className="font-semibold text-white">
-            🤖 {robot_type.toUpperCase().replace(/_/g, '-')} Base: ({(offset_x * 100).toFixed(0)}cm, {(offset_y * 100).toFixed(0)}cm, {yaw_deg.toFixed(0)}°)
+            🤖 {displayRobotName} Base: ({(offset_x * 100).toFixed(0)}cm, {(offset_y * 100).toFixed(0)}cm, {yaw_deg.toFixed(0)}°)
           </span>
         </div>
 

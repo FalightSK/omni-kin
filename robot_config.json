@@ -39,6 +39,6 @@
     "close_distance_mm": 28
   },
   "reach_angle_deg": -90.29826069494456,
-  "reach_angle_rad": -1.5760019579509654,
+  "reach_angle_rad": -0.000769259714273355,
   "custom_urdf_enabled": false
 }

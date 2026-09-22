@@ -127,13 +127,19 @@ export default function App() {
     fetchRobotConfig();
   }, []);
 
-  const handleDeleteEpisode = async (index) => {
-    if (!window.confirm(`Delete Episode #${index}?`)) return;
+  const handleDeleteEpisode = async (indexOrId) => {
+    if (!window.confirm(`Delete Episode #${indexOrId}?`)) return;
     try {
-      await fetch(`/api/episodes/${index}`, { method: 'DELETE' });
+      const res = await fetch(`/api/episodes/${indexOrId}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(data.message || `Failed to delete episode: ${res.statusText}`);
+        return;
+      }
       await fetchEpisodes();
     } catch (err) {
-      console.error(err);
+      console.error('Delete episode error:', err);
+      alert(`Error deleting episode: ${err.message}`);
     }
   };
 

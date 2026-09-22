@@ -69,11 +69,16 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
           setConfig(data.config);
           if (data.config.custom_urdf_enabled && data.config.custom_dh_table) setCustomDhTable(data.config.custom_dh_table);
           if (data.config.custom_urdf_enabled && data.config.custom_specs) setCustomSpecs(data.config.custom_specs);
+          if (data.config.custom_urdf_enabled && data.config.custom_urdf) setUrdfText(data.config.custom_urdf);
         }
         if (data.presets) {
           setPresets(data.presets);
           const activeP = data.presets.find((p) => p.robot_type === data.config?.robot_type) || data.presets[0];
-          if (!data.config?.custom_urdf_enabled) setUrdfText('');
+          if (!data.config?.custom_urdf_enabled) {
+            setUrdfText('');
+            setCustomDhTable(null);
+            setCustomSpecs(null);
+          }
           if (activeP && activeP.components && !data.config?.custom_specs) {
             setCustomSpecs(activeP);
           }
@@ -84,36 +89,54 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
 
   if (!isOpen) return null;
 
+  const isCustomUrdf = Boolean(config.custom_urdf_enabled || config.robot_type === 'custom_urdf' || customDhTable);
+
   const currentPreset = presets.find((p) => p.robot_type === config.robot_type) || {
-    name: config.robot_type.toUpperCase(),
-    description: 'Robotic Manipulator',
-    reach_meters: 0.395,
+    name: isCustomUrdf ? (customSpecs?.robot_name || config.custom_specs?.robot_name || 'CUSTOM URDF').toUpperCase() : (config.robot_type || 'SO101').toUpperCase(),
+    description: isCustomUrdf ? 'Custom URDF Kinematics' : 'Robotic Manipulator',
+    reach_meters: (customSpecs?.reach_meters || config.custom_specs?.reach_meters || 0.395),
     payload_kg: 0.50,
-    dh_table: []
+    dh_table: customDhTable || config.custom_dh_table || []
   };
 
-  const activeDhTable = customDhTable || currentPreset.dh_table;
+  const activeDhTable = customDhTable || (isCustomUrdf ? config.custom_dh_table : null) || currentPreset.dh_table;
+  const activeSpecs = customSpecs || (isCustomUrdf ? config.custom_specs : null) || currentPreset;
 
   const handleFieldChange = (field, val) => {
     setConfig((prev) => ({ ...prev, [field]: val }));
   };
 
   const handleModelSelect = (rType) => {
-    handleFieldChange('robot_type', rType);
     setCustomDhTable(null);
     setCustomSpecs(null);
-    // Preset selection never implicitly activates or replaces a custom URDF.
     setUrdfText('');
+    setConfig((prev) => ({
+      ...prev,
+      robot_type: rType,
+      custom_urdf_enabled: false,
+      custom_dh_table: null,
+      custom_specs: null,
+      custom_urdf: null,
+      reset_to_preset: true
+    }));
   };
 
   const handleSave = async () => {
     setIsSaving(true);
     setSaveSuccess(false);
     try {
+      const payload = {
+        ...config,
+        custom_dh_table: customDhTable,
+        custom_specs: customSpecs,
+        custom_urdf: urdfText,
+        custom_urdf_enabled: !!customDhTable,
+        apply_to_episodes: true
+      };
       const res = await fetch('/api/robot/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...config, apply_to_episodes: true })
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
       if (data.status === 'success') {
@@ -132,11 +155,18 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
     setIsRecalculating(true);
     setRecalcSuccess(false);
     try {
+      const payloadConfig = {
+        ...config,
+        custom_dh_table: customDhTable,
+        custom_specs: customSpecs,
+        custom_urdf: urdfText,
+        custom_urdf_enabled: !!customDhTable
+      };
       // 1. Save config first so server persists latest parameters
       const saveRes = await fetch('/api/robot/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
+        body: JSON.stringify(payloadConfig)
       });
       const saveData = await saveRes.json();
       if (saveData.status === 'success' && onConfigSaved) {
@@ -148,13 +178,16 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          robot_config: config,
+          robot_config: payloadConfig,
           all_episodes: true
         })
       });
       const recalcData = await recalcRes.json();
       if (recalcData.status === 'success') {
         setRecalcSuccess(true);
+        if (onConfigSaved && recalcData.config) {
+          onConfigSaved(recalcData.config);
+        }
         setTimeout(() => setRecalcSuccess(false), 3000);
       }
     } catch (err) {
@@ -337,11 +370,20 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
         }
         setUrdfStatus({
           type: 'success',
-          message: 'Custom URDF kinematics applied active.'
+          message: data.message || 'Custom URDF kinematics applied active.'
+        });
+      } else {
+        setUrdfStatus({
+          type: 'error',
+          message: data.message || 'Failed to apply URDF.'
         });
       }
     } catch (err) {
       console.error(err);
+      setUrdfStatus({
+        type: 'error',
+        message: `Failed to apply URDF: ${err.message}`
+      });
     } finally {
       setIsParsingUrdf(false);
     }
@@ -394,7 +436,7 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
               Robot Configuration
             </h2>
             <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-neutral-900 border border-neutral-800 text-neutral-300">
-              {config.robot_type}
+              {isCustomUrdf ? `Custom URDF (${activeSpecs?.robot_name || 'custom'})` : config.robot_type}
             </span>
           </div>
           <button
@@ -410,7 +452,7 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
           <span className="text-[11px] font-medium text-neutral-400">Model:</span>
           <div className="flex items-center gap-1.5 flex-wrap">
             {presets.map((p) => {
-              const isSelected = p.robot_type === config.robot_type && !customDhTable;
+              const isSelected = !isCustomUrdf && p.robot_type === config.robot_type;
               return (
                 <button
                   key={p.robot_type}
@@ -426,9 +468,10 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                 </button>
               );
             })}
-            {customDhTable && (
-              <span className="px-2 py-0.5 rounded-lg text-[11px] font-mono bg-neutral-800 border border-neutral-700 text-white">
-                Custom URDF
+            {isCustomUrdf && (
+              <span className="px-3 py-1 rounded-lg text-xs font-semibold bg-white text-black shadow-sm flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                Custom URDF ({activeSpecs?.robot_name || 'custom'})
               </span>
             )}
           </div>
@@ -1215,8 +1258,8 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                   </div>
 
                   <div className="p-2.5 bg-[#080808] border-t border-neutral-800/80 flex items-center justify-between text-[11px] font-mono text-neutral-400">
-                    <span>Reach: {(currentPreset.reach_meters * 100).toFixed(1)} cm</span>
-                    <span>Payload: {(currentPreset.payload_kg * 1000).toFixed(0)} g</span>
+                    <span>Reach: {(((activeSpecs && activeSpecs.reach_meters) || currentPreset.reach_meters) * 100).toFixed(1)} cm</span>
+                    <span>Payload: {(((activeSpecs && activeSpecs.payload_kg) || currentPreset.payload_kg) * 1000).toFixed(0)} g</span>
                   </div>
                 </div>
               )}

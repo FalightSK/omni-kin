@@ -417,6 +417,9 @@ class DHKinematics:
             self.joint_limits.append((np.radians(min_deg), np.radians(max_deg)))
         # Gripper limit (0.0=closed to 100.0=open)
         self.joint_limits.append((0.0, 100.0))
+        self.reach_angle_rad = 0.0
+        self.reach_angle_deg = 0.0
+        self.robot_name = getattr(self, "model_name", "SO-Robot")
 
     def _detect_collision_sign(self):
         """
@@ -990,6 +993,8 @@ def normalize_robot_type(robot_type):
     if not robot_type:
         return "so_arm101_omni_kin"
     r = str(robot_type).lower().strip().replace("-", "_")
+    if r in ("custom_urdf", "custom", "custom_robot"):
+        return "custom_urdf"
     if "omni" in r or "arm101" in r:
         return "so_arm101_omni_kin"
     if "100" in r:
@@ -1617,6 +1622,7 @@ class URDFKinematics:
             self.root = ET.fromstring(raw_xml)
 
         self.model_name = self.root.get("name", model_name)
+        self.robot_name = self.model_name
         self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
 
         # 1. Parse all joints and links
@@ -1720,6 +1726,14 @@ class URDFKinematics:
         else:
             self.reach_angle_rad = 0.0
         self.reach_angle_deg = float(np.degrees(self.reach_angle_rad))
+
+        try:
+            parsed_dh, parsed_specs = URDFParser.parse_urdf(raw_xml, q3_safe_max_deg=self.q3_safe_max_deg)
+            self.dh_table = parsed_dh
+            self.specs = parsed_specs
+        except Exception:
+            self.dh_table = []
+            self.specs = {}
 
     def update_q3_safe_max(self, q3_safe_max_deg):
         self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
@@ -1992,14 +2006,14 @@ def get_robot_solver(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0, custo
     """Factory helper to obtain the kinematic solver instance with camera safety limits."""
     if custom_urdf:
         return URDFKinematics(custom_urdf, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+    if custom_dh_table:
+        return DHKinematics(custom_dh_table, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
     r_type = normalize_robot_type(robot_type)
     if r_type in ROBOT_PRESETS:
         return ROBOT_PRESETS[r_type]["class"](q3_safe_max_deg=q3_safe_max_deg, **kwargs)
     urdf_content = get_robot_urdf(r_type)
     if urdf_content:
         return URDFKinematics(urdf_content, model_name=r_type, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
-    if custom_dh_table:
-        return DHKinematics(custom_dh_table, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
     return SO101OmniKinKinematics(q3_safe_max_deg=q3_safe_max_deg, **kwargs)
 
 

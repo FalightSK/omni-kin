@@ -12,7 +12,10 @@ export default function Navbar({
   robotConfig,
   trajectoryMode = 'free_form'
 }) {
-  const robotName = (robotConfig?.robot_type || 'so101').toUpperCase();
+  const isCustomUrdf = Boolean(robotConfig?.custom_urdf_enabled || robotConfig?.robot_type === 'custom_urdf' || robotConfig?.custom_dh_table);
+  const robotName = isCustomUrdf
+    ? (robotConfig?.custom_specs?.robot_name || 'CUSTOM-URDF').toUpperCase()
+    : (robotConfig?.robot_type || 'so101').toUpperCase().replace(/_/g, '-');
 
   return (
     <header className="bg-[#0a0a0a]/95 backdrop-blur-md border-b border-neutral-800 px-4 py-2.5 flex items-center justify-between sticky top-0 z-40 select-none">

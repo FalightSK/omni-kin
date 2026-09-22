@@ -515,7 +515,10 @@ export default function Dashboard({
   const robotTcpZ = dz;
   const distToRobot = Math.hypot(robotTcpX, robotTcpY, robotTcpZ);
 
-  const robotName = (activeRobotConfig?.robot_type || 'so_arm101_omni_kin').toUpperCase().replace(/_/g, '-');
+  const isCustomUrdf = Boolean(activeRobotConfig?.custom_urdf_enabled || activeRobotConfig?.robot_type === 'custom_urdf' || activeRobotConfig?.custom_dh_table);
+  const robotName = isCustomUrdf
+    ? (activeRobotConfig?.custom_specs?.robot_name || 'CUSTOM-URDF').toUpperCase()
+    : (activeRobotConfig?.robot_type || 'so_arm101_omni_kin').toUpperCase().replace(/_/g, '-');
 
   // Anchor status calculation for intuitive Dev View visualization
   const isTagADetected = currTelemetry?.tags_detected?.includes(0);
@@ -1038,6 +1041,19 @@ export default function Dashboard({
               <span>{totalFrames} frames</span>
               <span>·</span>
               <span>{activeEp?.fps || 30} FPS</span>
+              {activeEp && onDeleteEpisode && (
+                <>
+                  <span className="text-neutral-700">|</span>
+                  <button
+                    onClick={() => onDeleteEpisode(activeEp.episode_index)}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded text-neutral-400 hover:text-rose-400 hover:bg-rose-500/10 border border-transparent hover:border-rose-500/30 transition-all font-sans text-xs"
+                    title={`Delete Episode #${activeEp.episode_index}`}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Delete</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
@@ -1703,7 +1719,7 @@ export default function Dashboard({
                             e.stopPropagation();
                             startEditingTask(ep.episode_index, ep.task);
                           }}
-                          className="opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-white p-1 rounded hover:bg-neutral-800 transition-all shrink-0"
+                          className="opacity-70 group-hover:opacity-100 text-neutral-400 hover:text-white p-1 rounded hover:bg-neutral-800 transition-all shrink-0"
                           title="Edit Task Prompt"
                         >
                           <Edit3 className="w-3 h-3" />
@@ -1713,7 +1729,7 @@ export default function Dashboard({
                             e.stopPropagation();
                             onDeleteEpisode(ep.episode_index);
                           }}
-                          className="opacity-0 group-hover:opacity-100 text-neutral-500 hover:text-rose-400 p-1 rounded hover:bg-neutral-800 transition-all shrink-0"
+                          className="opacity-70 group-hover:opacity-100 text-neutral-400 hover:text-rose-400 hover:bg-rose-500/10 p-1 rounded transition-all shrink-0"
                           title="Delete Episode"
                         >
                           <Trash2 className="w-3 h-3" />

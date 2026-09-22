@@ -151,6 +151,8 @@ if not ROBOT_CONFIG.get("custom_urdf_enabled", False):
     ROBOT_CONFIG.pop("custom_dh_table", None)
     ROBOT_CONFIG.pop("custom_specs", None)
     ROBOT_CONFIG.pop("custom_urdf", None)
+    if ROBOT_CONFIG.get("robot_type") == "custom_urdf":
+        ROBOT_CONFIG["robot_type"] = "so_arm101_omni_kin"
 _init_solver = get_robot_solver(
     ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
     q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
@@ -340,11 +342,12 @@ def sync_episode_kinematics(ep, calib=None):
     independent optimal workspace base position.
     """
     try:
+        use_custom = ROBOT_CONFIG.get("custom_urdf_enabled", False)
         r_solver = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if use_custom else None,
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if use_custom else None
         )
         gripper_cfg = ROBOT_CONFIG.get("gripper_offset", {})
         if hasattr(r_solver, "update_camera_extrinsics"):
@@ -392,7 +395,8 @@ def sync_episode_kinematics(ep, calib=None):
         # 2. Table frame → Robot base frame (using episode-specific independent calibration)
         ee_robot = ep_calibrator.transform_trajectory(ee_table, to_robot=True)
         ep['workspace_calibration'] = copy.deepcopy(ep_calibrator.get_config())
-        ep['robot_type'] = ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin")
+        ep['robot_type'] = "custom_urdf" if use_custom else ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin")
+        ep['custom_urdf_enabled'] = bool(use_custom)
 
         # 3. Normalize gripper states [0, 1]
         grippers = np.array(ep.get("gripper_states", [100.0] * len(ee_robot)), dtype=np.float32)
@@ -803,7 +807,12 @@ def _sync_execute_processing_job(job):
         if opt_arr.ndim == 2 and opt_arr.shape[1] >= 3 and np.isfinite(opt_arr[:, :3]).all():
             opt_calib = workspace_calibrator.auto_align_to_trajectory(opt_arr, nominal_reach=0.24, default_yaw=90.0)
             calibrated = dict(opt_calib)
-            r_solver_ep = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"))
+            r_solver_ep = get_robot_solver(
+                ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
+                q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+                custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+                custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+            )
             calibrated["reach_angle_rad"] = getattr(r_solver_ep, "reach_angle_rad", 0.0)
             ROBOT_CONFIG.update(calibrated)
             workspace_calibrator.update_config(**calibrated)
@@ -1568,27 +1577,69 @@ async def get_episodes():
     load_episodes_from_disk()
     return JSONResponse(EPISODES_DB)
 
-@app.delete("/api/episodes/{episode_index}")
-async def delete_episode(episode_index: int):
+def _safe_rmtree(path: str, retries: int = 3, delay: float = 0.15):
+    """Safely removes a directory tree on Windows, handling locks and readonly files."""
+    if not path or not os.path.exists(path):
+        return
+    import gc
+    gc.collect()
+    for attempt in range(retries):
+        try:
+            def _remove_readonly(func, fpath, exc_info):
+                try:
+                    os.chmod(fpath, 0o777)
+                    func(fpath)
+                except Exception:
+                    pass
+            shutil.rmtree(path, onerror=_remove_readonly)
+            if not os.path.exists(path):
+                return
+        except Exception:
+            pass
+        gc.collect()
+        time.sleep(delay)
+    # Final best effort
+    if os.path.exists(path):
+        shutil.rmtree(path, ignore_errors=True)
+
+@app.delete("/api/episodes/{episode_id}")
+async def delete_episode(episode_id: str):
     global EPISODES_DB
     try:
         _ensure_idle("delete episodes")
     except ValueError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
+
     found = False
+    deleted_ep = None
     new_db = []
+
     for ep in EPISODES_DB:
-        if ep['episode_index'] == episode_index:
+        # Match by integer index or string episode_id or str(episode_index)
+        is_match = (
+            str(ep.get('episode_index')) == str(episode_id)
+            or str(ep.get('episode_id')) == str(episode_id)
+        )
+        if is_match and not found:
             found = True
-            if os.path.exists(ep.get('video_path', '')):
-                ep_dir = os.path.dirname(ep['video_path'])
-                if os.path.exists(ep_dir):
-                    shutil.rmtree(ep_dir, ignore_errors=True)
+            deleted_ep = ep
         else:
             new_db.append(ep)
 
-    if not found:
-        return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+    if not found or not deleted_ep:
+        return JSONResponse({"status": "error", "message": f"Episode '{episode_id}' not found"}, status_code=404)
+
+    # Clean up disk files: episode directory in recordings
+    ep_uid = deleted_ep.get("episode_id")
+    if ep_uid:
+        ep_dir = os.path.join(RECORDINGS_DIR, ep_uid)
+        _safe_rmtree(ep_dir)
+
+    v_path = deleted_ep.get("video_path")
+    if v_path and isinstance(v_path, str) and os.path.exists(v_path):
+        v_dir = os.path.dirname(v_path)
+        if os.path.exists(v_dir) and os.path.abspath(v_dir) != os.path.abspath(RECORDINGS_DIR):
+            _safe_rmtree(v_dir)
 
     # Re-index remaining episodes contiguously so episode_index is always 0..N-1
     for idx, ep in enumerate(new_db):
@@ -1598,7 +1649,7 @@ async def delete_episode(episode_index: int):
     EPISODES_DB = new_db
     return JSONResponse({
         "status": "success",
-        "message": f"Episode #{episode_index} deleted",
+        "message": f"Episode '{deleted_ep.get('episode_id', episode_id)}' deleted successfully",
         "remaining": len(EPISODES_DB),
         "episodes": EPISODES_DB
     })
@@ -1614,7 +1665,7 @@ async def clear_all_episodes():
         for item in os.listdir(RECORDINGS_DIR):
             p = os.path.join(RECORDINGS_DIR, item)
             if os.path.isdir(p):
-                shutil.rmtree(p, ignore_errors=True)
+                _safe_rmtree(p)
             elif item != '.gitkeep':
                 try:
                     os.remove(p)
@@ -1625,7 +1676,7 @@ async def clear_all_episodes():
         for item in os.listdir(EXPORT_DIR):
             p = os.path.join(EXPORT_DIR, item)
             if os.path.isdir(p):
-                shutil.rmtree(p, ignore_errors=True)
+                _safe_rmtree(p)
             elif item != '.gitkeep':
                 try:
                     os.remove(p)
@@ -2280,15 +2331,43 @@ async def update_robot_config(request: Request):
         ):
             if field in payload:
                 payload[field] = ensure_finite_number(payload[field], field, minimum, maximum)
-        if "robot_type" in payload:
+        if "custom_urdf_enabled" in payload:
+            ROBOT_CONFIG["custom_urdf_enabled"] = bool(payload["custom_urdf_enabled"])
+        if "custom_dh_table" in payload and payload["custom_dh_table"]:
+            ROBOT_CONFIG["custom_dh_table"] = payload["custom_dh_table"]
+        if "custom_specs" in payload and payload["custom_specs"]:
+            ROBOT_CONFIG["custom_specs"] = payload["custom_specs"]
+        if "custom_urdf" in payload and payload["custom_urdf"]:
+            ROBOT_CONFIG["custom_urdf"] = payload["custom_urdf"]
+
+        if payload.get("reset_to_preset", False):
+            ROBOT_CONFIG["custom_urdf_enabled"] = False
+            ROBOT_CONFIG.pop("custom_dh_table", None)
+            ROBOT_CONFIG.pop("custom_specs", None)
+            ROBOT_CONFIG.pop("custom_urdf", None)
+            if "robot_type" in payload:
+                from robot_kinematics import normalize_robot_type
+                r_type = normalize_robot_type(payload["robot_type"])
+                if r_type in ROBOT_PRESETS:
+                    ROBOT_CONFIG["robot_type"] = r_type
+                else:
+                    ROBOT_CONFIG["robot_type"] = "so_arm101_omni_kin"
+            elif ROBOT_CONFIG.get("robot_type") == "custom_urdf":
+                ROBOT_CONFIG["robot_type"] = "so_arm101_omni_kin"
+        elif "robot_type" in payload:
             from robot_kinematics import normalize_robot_type
             r_type = normalize_robot_type(payload["robot_type"])
-            if r_type in ROBOT_PRESETS:
+            if r_type == "custom_urdf":
+                ROBOT_CONFIG["robot_type"] = "custom_urdf"
+                ROBOT_CONFIG["custom_urdf_enabled"] = True
+            elif r_type in ROBOT_PRESETS:
                 ROBOT_CONFIG["robot_type"] = r_type
-                ROBOT_CONFIG["custom_urdf_enabled"] = False
-                ROBOT_CONFIG.pop("custom_dh_table", None)
-                ROBOT_CONFIG.pop("custom_specs", None)
-                ROBOT_CONFIG.pop("custom_urdf", None)
+                # Only clear custom URDF if the payload explicitly disabled it or changed preset without custom URDF active
+                if payload.get("custom_urdf_enabled") is False or ("custom_urdf_enabled" not in payload and not ROBOT_CONFIG.get("custom_urdf_enabled")):
+                    ROBOT_CONFIG["custom_urdf_enabled"] = False
+                    ROBOT_CONFIG.pop("custom_dh_table", None)
+                    ROBOT_CONFIG.pop("custom_specs", None)
+                    ROBOT_CONFIG.pop("custom_urdf", None)
         if "offset_x" in payload:
             ROBOT_CONFIG["offset_x"] = float(payload["offset_x"])
         if "offset_y" in payload:
@@ -2319,8 +2398,8 @@ async def update_robot_config(request: Request):
         r_solver_up = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
         )
         reach_rad = getattr(r_solver_up, "reach_angle_rad", 0.0)
         ROBOT_CONFIG["reach_angle_deg"] = getattr(r_solver_up, "reach_angle_deg", 0.0)
@@ -2341,7 +2420,8 @@ async def update_robot_config(request: Request):
             offset_z=ROBOT_CONFIG["offset_z"],
             yaw_deg=ROBOT_CONFIG["yaw_deg"],
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table")
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
         )
 
         updated_count = 0
@@ -2444,11 +2524,42 @@ async def recalculate_trajectory_endpoint(request: Request):
         # 1. Optionally apply updated config from payload if provided
         new_config = payload.get("robot_config") or payload.get("config")
         if new_config and isinstance(new_config, dict):
-            if "robot_type" in new_config:
+            if "custom_urdf_enabled" in new_config:
+                ROBOT_CONFIG["custom_urdf_enabled"] = bool(new_config["custom_urdf_enabled"])
+            if "custom_dh_table" in new_config and new_config["custom_dh_table"]:
+                ROBOT_CONFIG["custom_dh_table"] = new_config["custom_dh_table"]
+            if "custom_specs" in new_config and new_config["custom_specs"]:
+                ROBOT_CONFIG["custom_specs"] = new_config["custom_specs"]
+            if "custom_urdf" in new_config and new_config["custom_urdf"]:
+                ROBOT_CONFIG["custom_urdf"] = new_config["custom_urdf"]
+
+            if new_config.get("reset_to_preset", False):
+                ROBOT_CONFIG["custom_urdf_enabled"] = False
+                ROBOT_CONFIG.pop("custom_dh_table", None)
+                ROBOT_CONFIG.pop("custom_specs", None)
+                ROBOT_CONFIG.pop("custom_urdf", None)
+                if "robot_type" in new_config:
+                    from robot_kinematics import normalize_robot_type
+                    r_type = normalize_robot_type(new_config["robot_type"])
+                    if r_type in ROBOT_PRESETS:
+                        ROBOT_CONFIG["robot_type"] = r_type
+                    else:
+                        ROBOT_CONFIG["robot_type"] = "so_arm101_omni_kin"
+                elif ROBOT_CONFIG.get("robot_type") == "custom_urdf":
+                    ROBOT_CONFIG["robot_type"] = "so_arm101_omni_kin"
+            elif "robot_type" in new_config:
                 from robot_kinematics import normalize_robot_type
                 r_type = normalize_robot_type(new_config["robot_type"])
-                if r_type in ROBOT_PRESETS:
+                if r_type == "custom_urdf":
+                    ROBOT_CONFIG["robot_type"] = "custom_urdf"
+                    ROBOT_CONFIG["custom_urdf_enabled"] = True
+                elif r_type in ROBOT_PRESETS:
                     ROBOT_CONFIG["robot_type"] = r_type
+                    if new_config.get("custom_urdf_enabled") is False or ("custom_urdf_enabled" not in new_config and not ROBOT_CONFIG.get("custom_urdf_enabled")):
+                        ROBOT_CONFIG["custom_urdf_enabled"] = False
+                        ROBOT_CONFIG.pop("custom_dh_table", None)
+                        ROBOT_CONFIG.pop("custom_specs", None)
+                        ROBOT_CONFIG.pop("custom_urdf", None)
             if "offset_x" in new_config:
                 ROBOT_CONFIG["offset_x"] = float(new_config["offset_x"])
             if "offset_y" in new_config:
@@ -2482,7 +2593,9 @@ async def recalculate_trajectory_endpoint(request: Request):
                 offset_y=ROBOT_CONFIG["offset_y"],
                 offset_z=ROBOT_CONFIG["offset_z"],
                 yaw_deg=ROBOT_CONFIG["yaw_deg"],
-                q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
+                q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+                custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+                custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
             )
 
         # 2. Determine target episodes to recalculate
@@ -2508,8 +2621,8 @@ async def recalculate_trajectory_endpoint(request: Request):
         r_solver = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
         )
         workspace_calibrator.reach_angle_rad = getattr(r_solver, "reach_angle_rad", 0.0)
 
@@ -2600,8 +2713,8 @@ async def auto_align_robot_endpoint(request: Request):
         r_solver = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
         )
         reach_rad = getattr(r_solver, "reach_angle_rad", 0.0)
         ROBOT_CONFIG["reach_angle_deg"] = getattr(r_solver, "reach_angle_deg", 0.0)
@@ -2697,7 +2810,12 @@ async def get_approach_path_endpoint(request: Request):
         auto_trim = bool(payload.get("auto_trim", True))
 
         # Synchronize planner instances
-        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
+        r_solver = get_robot_solver(
+            ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+        )
         trajectory_planner.solver = r_solver
         trajectory_planner.workspace_calibrator = workspace_calibrator
         trajectory_planner.camera_gripper_calibrator = camera_gripper_calibrator
@@ -2789,7 +2907,12 @@ async def solve_ik_endpoint(request: Request):
     """
     try:
         payload = await request.json()
-        r_solver = get_robot_solver(ROBOT_CONFIG.get("robot_type", "so101"), q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0))
+        r_solver = get_robot_solver(
+            ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+        )
         in_robot_frame = payload.get("in_robot_frame", False)
 
         if "pose" in payload:
@@ -2832,6 +2955,8 @@ async def get_robot_urdf_endpoint(robot_type: str = None):
     """
     Returns the URDF XML description for the requested or currently active robot preset.
     """
+    if not robot_type and ROBOT_CONFIG.get("custom_urdf_enabled") and ROBOT_CONFIG.get("custom_urdf"):
+        return Response(content=ROBOT_CONFIG["custom_urdf"], media_type="application/xml")
     r_type = (robot_type or ROBOT_CONFIG.get("robot_type", "so101")).lower()
     urdf_content = get_robot_urdf(r_type)
     return Response(content=urdf_content, media_type="application/xml")
@@ -2865,7 +2990,7 @@ async def apply_urdf_endpoint(request: Request):
     """
     Parses an input URDF and applies the resulting DH table directly to the active robot configuration.
     """
-    global ROBOT_CONFIG
+    global ROBOT_CONFIG, EPISODES_DB
     try:
         _ensure_idle("apply a URDF")
         payload = await request.json()
@@ -2875,6 +3000,7 @@ async def apply_urdf_endpoint(request: Request):
         dh_table, specs = URDFParser.parse_urdf(urdf_text, q3_safe_max_deg=q3_safe)
         robot_name = specs.get("robot_name", "custom_robot").lower()
 
+        ROBOT_CONFIG["robot_type"] = "custom_urdf"
         ROBOT_CONFIG["custom_dh_table"] = dh_table
         ROBOT_CONFIG["custom_specs"] = specs
         ROBOT_CONFIG["custom_urdf"] = urdf_text
@@ -2885,14 +3011,34 @@ async def apply_urdf_endpoint(request: Request):
         workspace_calibrator.reach_angle_rad = reach_rad
         save_robot_config(ROBOT_CONFIG)
 
-        print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Applied custom URDF kinematics: {robot_name} ({specs['reach_meters']}m reach, reach_angle={ROBOT_CONFIG['reach_angle_deg']}°)")
+        lerobot_exporter.set_robot_config(
+            robot_type="custom_urdf",
+            offset_x=ROBOT_CONFIG.get("offset_x", 0.038),
+            offset_y=ROBOT_CONFIG.get("offset_y", -0.406),
+            offset_z=ROBOT_CONFIG.get("offset_z", 0.0),
+            yaw_deg=ROBOT_CONFIG.get("yaw_deg", 90.0),
+            q3_safe_max_deg=q3_safe,
+            custom_dh_table=dh_table,
+            custom_urdf=urdf_text
+        )
+
+        recalc_count = 0
+        for ep in EPISODES_DB:
+            poses = ep.get("poses") or ep.get("raw_poses", [])
+            if poses and len(poses) > 0:
+                sync_episode_kinematics(ep)
+                recalc_count += 1
+
+        print(f"[{time.strftime('%H:%M:%S')}] ⚙️ Applied custom URDF kinematics: {robot_name} ({specs['reach_meters']}m reach, reach_angle={ROBOT_CONFIG['reach_angle_deg']}°), recalculated {recalc_count} episode(s)")
 
         return JSONResponse({
             "status": "success",
-            "message": f"Custom URDF '{robot_name}' applied successfully",
+            "message": f"Custom URDF '{robot_name}' applied successfully. Recalculated {recalc_count} episode(s).",
             "dh_table": dh_table,
             "specs": specs,
-            "config": ROBOT_CONFIG
+            "config": ROBOT_CONFIG,
+            "episodes_updated": recalc_count,
+            "episodes": EPISODES_DB
         })
     except Exception as err:
         return JSONResponse({
@@ -2929,8 +3075,8 @@ async def export_lerobot(request: Request = None):
             offset_z=ROBOT_CONFIG["offset_z"],
             yaw_deg=ROBOT_CONFIG["yaw_deg"],
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
         )
         use_ts = bool(payload.get("use_timestamp", True))
         ds_name = dataset_slug(payload.get("dataset_name", "mobile_aruco_3d_trajectories"))
