@@ -1,7 +1,7 @@
 {
   "robot_type": "so_arm101_omni_kin",
-  "offset_x": 0.096,
-  "offset_y": -0.436,
+  "offset_x": 0.274,
+  "offset_y": -0.303,
   "offset_z": 0.0,
   "yaw_deg": 90.0,
   "q3_safe_max_deg": 45.0,
@@ -38,7 +38,7 @@
     "open_distance_mm": 60,
     "close_distance_mm": 28
   },
-  "reach_angle_deg": -90.38371261885983,
-  "reach_angle_rad": -1.5774933753754508,
+  "reach_angle_deg": -90.27130147116033,
+  "reach_angle_rad": -1.5751627728347333,
   "custom_urdf_enabled": false
 }

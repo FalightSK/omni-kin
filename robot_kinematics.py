@@ -85,10 +85,10 @@ def get_robot_urdf(robot_type="so_arm101_omni_kin"):
     """Load a preset robot description from the robots directory."""
     robot_type = normalize_robot_type(robot_type)
     filename = {
-        "so_arm101_omni_kin": "so_arm101_omni_kin.urdf",
+        "so_arm101_omni_kin": "SO-ARM101-OMNITEC.urdf",
         "so101": "so101.urdf",
         "so100": "so100.urdf",
-    }.get(robot_type, "so_arm101_omni_kin.urdf")
+    }.get(robot_type, "SO-ARM101-OMNITEC.urdf")
     path = os.path.join(os.path.dirname(__file__), "robots", filename)
     with open(path, "r", encoding="utf-8") as urdf_file:
         return urdf_file.read()
@@ -533,7 +533,7 @@ class SO101OmniKinKinematics(SerialURDFKinematics):
     """SO-ARM101-OMNI-KIN kinematics from the selected URDF chain."""
     def __init__(self, q3_safe_max_deg=0.0, **kwargs):
         super().__init__(
-            get_robot_urdf("so_arm101_omni_kin"), base_link="base", tcp_link="gripper_tcp",
+            get_robot_urdf("so_arm101_omni_kin"), base_link="base_link", tcp_link="gripper_frame_link",
             model_name="SO-ARM101-OMNI-KIN", q3_safe_max_deg=q3_safe_max_deg,
             wrist_roll_safe_max_deg=35.0, max_joint_rate_rad_s=np.radians(120.0),
             tool_roll_tracking=True, **kwargs,
