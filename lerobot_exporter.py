@@ -432,6 +432,7 @@ class LeRobotExporter:
         trajectory_mode="free_form",
         initial_position=None,
         auto_trim=True,
+        trajectory_smoothing=None,
         use_timestamp=True
     ):
         """
@@ -632,6 +633,8 @@ class LeRobotExporter:
                 "task": {"dtype": "string", "shape": [1]}
             }
         }
+        if trajectory_smoothing is not None:
+            info["trajectory_smoothing"] = trajectory_smoothing
         if is_urdf_chain:
             info["robot_kinematics"] = {
                 "source": "URDF",

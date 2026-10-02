@@ -8,6 +8,28 @@ import ConnectPhoneModal from './components/ConnectPhoneModal';
 import ExportLeRobotModal from './components/ExportLeRobotModal';
 import { AlertCircle, RefreshCw } from 'lucide-react';
 
+const TRAJECTORY_MODE_STORAGE_KEY = 'omnikin_trajectory_mode';
+const SMOOTHING_STORAGE_KEY = 'omnikin_smoothing_settings';
+// TODO: Move browser-only UI preferences to server-backed settings when preference storage moves to the database.
+
+function getInitialSmoothingSettings() {
+  const defaults = { method: 'savgol', windowMs: 250 };
+  if (typeof window === 'undefined') return defaults;
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(SMOOTHING_STORAGE_KEY) || '{}');
+    return {
+      method: ['raw', 'savgol', 'moving_average'].includes(stored.method)
+        ? stored.method
+        : defaults.method,
+      windowMs: Number.isInteger(stored.windowMs) && stored.windowMs >= 100 && stored.windowMs <= 600
+        ? stored.windowMs
+        : defaults.windowMs,
+    };
+  } catch {
+    return defaults;
+  }
+}
+
 class ErrorBoundary extends Component {
   constructor(props) {
     super(props);
@@ -57,7 +79,19 @@ export default function App() {
   const [robotModalTab, setRobotModalTab] = useState('offset');
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
-  const [trajectoryMode, setTrajectoryMode] = useState('free_form'); // 'free_form' | 'initial_aware'
+  const [trajectoryMode, setTrajectoryMode] = useState(() => {
+    if (typeof window === 'undefined') return 'free_form';
+    try {
+      return window.localStorage.getItem(TRAJECTORY_MODE_STORAGE_KEY) === 'initial_aware'
+        ? 'initial_aware'
+        : 'free_form';
+    } catch {
+      return 'free_form';
+    }
+  }); // 'free_form' | 'initial_aware'
+  const [smoothingSettings, setSmoothingSettings] = useState(getInitialSmoothingSettings);
+  const setSmoothingMethod = (method) => setSmoothingSettings((current) => ({ ...current, method }));
+  const setSmoothingWindowMs = (windowMs) => setSmoothingSettings((current) => ({ ...current, windowMs }));
   const [robotConfig, setRobotConfig] = useState({
     robot_type: 'so_arm101_omni_kin',
     offset_x: 0.038,
@@ -126,6 +160,22 @@ export default function App() {
     fetchEpisodes();
     fetchRobotConfig();
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(TRAJECTORY_MODE_STORAGE_KEY, trajectoryMode);
+    } catch {
+      // Keep the in-memory choice if browser storage is unavailable.
+    }
+  }, [trajectoryMode]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SMOOTHING_STORAGE_KEY, JSON.stringify(smoothingSettings));
+    } catch {
+      // Keep the in-memory smoothing choice if browser storage is unavailable.
+    }
+  }, [smoothingSettings]);
 
   const handleDeleteEpisode = async (indexOrId) => {
     if (!window.confirm(`Delete Episode #${indexOrId}?`)) return;
@@ -250,6 +300,10 @@ export default function App() {
               onOpenEkfModal={() => setIsEkfModalOpen(true)}
               trajectoryMode={trajectoryMode}
               setTrajectoryMode={setTrajectoryMode}
+              smoothingMethod={smoothingSettings.method}
+              setSmoothingMethod={setSmoothingMethod}
+              smoothingWindowMs={smoothingSettings.windowMs}
+              setSmoothingWindowMs={setSmoothingWindowMs}
             />
           </main>
 
@@ -283,6 +337,8 @@ export default function App() {
             robotConfig={robotConfig}
             trajectoryMode={trajectoryMode}
             onTrajectoryModeChange={setTrajectoryMode}
+            smoothingMethod={smoothingSettings.method}
+            smoothingWindowMs={smoothingSettings.windowMs}
             onEpisodesChanged={fetchEpisodes}
           />
         </div>

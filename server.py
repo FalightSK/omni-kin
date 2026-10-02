@@ -30,7 +30,6 @@ if hasattr(sys.stderr, 'reconfigure'):
 from fastapi import FastAPI, Request, File, UploadFile, Form, Response, Body, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from visual_tracker import ArucoFeatureMapTracker, VisualInertialTracker
 from lerobot_exporter import LeRobotExporter, find_feasible_window
@@ -77,7 +76,6 @@ async def require_operator_token(request: Request, call_next):
     return await call_next(request)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 RECORDINGS_DIR = os.path.join(BASE_DIR, "recordings")
 EXPORT_DIR = os.path.join(BASE_DIR, "lerobot_exports")
 ROBOT_CONFIG_FILE = os.path.join(BASE_DIR, "robot_config.json")
@@ -159,7 +157,7 @@ def validate_custom_urdf_config(config):
     return SerialURDFKinematics(urdf_text, base_link=base_link, tcp_link=tcp_link)
 
 ROBOT_CONFIG = load_robot_config()
-# A previously uploaded URDF is inert until the operator explicitly applies it.
+# Drop the retired DH config field when loading older saved settings.
 ROBOT_CONFIG.pop("custom_dh_table", None)
 if not ROBOT_CONFIG.get("custom_urdf_enabled", False):
     ROBOT_CONFIG.pop("custom_specs", None)
@@ -207,7 +205,6 @@ FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
 os.makedirs(FRONTEND_ASSETS_DIR, exist_ok=True)
 app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="assets")
 
-templates = Jinja2Templates(directory=TEMPLATES_DIR)
 app.mount("/recordings", StaticFiles(directory=RECORDINGS_DIR), name="recordings")
 
 # Global In-Memory Episode Storage & Visual-Inertial Tracker
@@ -361,7 +358,7 @@ def save_episode_meta(ep_data):
     except Exception as e:
         print(f"Error saving episode metadata: {e}")
 
-def sync_episode_kinematics(ep, calib=None):
+def sync_episode_kinematics(ep, calib=None, persist=True):
     """
     Computes and stores server-side joint_states, robot_ee_poses, and actions for an episode.
     These are used by the frontend Viewport3D for 1:1 export/preview parity without client-side IK re-solve.
@@ -514,7 +511,8 @@ def sync_episode_kinematics(ep, calib=None):
         ep['actions'] = actions.tolist()
         ep["kinematics_engine_version"] = KINEMATICS_ENGINE_VERSION
 
-        save_episode_meta(ep)
+        if persist:
+            save_episode_meta(ep)
         print(f"[{time.strftime('%H:%M:%S')}] ✅ Synced kinematics for episode {ep.get('episode_id', '?')} ({len(joints)} frames, reach={ep['reach_angle_deg']}°)")
         return ep['ik_feasibility']
     except Exception as e:
@@ -1144,19 +1142,23 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1"
 
-@app.get("/", response_class=HTMLResponse)
-async def index_page(request: Request):
+def frontend_index_response():
     index_dist = os.path.join(FRONTEND_DIST_DIR, "index.html")
-    if os.path.exists(index_dist):
-        return FileResponse(index_dist)
-    return templates.TemplateResponse(request=request, name="index.html")
+    if not os.path.isfile(index_dist):
+        return HTMLResponse(
+            "Frontend build missing. Run `npm ci` and `npm run build` in frontend/.",
+            status_code=503,
+        )
+    return FileResponse(index_dist)
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index_page():
+    return frontend_index_response()
 
 @app.get("/mobile", response_class=HTMLResponse)
-async def mobile_page(request: Request):
-    index_dist = os.path.join(FRONTEND_DIST_DIR, "index.html")
-    if os.path.exists(index_dist):
-        return FileResponse(index_dist)
-    return templates.TemplateResponse(request=request, name="mobile.html")
+async def mobile_page():
+    return frontend_index_response()
 
 @app.get("/manifest.json")
 async def manifest_file():
@@ -2403,63 +2405,78 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
         "vslam_processing_version": target_ep["vslam_processing_version"]
     })
 
+def _parse_smoothing_options(payload):
+    method = payload.get("method", payload.get("smoothing_method", "savgol"))
+    if method not in {"raw", "savgol", "moving_average"}:
+        raise ValueError("Smoothing method must be raw, savgol, or moving_average")
+    time_window_ms = int(payload.get("time_window_ms", payload.get("smoothing_window_ms", 250)))
+    if not 100 <= time_window_ms <= 600:
+        raise ValueError("Smoothing window must be between 100 and 600 ms")
+    return method, time_window_ms
+
+
+def _apply_smoothing_to_episode(ep, method, time_window_ms, *, persist=True):
+    raw_poses = ep.get("raw_poses") or ep.get("poses", [])
+    if not raw_poses or len(raw_poses) < 4:
+        raise ValueError("Insufficient poses to smooth")
+
+    poses = np.asarray(raw_poses, dtype=np.float64)
+    if method != "raw":
+        poses = visual_tracker.smooth_trajectory(
+            poses,
+            fps=ep.get("fps", 30.0),
+            method=method,
+            time_window_ms=time_window_ms,
+        )
+    if poses.ndim != 2 or poses.shape[1] < 6 or not np.isfinite(poses[:, :6]).all():
+        raise ValueError("Smoothing produced invalid pose data")
+
+    ep["poses"] = poses.tolist()
+    ep["ee_poses"] = camera_gripper_calibrator.transform_trajectory(
+        poses, to_gripper=True
+    ).tolist()
+    ep["active_smoothing"] = {
+        "method": method,
+        "time_window_ms": time_window_ms,
+    }
+    if sync_episode_kinematics(ep, persist=persist) is None:
+        raise ValueError("Authoritative kinematics synchronization failed")
+    return ep
+
+
+def _smoothing_response(ep):
+    return {
+        "status": "success",
+        "episode_index": ep["episode_index"],
+        "poses": ep["poses"],
+        "ee_poses": ep["ee_poses"],
+        "joint_states": ep.get("joint_states", []),
+        "robot_ee_poses": ep.get("robot_ee_poses", []),
+        "fk_table_poses": ep.get("fk_table_poses", []),
+        "fk_camera_poses": ep.get("fk_camera_poses", []),
+        "link_positions": ep.get("link_positions", []),
+        "actions": ep.get("actions", []),
+        "method": ep["active_smoothing"]["method"],
+        "time_window_ms": ep["active_smoothing"]["time_window_ms"],
+    }
+
+
 @app.post("/api/episodes/{episode_index}/smooth")
 async def smooth_episode_trajectory(episode_index: int, payload: dict = Body(...)):
-    """
-    Dynamically re-smooths an episode's 3D trajectory using Savitzky-Golay or Moving Average.
-    """
-    global EPISODES_DB
-    target_ep = None
-    for ep in EPISODES_DB:
-        if ep['episode_index'] == episode_index:
-            target_ep = ep
-            break
-
+    target_ep = next((ep for ep in EPISODES_DB if ep["episode_index"] == episode_index), None)
     if not target_ep:
         return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
-
     if episode_needs_vslam_reprocess(target_ep):
         return JSONResponse({
             "status": "error",
             "message": "Reprocess this episode with the current masked V-SLAM pipeline before smoothing it.",
         }, status_code=409)
-
-    raw_poses = target_ep.get('raw_poses') or target_ep.get('poses', [])
-    if not raw_poses or len(raw_poses) < 4:
-        return JSONResponse({"status": "error", "message": "Insufficient poses to smooth"}, status_code=400)
-
-    method = payload.get('method', 'savgol')
-    time_window_ms = int(payload.get('time_window_ms', 250))
-    fps = target_ep.get('fps', 30.0)
-
-    if method == "raw":
-        smoothed_poses = np.array(raw_poses)
-    else:
-        smoothed_poses = visual_tracker.smooth_trajectory(
-            raw_poses, fps=fps, method=method, time_window_ms=time_window_ms
-        )
-
-    ee_poses = camera_gripper_calibrator.transform_trajectory(smoothed_poses, to_gripper=True)
-    target_ep['poses'] = smoothed_poses.tolist()
-    target_ep['ee_poses'] = ee_poses.tolist()
-    target_ep['active_smoothing'] = {'method': method, 'time_window_ms': time_window_ms}
-
-    # Re-sync full kinematics (joint_states, robot_ee_poses, fk_table_poses, actions) on smoothed poses
-    sync_episode_kinematics(target_ep)
-    save_episode_meta(target_ep)
-
-    return JSONResponse({
-        "status": "success",
-        "episode_index": episode_index,
-        "poses": target_ep['poses'],
-        "ee_poses": target_ep['ee_poses'],
-        "joint_states": target_ep.get('joint_states', []),
-        "robot_ee_poses": target_ep.get('robot_ee_poses', []),
-        "fk_table_poses": target_ep.get('fk_table_poses', []),
-        "fk_camera_poses": target_ep.get('fk_camera_poses', []),
-        "method": method,
-        "time_window_ms": time_window_ms
-    })
+    try:
+        method, time_window_ms = _parse_smoothing_options(payload)
+        _apply_smoothing_to_episode(target_ep, method, time_window_ms)
+        return JSONResponse(_smoothing_response(target_ep))
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
 
 @app.post("/api/episodes/{episode_index}/dev_video")
 async def generate_episode_dev_video(episode_index: int):
@@ -2570,7 +2587,6 @@ async def update_robot_config(request: Request):
 
         if payload.get("reset_to_preset", False):
             ROBOT_CONFIG["custom_urdf_enabled"] = False
-            ROBOT_CONFIG.pop("custom_dh_table", None)
             ROBOT_CONFIG.pop("custom_specs", None)
             ROBOT_CONFIG.pop("custom_urdf", None)
             ROBOT_CONFIG.pop("custom_urdf_base_link", None)
@@ -2595,7 +2611,6 @@ async def update_robot_config(request: Request):
                 # Only clear custom URDF if the payload explicitly disabled it or changed preset without custom URDF active
                 if payload.get("custom_urdf_enabled") is False or ("custom_urdf_enabled" not in payload and not ROBOT_CONFIG.get("custom_urdf_enabled")):
                     ROBOT_CONFIG["custom_urdf_enabled"] = False
-                    ROBOT_CONFIG.pop("custom_dh_table", None)
                     ROBOT_CONFIG.pop("custom_specs", None)
                     ROBOT_CONFIG.pop("custom_urdf", None)
                     ROBOT_CONFIG.pop("custom_urdf_base_link", None)
@@ -2809,7 +2824,6 @@ async def recalculate_trajectory_endpoint(request: Request):
 
             if new_config.get("reset_to_preset", False):
                 ROBOT_CONFIG["custom_urdf_enabled"] = False
-                ROBOT_CONFIG.pop("custom_dh_table", None)
                 ROBOT_CONFIG.pop("custom_specs", None)
                 ROBOT_CONFIG.pop("custom_urdf", None)
                 ROBOT_CONFIG.pop("custom_urdf_base_link", None)
@@ -2833,7 +2847,6 @@ async def recalculate_trajectory_endpoint(request: Request):
                     ROBOT_CONFIG["robot_type"] = r_type
                     if new_config.get("custom_urdf_enabled") is False or ("custom_urdf_enabled" not in new_config and not ROBOT_CONFIG.get("custom_urdf_enabled")):
                         ROBOT_CONFIG["custom_urdf_enabled"] = False
-                        ROBOT_CONFIG.pop("custom_dh_table", None)
                         ROBOT_CONFIG.pop("custom_specs", None)
                         ROBOT_CONFIG.pop("custom_urdf", None)
                         ROBOT_CONFIG.pop("custom_urdf_base_link", None)
@@ -3312,7 +3325,6 @@ async def apply_urdf_endpoint(request: Request):
         q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
 
         ROBOT_CONFIG["robot_type"] = "custom_urdf"
-        ROBOT_CONFIG.pop("custom_dh_table", None)
         ROBOT_CONFIG["custom_specs"] = specs
         ROBOT_CONFIG["custom_urdf"] = urdf_text
         ROBOT_CONFIG["custom_urdf_base_link"] = solver.base_link
@@ -3383,6 +3395,7 @@ async def export_lerobot(request: Request = None):
         traj_mode = payload.get("trajectory_mode", "free_form")
         init_pos = payload.get("initial_position", ROBOT_CONFIG.get("initial_position"))
         auto_trim = payload.get("auto_trim", True)
+        smoothing_method, smoothing_window_ms = _parse_smoothing_options(payload)
 
         # Sync latest configuration
         lerobot_exporter.set_robot_config(
@@ -3397,18 +3410,29 @@ async def export_lerobot(request: Request = None):
         use_ts = bool(payload.get("use_timestamp", True))
         ds_name = dataset_slug(payload.get("dataset_name", "mobile_aruco_3d_trajectories"))
 
-        # Ensure each episode has its own workspace calibration and synchronized kinematics
+        # Filter and synchronize each episode independently using the website's
+        # current settings, while preserving the stored source recordings.
+        export_episodes = []
         for ep in EPISODES_DB:
-            if not ep.get("workspace_calibration") or ep.get("joint_states") is None:
-                print(f"[{time.strftime('%H:%M:%S')}] 🔄 Auto-syncing kinematics for episode {ep.get('episode_id', '?')} before export...")
-                sync_episode_kinematics(ep)
+            export_ep = copy.deepcopy(ep)
+            _apply_smoothing_to_episode(
+                export_ep,
+                smoothing_method,
+                smoothing_window_ms,
+                persist=False,
+            )
+            export_episodes.append(export_ep)
 
         export_path = lerobot_exporter.export_dataset(
-            EPISODES_DB,
+            export_episodes,
             dataset_name=ds_name,
             trajectory_mode=traj_mode,
             initial_position=init_pos,
             auto_trim=auto_trim,
+            trajectory_smoothing={
+                "method": smoothing_method,
+                "time_window_ms": smoothing_window_ms,
+            },
             use_timestamp=use_ts
         )
         export_folder = os.path.basename(export_path)
@@ -3422,6 +3446,10 @@ async def export_lerobot(request: Request = None):
             "robot_type": ROBOT_CONFIG["robot_type"],
             "trajectory_mode": traj_mode,
             "auto_trim": auto_trim,
+            "smoothing": {
+                "method": smoothing_method,
+                "time_window_ms": smoothing_window_ms,
+            },
             "workspace_calibration": ROBOT_CONFIG,
             "total_episodes": len(EPISODES_DB),
             "total_frames": total_frames,
@@ -3562,13 +3590,13 @@ if __name__ == "__main__":
     # Auto-generate SSL certificates if missing to support mobile camera/sensor access
     if not has_certs and ("--no-ssl" not in sys.argv):
         try:
-            from generate_cert import generate_ssl_certificate
+            from scripts.generate_cert import generate_ssl_certificate
             print("[*] SSL certificates missing. Auto-generating self-signed cert.pem and key.pem...")
             generate_ssl_certificate(cert_path=ssl_cert, key_path=ssl_key)
             has_certs = os.path.exists(ssl_cert) and os.path.exists(ssl_key)
         except Exception as e:
             print(f"[!] Note: Could not auto-generate SSL certificates ({e}).")
-            print("    Run 'python generate_cert.py' or 'pip install cryptography' to enable HTTPS.")
+            print("    Run 'python scripts/generate_cert.py' or 'pip install cryptography' to enable HTTPS.")
 
     use_ssl = ("--ssl" in sys.argv or "-s" in sys.argv or has_certs) and ("--no-ssl" not in sys.argv)
 

@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { X, Package, Sparkles, Scissors, CheckCircle2, AlertTriangle, ArrowRight, Loader2 } from 'lucide-react';
 
+const AUTO_TRIM_STORAGE_KEY = 'omnikin_export_auto_trim';
+
 export default function ExportLeRobotModal({
   isOpen,
   onClose,
@@ -8,9 +10,17 @@ export default function ExportLeRobotModal({
   robotConfig = {},
   trajectoryMode = 'free_form',
   onTrajectoryModeChange = () => {},
+  smoothingMethod = 'savgol',
+  smoothingWindowMs = 250,
   onEpisodesChanged = () => {}
 }) {
-  const [autoTrim, setAutoTrim] = useState(true);
+  const [autoTrim, setAutoTrim] = useState(() => {
+    try {
+      return window.localStorage.getItem(AUTO_TRIM_STORAGE_KEY) !== 'false';
+    } catch {
+      return true;
+    }
+  });
   const [isExporting, setIsExporting] = useState(false);
   const [exportResult, setExportResult] = useState(null);
   const [errorMessage, setErrorMessage] = useState(null);
@@ -21,6 +31,14 @@ export default function ExportLeRobotModal({
       setErrorMessage(null);
     }
   }, [isOpen]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(AUTO_TRIM_STORAGE_KEY, String(autoTrim));
+    } catch {
+      // Keep the in-memory choice if browser storage is unavailable.
+    }
+  }, [autoTrim]);
 
   if (!isOpen) return null;
 
@@ -45,7 +63,9 @@ export default function ExportLeRobotModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           trajectory_mode: trajectoryMode,
-          auto_trim: autoTrim
+          auto_trim: autoTrim,
+          smoothing_method: smoothingMethod,
+          smoothing_window_ms: smoothingWindowMs
         })
       });
       const data = await res.json();
@@ -69,7 +89,11 @@ export default function ExportLeRobotModal({
         const response = await fetch(`/api/episodes/${episode.episode_index}/reprocess`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ smooth: true, smooth_method: 'savgol', smooth_window_ms: 250 })
+          body: JSON.stringify({
+            smooth: smoothingMethod !== 'raw',
+            smooth_method: smoothingMethod,
+            smooth_window_ms: smoothingWindowMs
+          })
         });
         const data = await response.json();
         if (!response.ok || data.status === 'error') {
@@ -206,6 +230,11 @@ export default function ExportLeRobotModal({
                 </span>
               </button>
             </div>
+          </div>
+
+          <div className="rounded-lg border border-neutral-800 bg-[#050505] px-3 py-2 text-[11px] text-neutral-400">
+            Export uses the dashboard filter: <span className="text-neutral-200">{smoothingMethod === 'raw' ? 'Raw' : smoothingMethod === 'savgol' ? 'Savitzky–Golay' : 'Moving Average'}</span>
+            {smoothingMethod !== 'raw' && <> · <span className="text-neutral-200">{smoothingWindowMs} ms</span></>}. Each episode is processed independently.
           </div>
 
           {/* Auto-Trim Boundary Out-of-Reach Frames Toggle */}

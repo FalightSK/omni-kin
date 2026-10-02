@@ -103,9 +103,9 @@ Modern mobile browsers strictly require **HTTPS** to allow access to the camera 
 
 > 💡 **SSL Certificate Setup**: `server.py` automatically generates `cert.pem` and `key.pem` on its first run. You can also re-generate them at any time with custom IP addresses:
 > ```bash
-> python generate_cert.py
+> python scripts/generate_cert.py
 > # Or for a specific IP:
-> python generate_cert.py --ip 192.168.1.52
+> python scripts/generate_cert.py --ip 192.168.1.52
 > ```
 
 ```mermaid

@@ -8,7 +8,12 @@ __pycache__/
 venv/
 env/
 ENV/
+.venv/
 .env
+
+# Installed dependencies and generated frontend build
+node_modules/
+frontend/dist/
 
 # Recorded Sessions & Excluded Exports
 recordings/*
@@ -16,6 +21,7 @@ recordings/*
 lerobot_exports/*
 !lerobot_exports/.gitkeep
 test_export_output/
+test_lerobot_export/
 
 # Media and Dataset Files
 *.mp4
@@ -32,8 +38,4 @@ test_export_output/
 .DS_Store
 Thumbs.db
 
-# Frontend build bundles
-frontend/dist/assets/index-*
-frontend/dist/assets/*.js
-frontend/dist/assets/*.css
-frontend/dist/assets/*.map
+*.log

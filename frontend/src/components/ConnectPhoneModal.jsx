@@ -186,7 +186,7 @@ export default function ConnectPhoneModal({ isOpen, onClose }) {
               <p>• <strong>iOS Safari:</strong> Tap "Show Details" ➔ "visit this website" ➔ "Visit Website"</p>
             </div>
             <div className="text-[10px] text-neutral-400 border-t border-neutral-800/80 pt-2 flex items-center justify-between font-mono">
-              <span>💡 New certs: <code className="text-neutral-200 bg-neutral-900 px-1 py-0.5 rounded">python generate_cert.py</code></span>
+              <span>💡 New certs: <code className="text-neutral-200 bg-neutral-900 px-1 py-0.5 rounded">python scripts/generate_cert.py</code></span>
               <span className="text-neutral-500">cert.pem</span>
             </div>
           </div>

@@ -66,9 +66,6 @@ function filterPreviewPoses(poses, method, windowMs, fps) {
   if (frameWindow < 3) return poses;
   const half = Math.floor(frameWindow / 2);
   const offsets = Array.from({ length: frameWindow }, (_, i) => i - half);
-
-  // Quadratic Savitzky-Golay weights derived from the symmetric least-squares
-  // normal matrix. They preserve local shape without contacting the server.
   const sum2 = offsets.reduce((total, value) => total + value * value, 0);
   const sum4 = offsets.reduce((total, value) => total + value ** 4, 0);
   const determinant = frameWindow * sum4 - sum2 * sum2;
@@ -103,7 +100,11 @@ export default function Dashboard({
   onOpenRobotModal,
   onOpenEkfModal,
   trajectoryMode = 'free_form',
-  setTrajectoryMode = () => {}
+  setTrajectoryMode = () => {},
+  smoothingMethod = 'savgol',
+  setSmoothingMethod = () => {},
+  smoothingWindowMs = 250,
+  setSmoothingWindowMs = () => {}
 }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [combinedSliderIndex, setCombinedSliderIndex] = useState(0);
@@ -132,9 +133,6 @@ export default function Dashboard({
   const [approachData, setApproachData] = useState(null);
   const [isApproachLoading, setIsApproachLoading] = useState(false);
 
-  // Trajectory Smoothing Configuration (Savitzky-Golay / Moving Average)
-  const [smoothingMethod, setSmoothingMethod] = useState('savgol');
-  const [smoothingWindowMs, setSmoothingWindowMs] = useState(250);
   // A capture is fetched asynchronously.  Advance this once after its points
   // are committed so the imperative WebGL layer performs its initial draw.
   const [previewRevision, setPreviewRevision] = useState(0);
@@ -284,9 +282,6 @@ export default function Dashboard({
     () => filterPreviewPoses(sourceEePoses, smoothingMethod, smoothingWindowMs, activeEp?.fps || 30),
     [sourceEePoses, smoothingMethod, smoothingWindowMs, activeEp?.fps]
   );
-  // Recreate the WebGL viewport only when a new reference trajectory arrives
-  // (upload, episode switch, or explicit recalculation). Filter changes keep
-  // the same renderer and replace only the in-memory display arrays.
   const previewSourceKey = `${activeEp?.episode_id ?? 'empty'}:${processedPoses.length}:${candidateEePoses.length}`;
   useEffect(() => {
     if (!poses.length && !eePoses.length) return undefined;
@@ -1207,7 +1202,7 @@ export default function Dashboard({
             <div className="flex items-center gap-2">
               <Sparkles className="w-3.5 h-3.5 text-neutral-400" />
               <span className="font-semibold text-neutral-300 text-[11px] uppercase tracking-wider font-mono">Smoothing:</span>
-              <span className="text-[10px] text-neutral-500 font-medium">Live preview · no recording changes</span>
+              <span className="text-[10px] text-neutral-500 font-medium">Live preview · export uses this filter</span>
             </div>
 
             <div className="flex items-center gap-1 bg-neutral-950 p-0.5 rounded-lg border border-neutral-800">

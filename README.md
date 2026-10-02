@@ -145,7 +145,6 @@ scipy>=1.10.0
 pandas>=2.0.0
 pyarrow>=12.0.0
 opencv-python>=4.8.0
-jinja2>=3.1.0
 python-multipart>=0.0.6
 ```
 
@@ -155,12 +154,12 @@ The desktop dashboard is a modern React + Vite + Tailwind CSS application locate
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run build
 cd ..
 ```
 
-*Note: The pre-compiled assets in `frontend/dist/` are automatically served by `server.py` at `http://localhost:8000`.*
+The build creates the ignored `frontend/dist/` files that `server.py` serves. Build again after frontend changes.
 
 ---
 
@@ -251,9 +250,9 @@ Console output will display:
 > - When you start `python server.py`, it automatically detects if `cert.pem` and `key.pem` exist. If missing, it **auto-generates** self-signed certificates for your local machine and LAN IPs.
 > - You can also manually generate or re-sign certificates at any time with custom IPs:
 >   ```bash
->   python generate_cert.py
+>   python scripts/generate_cert.py
 >   # Or with explicit IP:
->   python generate_cert.py --ip 192.168.1.52
+>   python scripts/generate_cert.py --ip 192.168.1.52
 >   ```
 > - *Alternative with OpenSSL (Linux/macOS)*:
 >   ```bash
@@ -564,7 +563,7 @@ The FastAPI backend exposes the following REST endpoints:
 ### Robot Configuration & Calibration
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/robot/config` | Returns current embodiment, preset DH data where applicable, custom-chain selectors, workspace calibration, and safety settings |
+| `GET` | `/api/robot/config` | Returns the active URDF chain, custom-chain selectors, workspace calibration, and safety settings |
 | `POST` | `/api/robot/config` | Updates robot type, workspace offsets ($X, Y, Z, \text{Yaw}$), and safety limits |
 | `GET` | `/api/robot/initial_position` | Returns the canonical standby/home pose configuration |
 | `POST` | `/api/robot/initial_position` | Updates the standby/home pose for `initial_aware` mode |
@@ -598,30 +597,30 @@ The FastAPI backend exposes the following REST endpoints:
 
 ## 🧪 Testing & Verification
 
-Execute the automated test suite with `pytest`:
+Install development dependencies once with `pip install -r requirements-dev.txt`, then run the tests from the repository root:
 
 ```bash
-# Run all 24 unit, kinematics, URDF converter, integrity, and export pipeline tests
-pytest -v
+# Run the complete suite
+pytest
 ```
 
 Or run focused subsystem test suites individually:
 
 ```bash
 # Test 1: ArUco 8-point PnP, 12-state EKF fusion, and virtual SLAM recovery
-pytest test_aruco_pipeline.py -v
+pytest tests/test_aruco_pipeline.py
 
 # Test 2: Multi-embodiment robot kinematics and 3D Euclidean clearance barrier
-pytest test_robot_kinematics.py -v
+pytest tests/test_robot_kinematics.py
 
-# Test 3: Direct URDF chain FK/IK, URDF compatibility parsing, & episode recalculation
-pytest test_urdf_converter.py -v
+# Test 3: Selected-chain URDF parsing, FK/IK, and export dimensions
+pytest tests/test_direct_urdf_kinematics.py
 
 # Test 4: End-to-end dataset export with independent per-episode base positions
-pytest test_pipeline.py -v
+pytest tests/test_pipeline.py
 
 # Test 5: Dataset security, frame timestamps, and LeRobot action-shifting invariants
-pytest test_integrity.py -v
+pytest tests/test_integrity.py
 ```
 
 ---
