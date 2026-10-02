@@ -6,7 +6,8 @@ Unit tests for Dual-ArUco Rigid Board PnP & EKF Visual-Inertial Fusion Engine
 import os
 import cv2
 import numpy as np
-from visual_tracker import VisualInertialTracker, VisualInertialEKF
+import pytest
+from visual_tracker import ArucoFeatureMapTracker, VisualInertialTracker, VisualInertialEKF
 
 def test_marker_generation():
     tracker = VisualInertialTracker(tag_a_size=0.10, tag_b_size=0.05, tag_a_id=0, tag_b_id=1)
@@ -290,6 +291,8 @@ def test_gripper_marker_tracking():
 
     det_open, _, _, _, _, _, corners_open = tracker.detect_marker_pnp(frame_open, camera_matrix, dist_coeffs, return_corners=True)
     grip_open = tracker.last_gripper_state
+    assert not det_open, "Gripper-only ArUco IDs must never be used as table references"
+    assert getattr(tracker, "last_rvec", None) is None and getattr(tracker, "last_tvec", None) is None, "Gripper-only detections must not create a table pose"
     assert grip_open["detected"], "Both Tag 2 & 3 should be detected"
     assert grip_open["gripper_val"] >= 90.0, f"Wide distance should be ~100% open, got {grip_open['gripper_val']}% ({grip_open['dist_mm']}mm)"
     print(f"[PASS] Gripper OPEN state detected: {grip_open['gripper_val']}% ({grip_open['dist_mm']}mm)")
@@ -306,6 +309,13 @@ def test_gripper_marker_tracking():
     assert grip_closed["gripper_val"] <= 15.0, f"Narrow distance should be ~0% closed, got {grip_closed['gripper_val']}% ({grip_closed['dist_mm']}mm)"
     print(f"[PASS] Gripper CLOSED state detected: {grip_closed['gripper_val']}% ({grip_closed['dist_mm']}mm)")
 
+    # Unknown IDs also cannot enter table PnP.
+    unknown_img = tracker.generate_raw_marker(marker_id=17, side_pixels=120)
+    frame_unknown = np.ones((720, 1280, 3), dtype=np.uint8) * 240
+    frame_unknown[250:370, 500:620] = cv2.cvtColor(unknown_img, cv2.COLOR_GRAY2BGR)
+    det_unknown, _, _, _, _, _, _ = tracker.detect_marker_pnp(frame_unknown, camera_matrix, dist_coeffs, return_corners=True)
+    assert not det_unknown, "Unknown ArUco IDs must not establish a table pose"
+
     # Case C: Combined table anchor (Tag 0) + Gripper jaw markers (Tag 2 & 3)
     tag0_img = tracker.generate_raw_marker(marker_id=0, side_pixels=160)
     frame_combined = np.ones((720, 1280, 3), dtype=np.uint8) * 240
@@ -319,6 +329,125 @@ def test_gripper_marker_tracking():
     print(f"[PASS] Combined Table PnP + Gripper Tracking passed! Cam Z={p_comb[2]:.2f}m, Gripper={tracker.last_gripper_state['gripper_val']}%")
 
     print("[PASS] test_gripper_marker_tracking passed completely!\n")
+
+
+def test_gripper_markers_are_excluded_from_anchored_and_unanchored_features(monkeypatch):
+    tracker = VisualInertialTracker()
+    marker_corners = np.array(
+        [[[40, 40], [60, 40], [60, 60], [40, 60]]], dtype=np.float32
+    )
+
+    # The process loop should forward only gripper IDs 2 and 3, never table or unknown tags.
+    tracker.last_detected_ids = [0, 2, 17, 3]
+    tracker.last_detected_corners = [
+        np.full((1, 4, 2), marker_id, dtype=np.float32)
+        for marker_id in tracker.last_detected_ids
+    ]
+    selected = tracker._get_gripper_marker_corners()
+    assert len(selected) == 2
+    assert selected[0] is tracker.last_detected_corners[1]
+    assert selected[1] is tracker.last_detected_corners[3]
+
+    image = np.full((100, 100), 180, dtype=np.uint8)
+    yy, xx = np.indices((21, 21))
+    image[40:61, 40:61] = (((xx + yy) % 2) * 255).astype(np.uint8)
+    camera_matrix = np.array(
+        [[100.0, 0.0, 50.0], [0.0, 100.0, 50.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    feature_tracker = ArucoFeatureMapTracker(camera_matrix, np.zeros((5, 1), dtype=np.float32))
+    feature_tracker.min_features = 10
+    extracted_masks = []
+    extracted_frames = []
+
+    def fake_extract(gray, mask=None):
+        extracted_frames.append(gray.copy())
+        extracted_masks.append(mask.copy())
+        return np.array([[80.0, 80.0]], dtype=np.float32)
+
+    feature_tracker._extract_new_features = fake_extract
+
+    # Anchored feature replenishment excludes the visible marker and a padded guard band.
+    feature_tracker.add_aruco_ground_truth(
+        image, np.array([0.0, 0.0, 0.3]), np.eye(3), [marker_corners]
+    )
+    anchored_mask = extracted_masks[-1]
+    assert anchored_mask[50, 50] == 0
+    assert anchored_mask[40, 50] == 0
+    assert anchored_mask[20, 50] == 255
+    anchored_tracking_frame = extracted_frames[-1]
+    assert np.var(anchored_tracking_frame[40:61, 40:61]) < np.var(image[40:61, 40:61])
+    assert np.var(image[40:61, 40:61]) > 10000, "The source frame should remain unmodified"
+
+    # Seed optical flow with two points on the marker and six on the scene.
+    tracked_points = np.array(
+        [[45, 45], [55, 55], [15, 15], [20, 20], [80, 20], [20, 80], [80, 80], [25, 80]],
+        dtype=np.float32,
+    )
+    feature_tracker.tracked_pts = tracked_points.copy()
+    feature_tracker.tracked_ids = list(range(len(tracked_points)))
+    flow_frames = []
+
+    def fake_lk(_previous, _current, points, _initial, **_kwargs):
+        flow_frames.append((_previous.copy(), _current.copy()))
+        points_2d = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        return points_2d.reshape(-1, 1, 2), np.ones((len(points_2d), 1), dtype=np.uint8), None
+
+    monkeypatch.setattr(cv2, "calcOpticalFlowPyrLK", fake_lk)
+    monkeypatch.setattr(cv2, "findEssentialMat", lambda *_args, **_kwargs: (None, None))
+    success, *_ = feature_tracker.track_without_aruco(
+        image, excluded_corners=[marker_corners]
+    )
+    assert success
+    assert len(flow_frames) == 1
+    for frame_seen_by_lk in flow_frames[0]:
+        assert np.var(frame_seen_by_lk[40:61, 40:61]) < np.var(image[40:61, 40:61])
+    unanchored_mask = extracted_masks[-1]
+    assert unanchored_mask[50, 50] == 0
+    assert unanchored_mask[20, 50] == 255
+    assert np.var(extracted_frames[-1][40:61, 40:61]) < np.var(image[40:61, 40:61])
+    assert ArucoFeatureMapTracker._points_allowed_by_mask(
+        feature_tracker.tracked_pts, unanchored_mask
+    ).all(), "Tracked and replenished VO points must stay outside gripper marker regions"
+
+    # A too-small point set takes the no-pose early return, but must still lose
+    # stale marker-area points before those points can reach the dev overlay.
+    sparse_tracker = ArucoFeatureMapTracker(camera_matrix, np.zeros((5, 1), dtype=np.float32))
+    sparse_tracker.prev_gray = image.copy()
+    sparse_tracker.tracked_pts = np.array(
+        [[45, 45], [55, 55], [15, 15], [80, 80]], dtype=np.float32
+    )
+    sparse_tracker.tracked_ids = [0, 1, 2, 3]
+    success, *_ = sparse_tracker.track_without_aruco(
+        image, excluded_corners=[marker_corners]
+    )
+    assert not success
+    assert sparse_tracker.tracked_ids == [2, 3]
+    assert ArucoFeatureMapTracker._points_allowed_by_mask(
+        sparse_tracker.tracked_pts, sparse_tracker.last_feature_mask
+    ).all()
+
+    # The dev renderer must not draw green feature points over the excluded
+    # marker region even though it displays the original, unmasked camera image.
+    overlay_corners = np.array(
+        [[[100, 100], [140, 100], [140, 140], [100, 140]]], dtype=np.float32
+    )
+    overlay_mask = ArucoFeatureMapTracker._build_feature_mask(
+        (200, 200), [overlay_corners]
+    )
+    raw_frame = np.zeros((200, 200, 3), dtype=np.uint8)
+    dev_frame = tracker.render_dev_frame(
+        frame=raw_frame,
+        camera_matrix=camera_matrix,
+        dist_coeffs=np.zeros((5, 1), dtype=np.float32),
+        frame_idx=0,
+        total_frames=1,
+        fps=30.0,
+        tracked_pts=np.array([[120, 120], [180, 150]], dtype=np.float32),
+        feature_mask=overlay_mask,
+    )
+    assert np.array_equal(dev_frame[120, 120], raw_frame[120, 120])
+    assert np.array_equal(dev_frame[150, 180], np.array([50, 255, 120], dtype=np.uint8))
 
 
 if __name__ == "__main__":

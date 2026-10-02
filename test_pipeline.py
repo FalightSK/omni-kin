@@ -113,7 +113,10 @@ def test_lerobot_export(tmp_path):
         info_json = json.load(f)
     assert info_json['robot_type'] in ['so_arm101_omni_kin', 'so100', 'so101']
     assert 'workspace_calibration' in info_json
-    assert 'dh_table' in info_json
+    assert 'robot_kinematics' in info_json
+    assert info_json['robot_kinematics']['source'] == 'URDF'
+    assert 'dh_table' not in info_json
+    assert info_json['features']['observation.state']['names'] == info_json['robot_kinematics']['joint_names'] + ['gripper']
     assert info_json['total_episodes'] == 2
     print(f"[OK] meta/info.json validated. Robot: {info_json['robot_type']}, Total Episodes: {info_json['total_episodes']}")
 

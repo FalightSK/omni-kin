@@ -11,6 +11,7 @@ from typing import Any
 
 EPISODE_MANIFEST_VERSION = 1
 PROCESSING_VERSION = "integrity-v1"
+VSLAM_PROCESSING_VERSION = "aruco-feature-exclusion-v2"
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_URDF_BYTES = 1 * 1024 * 1024
@@ -70,6 +71,7 @@ def episode_manifest(*, source_sha256: str, frame_count: int, fps: float,
     return {
         "manifest_version": EPISODE_MANIFEST_VERSION,
         "processing_version": PROCESSING_VERSION,
+        "vslam_processing_version": VSLAM_PROCESSING_VERSION,
         "created_at": utc_timestamp(),
         "source": {"sha256": source_sha256, "frame_count": frame_count, "fps": fps},
         "imu": {"sample_count": imu_samples, "timebase": "client_elapsed_seconds"},
@@ -86,3 +88,14 @@ def legacy_manifest() -> dict[str, Any]:
         "status": "legacy_unverified",
         "validation": {"state": "reprocess_required", "errors": ["Episode predates provenance validation"]},
     }
+
+
+def episode_needs_vslam_reprocess(episode: dict[str, Any]) -> bool:
+    """Whether saved pose/video artifacts predate the marker exclusion pipeline."""
+    manifest = episode.get("manifest") or {}
+    if manifest.get("vslam_processing_version") != VSLAM_PROCESSING_VERSION:
+        return True
+    if (manifest.get("validation") or {}).get("state") != "passed":
+        return True
+    migration_state = episode.get("vslam_migration_state")
+    return migration_state is not None and migration_state != "current"

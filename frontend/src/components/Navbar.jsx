@@ -1,5 +1,5 @@
 import React from 'react';
-import { Sliders, Printer, Zap, Package, Smartphone, LayoutDashboard, Bot, QrCode } from 'lucide-react';
+import { Sliders, Printer, ChevronDown, Zap, Package, Smartphone, LayoutDashboard, Bot, QrCode } from 'lucide-react';
 
 export default function Navbar({
   currentView,
@@ -12,7 +12,7 @@ export default function Navbar({
   robotConfig,
   trajectoryMode = 'free_form'
 }) {
-  const isCustomUrdf = Boolean(robotConfig?.custom_urdf_enabled || robotConfig?.robot_type === 'custom_urdf' || robotConfig?.custom_dh_table);
+  const isCustomUrdf = Boolean(robotConfig?.custom_urdf_enabled || robotConfig?.robot_type === 'custom_urdf' || robotConfig?.custom_urdf);
   const robotName = isCustomUrdf
     ? (robotConfig?.custom_specs?.robot_name || 'CUSTOM-URDF').toUpperCase()
     : (robotConfig?.robot_type || 'so101').toUpperCase().replace(/_/g, '-');
@@ -83,14 +83,34 @@ export default function Navbar({
           </span>
         </button>
 
-        {/* Action Buttons */}
-        <button
-          onClick={() => window.open('/api/marker/print_dual', '_blank')}
-          className="px-3 py-1.5 rounded-lg border border-neutral-800 bg-neutral-900/80 hover:bg-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm"
-        >
-          <Printer className="w-3.5 h-3.5 text-neutral-400" />
-          <span>Print ArUco</span>
-        </button>
+        {/* Print options */}
+        <details className="relative">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-lg border border-neutral-800 bg-neutral-900/80 px-3 py-1.5 text-xs font-medium text-neutral-300 shadow-sm transition-all hover:border-neutral-700 hover:bg-neutral-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400 focus-visible:ring-offset-2 focus-visible:ring-offset-black">
+            <Printer className="h-3.5 w-3.5 text-neutral-400" />
+            <span>Print</span>
+            <ChevronDown className="h-3.5 w-3.5 text-neutral-500" />
+          </summary>
+          <div className="absolute right-0 top-full z-50 mt-2 w-60 rounded-lg border border-neutral-800 bg-neutral-950 p-1.5 shadow-xl">
+            <a
+              href="/api/marker/print_dual"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex flex-col gap-0.5 rounded-md px-3 py-2 text-xs text-neutral-200 transition-colors hover:bg-neutral-800 focus-visible:bg-neutral-800 focus-visible:outline-none"
+            >
+              <span className="font-medium">Table ArUco board</span>
+              <span className="text-[11px] text-neutral-500">Print the 10 cm + 5 cm reference markers</span>
+            </a>
+            <a
+              href="/api/marker/print_gripper"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex flex-col gap-0.5 rounded-md px-3 py-2 text-xs text-neutral-200 transition-colors hover:bg-neutral-800 focus-visible:bg-neutral-800 focus-visible:outline-none"
+            >
+              <span className="font-medium">Gripper markers</span>
+              <span className="text-[11px] text-neutral-500">Tags 2 and 3 · 22 mm</span>
+            </a>
+          </div>
+        </details>
 
         <button
           onClick={onAddSample}

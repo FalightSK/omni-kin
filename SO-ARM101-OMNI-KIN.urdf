@@ -206,6 +206,13 @@
         <axis xyz="1.9718524959085454e-31 0.707105755494762 0.7071082278931436" />
         <limit lower="-3.141593" upper="3.141593" effort="1000000" velocity="1000000" />
     </joint>
+    <!-- Virtual fingertip TCP: 110 mm from the wrist along the roll axis. -->
+    <link name="gripper_tcp" />
+    <joint name="gripper_tcp_joint" type="fixed">
+        <parent link="gripper_base" />
+        <child link="gripper_tcp" />
+        <origin xyz="0 0.0369151517 0.0369152807" rpy="2.356194490192345 0 3.141592653589793" />
+    </joint>
     <joint name="gripper_jaw_joint" type="continuous">
         <origin xyz="-6.68000000001076e-05 0.02983709377304219 0.029768482292113645" rpy="-2.3649031062395673 -0.0062240146921263345 3.135476226556663" />
         <parent link="gripper_base" />

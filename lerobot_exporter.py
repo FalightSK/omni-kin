@@ -23,6 +23,7 @@ if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
 from robot_kinematics import (
+    KINEMATICS_ENGINE_VERSION,
     get_robot_solver,
     get_robot_specs,
     WorkspaceCalibrator,
@@ -122,37 +123,40 @@ class LeRobotExporter:
         robot_type="so_arm101_omni_kin",
         workspace_calibrator=None,
         q3_safe_max_deg=None,
-        custom_dh_table=None,
-        custom_urdf=None
+        custom_urdf=None,
+        custom_urdf_base_link=None,
+        custom_urdf_tcp_link=None,
     ):
         self.output_dir = output_dir
         self.fps = int(fps)
         self.robot_type = robot_type
         self.q3_safe_max_deg = float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0
-        self.custom_dh_table = custom_dh_table
         self.custom_urdf = custom_urdf
-        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg, custom_dh_table=self.custom_dh_table, custom_urdf=self.custom_urdf)
+        self.custom_urdf_base_link = custom_urdf_base_link
+        self.custom_urdf_tcp_link = custom_urdf_tcp_link
+        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg, custom_urdf=self.custom_urdf, custom_urdf_base_link=self.custom_urdf_base_link, custom_urdf_tcp_link=self.custom_urdf_tcp_link)
         self.workspace_calibrator = workspace_calibrator or WorkspaceCalibrator(reach_angle_rad=getattr(self.ik_solver, "reach_angle_rad", 0.0))
         if hasattr(self.ik_solver, "reach_angle_rad"):
             self.workspace_calibrator.reach_angle_rad = self.ik_solver.reach_angle_rad
 
-    def set_robot_config(self, robot_type="so_arm101_omni_kin", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0, q3_safe_max_deg=None, custom_dh_table=None, custom_urdf=None, **kwargs):
+    def set_robot_config(self, robot_type="so_arm101_omni_kin", offset_x=0.20, offset_y=0.00, offset_z=0.00, yaw_deg=0.0, q3_safe_max_deg=None, custom_urdf=None, **kwargs):
         """
         Updates the active robot model preset, workspace offset, and camera safe wrist limits.
         """
         self.robot_type = robot_type
         if q3_safe_max_deg is not None:
             self.q3_safe_max_deg = float(q3_safe_max_deg)
-        self.custom_dh_table = custom_dh_table
         self.custom_urdf = custom_urdf
-        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg, custom_dh_table=self.custom_dh_table, custom_urdf=self.custom_urdf)
+        self.custom_urdf_base_link = kwargs.get("custom_urdf_base_link")
+        self.custom_urdf_tcp_link = kwargs.get("custom_urdf_tcp_link")
+        self.ik_solver = get_robot_solver(robot_type, q3_safe_max_deg=self.q3_safe_max_deg, custom_urdf=self.custom_urdf, custom_urdf_base_link=self.custom_urdf_base_link, custom_urdf_tcp_link=self.custom_urdf_tcp_link)
         reach_rad = getattr(self.ik_solver, "reach_angle_rad", 0.0)
         self.workspace_calibrator.update_config(offset_x, offset_y, offset_z, yaw_deg, reach_angle_rad=reach_rad)
 
     def _ensure_joint_states_and_poses(self, ep, trajectory_mode="free_form", initial_position=None, auto_trim=True):
         """
-        Extracts or computes both joint states [q0, q1, q2, q3, q4, gripper]
-        and Cartesian EE poses [x, y, z, roll, pitch, yaw] with gripper.
+        Extracts or computes the selected robot joint state followed by gripper
+        and Cartesian EE poses [x, y, z, roll, pitch, yaw].
         When auto_trim == True, trims idle lead-in and lead-out frames outside reachable workspace.
         When trajectory_mode == 'initial_aware', prepends a smooth quintic minimum-jerk
         approach trajectory from the canonical Initial Position (Home) to the start waypoint.
@@ -190,17 +194,37 @@ class LeRobotExporter:
             ep_calibrator = self.workspace_calibrator
             ep['workspace_calibration'] = ep_calibrator.get_config()
 
-        # Invalidate cached kinematics if explicitly marked stale or if episode robot_type does not match active embodiment
-        active_robot_id = "custom_urdf" if (self.custom_dh_table or self.custom_urdf) else self.robot_type
+        # Invalidate cached states if their URDF selectors or joint width do not match.
+        active_robot_id = "custom_urdf" if self.custom_urdf else self.robot_type
         robot_mismatch = (ep.get('robot_type') is not None and ep.get('robot_type') != active_robot_id)
-        if (ep.get('kinematics_stale', False) or robot_mismatch) and raw_poses is not None and len(raw_poses) > 0:
+        if hasattr(self.ik_solver, "chain_joints"):
+            robot_mismatch = robot_mismatch or ep.get("selected_base_link") != self.ik_solver.base_link or ep.get("selected_tcp_link") != self.ik_solver.tcp_link
+            robot_mismatch = robot_mismatch or ep.get("kinematics_engine_version") != KINEMATICS_ENGINE_VERSION
+            if raw_joints is not None and len(raw_joints) and len(raw_joints[0]) != self.ik_solver.num_joints + 1:
+                robot_mismatch = True
+        if ep.get('kinematics_stale', False) or robot_mismatch:
             raw_robot_ee = None
-            raw_joints = None
+            if raw_poses is not None and len(raw_poses) > 0:
+                raw_joints = None
+            elif hasattr(self.ik_solver, "chain_joints"):
+                joint_schema_matches = bool(
+                    raw_joints is not None and len(raw_joints) == orig_num_frames and len(raw_joints[0]) == self.ik_solver.num_joints + 1
+                )
+                if self.custom_urdf:
+                    joint_schema_matches = joint_schema_matches and (
+                        ep.get("selected_base_link") == self.ik_solver.base_link
+                        and ep.get("selected_tcp_link") == self.ik_solver.tcp_link
+                        and (not ep.get("joint_names") or ep.get("joint_names") == self.ik_solver.joint_names + ["gripper"])
+                    )
+                if not joint_schema_matches:
+                    raise ValueError("Episode has stale URDF data and no compatible joint state or source poses to recalculate it.")
 
         has_server_parity = bool(
             raw_joints is not None and len(raw_joints) == orig_num_frames and
             raw_robot_ee is not None and len(raw_robot_ee) == orig_num_frames
         )
+        if has_server_parity and hasattr(self.ik_solver, "chain_joints"):
+            has_server_parity = all(len(row) == self.ik_solver.num_joints + 1 for row in raw_joints)
 
         # 1. Resolve Cartesian EE Poses (in Robot Base Frame)
         if raw_robot_ee is not None and len(raw_robot_ee) == num_frames:
@@ -256,27 +280,32 @@ class LeRobotExporter:
                 pose_i = ee_poses[i]
                 grip_i = float(grippers[i])
                 try:
-                    q = self.ik_solver.inverse_kinematics(pose_i, gripper_state=grip_i, prev_joints=prev_q)
-                    prev_q = q[:5]
+                    q = self.ik_solver.inverse_kinematics(
+                        pose_i,
+                        gripper_state=grip_i,
+                        prev_joints=prev_q,
+                        dt_s=1.0 / max(1.0, float(self.fps)),
+                    )
+                    prev_q = q[:self.ik_solver.num_joints]
                 except Exception as exc:
                     raise ValueError(f"IK failed at frame {i}; refusing fabricated export state") from exc
                 computed_joints.append(q)
             joint_states = np.array(computed_joints, dtype=np.float32)
             joint_states[:, -1] = grippers
 
-        # 4b. Apply Universal Robot-Agnostic Joint Trajectory Smoother
-        # If joints were already smoothed by server sync and untrimmed, skip re-smoothing to prevent float drift
-        if not (has_server_parity and not trim_info["is_trimmed"]):
-            if hasattr(self.ik_solver, "smooth_joint_trajectory") and len(joint_states) > 0:
-                joint_states = self.ik_solver.smooth_joint_trajectory(joint_states, fps=self.fps)
-
-        # 4c. Synchronize Cartesian EE Poses strictly with Solved Joint States via Forward Kinematics
+        # 4b. Synchronize Cartesian EE Poses strictly with Solved Joint States via Forward Kinematics.
+        # Do not post-smooth joint states here: IK already enforces continuity and
+        # a per-frame rate bound, while joint-space filtering would move the TCP
+        # away from the observed Cartesian path.
         # Guarantees 100% mathematical parity between observation.state and observation.ee_pose
         if not (has_server_parity and not trim_info["is_trimmed"]):
             fk_poses = []
             for i in range(num_frames):
-                q_rad = np.radians(joint_states[i, :5])
-                fk_p = self.ik_solver.forward_kinematics(q_rad)
+                if hasattr(self.ik_solver, "state_to_joint_values"):
+                    q_values = self.ik_solver.state_to_joint_values(joint_states[i, :self.ik_solver.num_joints])
+                else:
+                    q_values = np.radians(joint_states[i, :self.ik_solver.num_joints])
+                fk_p = self.ik_solver.forward_kinematics(q_values)
                 fk_poses.append(fk_p)
             ee_poses = np.array(fk_poses, dtype=np.float32)
 
@@ -555,12 +584,10 @@ class LeRobotExporter:
             json.dump(stats, f, indent=2)
 
         # 5. Save Info Configuration (meta/info.json)
-        robot_specs = get_robot_specs(self.robot_type)
-        active_dh = self.custom_dh_table or getattr(self.ik_solver, "dh_table", None) or robot_specs["dh_table"]
-        robot_name = getattr(self.ik_solver, "robot_name", None) or ("Custom URDF" if self.custom_dh_table else robot_specs["name"])
-        # Derive joint names from DH table (generalized for any embodiment), append "gripper"
-        dh_joint_names = [row.get("name", f"q{i}") for i, row in enumerate(active_dh)]
-        joint_feature_names = dh_joint_names + ["gripper"]
+        is_urdf_chain = hasattr(self.ik_solver, "chain_joints")
+        robot_specs = get_robot_specs(self.robot_type) if self.robot_type != "custom_urdf" else None
+        robot_name = getattr(self.ik_solver, "robot_name", None) or ("Custom URDF" if self.custom_urdf else robot_specs["name"])
+        joint_feature_names = list(self.ik_solver.joint_names) + ["gripper"]
         num_joints = len(joint_feature_names)
         info = {
             "codebase_version": "v2.0",
@@ -568,7 +595,6 @@ class LeRobotExporter:
             "robot_name": robot_name,
             "trajectory_mode": str(trajectory_mode).lower(),
             "workspace_calibration": self.workspace_calibrator.get_config(),
-            "dh_table": active_dh,
             "fps": self.fps,
             "total_episodes": len(episodes_data),
             "total_frames": global_frame_idx,
@@ -606,6 +632,17 @@ class LeRobotExporter:
                 "task": {"dtype": "string", "shape": [1]}
             }
         }
+        if is_urdf_chain:
+            info["robot_kinematics"] = {
+                "source": "URDF",
+                "base_link": self.ik_solver.base_link,
+                "tcp_link": self.ik_solver.tcp_link,
+                "joint_names": self.ik_solver.joint_names,
+                "joint_types": self.ik_solver.joint_types,
+                "joint_units": self.ik_solver.joint_units,
+                "chain": self.ik_solver.chain_description,
+                "engine_version": KINEMATICS_ENGINE_VERSION,
+            }
         with open(os.path.join(meta_dir, "info.json"), "w") as f:
             json.dump(info, f, indent=2)
 

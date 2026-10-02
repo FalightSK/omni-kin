@@ -101,6 +101,7 @@ def test_custom_urdf_persistence_and_episode_recalculation():
 
     # 1. Baseline episode with default robot setup
     ROBOT_CONFIG["custom_urdf_enabled"] = False
+    ROBOT_CONFIG["robot_type"] = "so_arm101_omni_kin"
     ROBOT_CONFIG.pop("custom_dh_table", None)
     ROBOT_CONFIG.pop("custom_specs", None)
     ROBOT_CONFIG.pop("custom_urdf", None)
@@ -136,16 +137,27 @@ def test_custom_urdf_persistence_and_episode_recalculation():
     assert np.isclose(parsed_dh[1]["a"], 0.220, atol=1e-4)
     assert np.isclose(parsed_dh[2]["a"], 0.220, atol=1e-4)
 
-    # 3. Apply custom URDF to server configuration
-    ROBOT_CONFIG["custom_dh_table"] = parsed_dh
-    ROBOT_CONFIG["custom_specs"] = parsed_specs
+    # 3. Apply the direct URDF arm chain, keeping the gripper actuator separate.
+    from robot_kinematics import SerialURDFKinematics
+    direct_solver = SerialURDFKinematics(custom_urdf, base_link="base_link", tcp_link="gripper_base")
+    assert direct_solver.num_joints == 5
+    ROBOT_CONFIG.pop("custom_dh_table", None)
+    ROBOT_CONFIG["custom_specs"] = direct_solver.specs
     ROBOT_CONFIG["custom_urdf"] = custom_urdf
+    ROBOT_CONFIG["custom_urdf_base_link"] = "base_link"
+    ROBOT_CONFIG["custom_urdf_tcp_link"] = "gripper_base"
     ROBOT_CONFIG["custom_urdf_enabled"] = True
 
     # Recalculate kinematics for the episode
     sync_episode_kinematics(test_ep)
     new_joints = np.array(test_ep["joint_states"])
     new_link_pos = np.array(test_ep["link_positions"])
+    assert new_joints.shape == (3, 6)
+    assert test_ep["joint_names"] == direct_solver.joint_names + ["gripper"]
+    assert test_ep["joint_types"] == direct_solver.joint_types + ["gripper"]
+    assert test_ep["joint_units"] == direct_solver.joint_units + ["normalized"]
+    assert np.asarray(test_ep["actions"]).shape == new_joints.shape
+    assert new_link_pos.shape[1] == len(direct_solver.chain_joints) + 1
 
     # Verify joint states and link positions changed to fit the new embodiment
     joint_diff = np.max(np.abs(new_joints[:, :4] - base_joints[:, :4]))
@@ -157,23 +169,24 @@ def test_custom_urdf_persistence_and_episode_recalculation():
     # 4. Verify lerobot_exporter uses custom parameters
     lerobot_exporter.set_robot_config(
         robot_type=ROBOT_CONFIG["robot_type"],
-        custom_dh_table=ROBOT_CONFIG["custom_dh_table"],
-        custom_urdf=ROBOT_CONFIG["custom_urdf"]
+        custom_urdf=ROBOT_CONFIG["custom_urdf"],
+        custom_urdf_base_link=ROBOT_CONFIG["custom_urdf_base_link"],
+        custom_urdf_tcp_link=ROBOT_CONFIG["custom_urdf_tcp_link"]
     )
-    assert lerobot_exporter.custom_dh_table is not None
     assert lerobot_exporter.custom_urdf is not None
+    assert lerobot_exporter.ik_solver.joint_names == direct_solver.joint_names
 
     # 5. Clean reset back to preset
     ROBOT_CONFIG["custom_urdf_enabled"] = False
     ROBOT_CONFIG.pop("custom_dh_table", None)
     ROBOT_CONFIG.pop("custom_specs", None)
     ROBOT_CONFIG.pop("custom_urdf", None)
+    ROBOT_CONFIG.pop("custom_urdf_base_link", None)
+    ROBOT_CONFIG.pop("custom_urdf_tcp_link", None)
     lerobot_exporter.set_robot_config(
         robot_type="so_arm101_omni_kin",
-        custom_dh_table=None,
         custom_urdf=None
     )
-    assert lerobot_exporter.custom_dh_table is None
     import shutil, os
     from server import RECORDINGS_DIR
     test_dir = os.path.join(RECORDINGS_DIR, "test_ep_urdf_persist")

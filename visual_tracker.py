@@ -286,6 +286,7 @@ class ArucoFeatureMapTracker:
         self.tracked_pts = np.empty((0, 2), dtype=np.float32)
         self.tracked_ids = []
         self.next_pt_id = 0
+        self.last_feature_mask = None
 
         # Recent keyframe history for triangulation: list of (p_world, R_c_to_w, pts_dict)
         self.view_history = []
@@ -298,6 +299,65 @@ class ArucoFeatureMapTracker:
         self.last_R_world_to_cam = self.last_R_c_to_w.copy()
         self.prev_gray_pts = None
         self.last_step_delta = np.zeros(3, dtype=np.float64)
+
+    @staticmethod
+    def _build_feature_mask(image_shape, excluded_corners=None):
+        """Return a 255=usable mask with padded marker polygons set to zero."""
+        height, width = image_shape[:2]
+        mask = np.full((height, width), 255, dtype=np.uint8)
+        exclusion = np.zeros((height, width), dtype=np.uint8)
+        max_marker_extent = 0.0
+
+        if excluded_corners is None:
+            excluded_corners = []
+        elif isinstance(excluded_corners, np.ndarray):
+            excluded_corners = [excluded_corners]
+
+        for corners in excluded_corners:
+            points = np.asarray(corners, dtype=np.float32).reshape(-1, 2)
+            if len(points) < 3 or not np.isfinite(points).all():
+                continue
+            polygon = np.rint(points).astype(np.int32)
+            cv2.fillPoly(exclusion, [polygon], 255)
+            extent = float(max(np.ptp(points[:, 0]), np.ptp(points[:, 1])))
+            max_marker_extent = max(max_marker_extent, extent)
+
+        if np.any(exclusion):
+            # The LK window is 21x21, so keep its full radius outside marker
+            # pixels as well as a scale-aware guard band around the print.
+            padding = 10 + max(3, int(round(max_marker_extent * 0.08)))
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (padding * 2 + 1, padding * 2 + 1)
+            )
+            exclusion = cv2.dilate(exclusion, kernel, iterations=1)
+            mask[exclusion > 0] = 0
+        return mask
+
+    @staticmethod
+    def _mask_excluded_image(gray, feature_mask):
+        """Inpaint excluded marker regions before an image reaches V-SLAM."""
+        exclusion_mask = cv2.bitwise_not(feature_mask)
+        if not np.any(exclusion_mask):
+            return gray
+        # Reconstruct the local background so ArUco contrast cannot influence
+        # optical flow or feature extraction; the feature mask still rejects
+        # corners across the inpaint boundary and the LK window radius.
+        return cv2.inpaint(gray, exclusion_mask, 5, cv2.INPAINT_TELEA)
+
+    @staticmethod
+    def _points_allowed_by_mask(points, feature_mask):
+        """Return a boolean selector for points outside excluded image regions."""
+        points_2d = np.asarray(points, dtype=np.float32).reshape(-1, 2)
+        height, width = feature_mask.shape[:2]
+        pixels = np.rint(points_2d).astype(np.int32)
+        in_bounds = (
+            (pixels[:, 0] >= 0) & (pixels[:, 0] < width) &
+            (pixels[:, 1] >= 0) & (pixels[:, 1] < height)
+        )
+        allowed = np.zeros(len(points_2d), dtype=bool)
+        valid_pixels = pixels[in_bounds]
+        allowed[in_bounds] = feature_mask[valid_pixels[:, 1], valid_pixels[:, 0]] > 0
+        return allowed
 
     def _extract_new_features(self, gray, mask=None):
         corners = cv2.goodFeaturesToTrack(
@@ -393,17 +453,15 @@ class ArucoFeatureMapTracker:
         self.last_R_c_to_w = R_c_to_w.copy()
         self.last_R_world_to_cam = R_c_to_w.copy()
 
-        mask = np.full(gray.shape, 255, dtype=np.uint8)
-        if aruco_corners_list:
-            for corners in aruco_corners_list:
-                pts = corners.reshape(-1, 2).astype(np.int32)
-                cv2.fillPoly(mask, [pts], 0)
+        mask = self._build_feature_mask(gray.shape, aruco_corners_list)
+        self.last_feature_mask = mask
+        tracking_gray = self._mask_excluded_image(gray, mask)
 
         current_pts_dict = {}
         if self.prev_gray is not None and len(self.tracked_pts) > 0:
             pts_curr, status, _ = cv2.calcOpticalFlowPyrLK(
                 self.prev_gray,
-                gray,
+                tracking_gray,
                 self.tracked_pts.astype(np.float32),
                 None,
                 winSize=(21, 21),
@@ -411,9 +469,16 @@ class ArucoFeatureMapTracker:
             )
             valid_mask = (status.flatten() == 1)
 
-            survived_pts_prev = self.tracked_pts[valid_mask]
-            survived_pts = pts_curr[valid_mask]
+            survived_pts_prev = self.tracked_pts[valid_mask].reshape(-1, 2)
+            survived_pts = pts_curr[valid_mask].reshape(-1, 2)
             survived_ids = [self.tracked_ids[i] for i in range(len(self.tracked_ids)) if valid_mask[i]]
+
+            # Discard already tracked points that have moved onto an ArUco
+            # marker, as well as points in the padded marker border region.
+            allowed = self._points_allowed_by_mask(survived_pts, mask)
+            survived_pts_prev = survived_pts_prev[allowed]
+            survived_pts = survived_pts[allowed]
+            survived_ids = [pid for pid, keep in zip(survived_ids, allowed) if keep]
 
             # Kinematic independent motion filter: prune dynamic points moving independently
             if len(survived_pts) >= 8:
@@ -422,6 +487,7 @@ class ArucoFeatureMapTracker:
                 F_mat, mask_f = cv2.findFundamentalMat(p_prev_v, p_curr_v, cv2.FM_RANSAC, ransacReprojThreshold=1.5, confidence=0.999)
                 if mask_f is not None and np.sum(mask_f) >= 8:
                     static_inliers = (mask_f.flatten() == 1)
+                    survived_pts_prev = survived_pts_prev[static_inliers]
                     survived_pts = survived_pts[static_inliers]
                     survived_ids = [survived_ids[k] for k in range(len(survived_ids)) if static_inliers[k]]
 
@@ -465,7 +531,7 @@ class ArucoFeatureMapTracker:
 
         # Replenish feature points if depleted
         if len(self.tracked_pts) < self.min_features:
-            new_corners = self._extract_new_features(gray, mask=mask)
+            new_corners = self._extract_new_features(tracking_gray, mask=mask)
             if len(new_corners) > 0:
                 new_ids = [self.next_pt_id + i for i in range(len(new_corners))]
                 self.next_pt_id += len(new_corners)
@@ -485,40 +551,70 @@ class ArucoFeatureMapTracker:
             self.view_history.pop(0)
 
         self.prev_gray_pts = self.tracked_pts.copy()
-        self.prev_gray = gray.copy()
+        self.prev_gray = tracking_gray.copy()
 
-    def track_without_aruco(self, gray, predicted_delta_p=None):
+    def track_without_aruco(self, gray, predicted_delta_p=None, excluded_corners=None):
+        feature_mask = self._build_feature_mask(gray.shape, excluded_corners)
+        self.last_feature_mask = feature_mask
+        tracking_gray = self._mask_excluded_image(gray, feature_mask)
+
+        # Even when there are too few points to estimate a pose, prune any
+        # stale points that fall inside a currently visible gripper marker.
+        if len(self.tracked_pts) > 0:
+            allowed = self._points_allowed_by_mask(self.tracked_pts, feature_mask)
+            self.tracked_pts = self.tracked_pts[allowed]
+            self.tracked_ids = [pid for pid, keep in zip(self.tracked_ids, allowed) if keep]
+
         if self.prev_gray is None or len(self.tracked_pts) < 6:
+            self.prev_gray_pts = self.tracked_pts.copy()
             return False, None, None, None
 
         pts_curr, status, _ = cv2.calcOpticalFlowPyrLK(
             self.prev_gray,
-            gray,
+            tracking_gray,
             self.tracked_pts.astype(np.float32),
             None,
             winSize=(21, 21),
             maxLevel=3
         )
+        if pts_curr is None or status is None:
+            return False, None, None, None
+
+        tracked_pts = np.asarray(self.tracked_pts, dtype=np.float32).reshape(-1, 2)
+        pts_curr = np.asarray(pts_curr, dtype=np.float32).reshape(-1, 2)
         valid_mask = (status.flatten() == 1)
 
         # Forward-backward consistency check
         if np.sum(valid_mask) > 10:
             pts_back, status_back, _ = cv2.calcOpticalFlowPyrLK(
-                gray,
+                tracking_gray,
                 self.prev_gray,
-                pts_curr[valid_mask].astype(np.float32),
+                pts_curr[valid_mask].reshape(-1, 1, 2),
                 None,
                 winSize=(21, 21),
                 maxLevel=3
             )
-            dists = np.linalg.norm(self.tracked_pts[valid_mask] - pts_back, axis=1)
-            fb_mask = dists < 1.5
-            temp_indices = np.where(valid_mask)[0]
-            valid_mask[temp_indices[~fb_mask]] = False
+            if pts_back is None or status_back is None:
+                valid_mask[:] = False
+            else:
+                pts_back = np.asarray(pts_back, dtype=np.float32).reshape(-1, 2)
+                fb_status = status_back.flatten() == 1
+                dists = np.linalg.norm(tracked_pts[valid_mask] - pts_back, axis=1)
+                fb_mask = (dists < 1.5) & fb_status
+                temp_indices = np.where(valid_mask)[0]
+                valid_mask[temp_indices[~fb_mask]] = False
 
-        survived_pts_prev = self.tracked_pts[valid_mask]
+        survived_pts_prev = tracked_pts[valid_mask]
         survived_pts = pts_curr[valid_mask]
         survived_ids = [self.tracked_ids[i] for i in range(len(self.tracked_ids)) if valid_mask[i]]
+
+        # Marker regions are excluded for unanchored VO as well as anchored
+        # feature replenishment. Apply the mask to tracked points too, since
+        # optical flow may carry an old corner onto a gripper marker.
+        allowed = self._points_allowed_by_mask(survived_pts, feature_mask)
+        survived_pts_prev = survived_pts_prev[allowed]
+        survived_pts = survived_pts[allowed]
+        survived_ids = [pid for pid, keep in zip(survived_ids, allowed) if keep]
 
         # Kinematic independent motion filter: prune dynamic points moving independently (moving object / gripper)
         if len(survived_pts) >= 8:
@@ -654,7 +750,7 @@ class ArucoFeatureMapTracker:
 
         # Replenish feature points
         if len(self.tracked_pts) < self.min_features:
-            new_corners = self._extract_new_features(gray)
+            new_corners = self._extract_new_features(tracking_gray, mask=feature_mask)
             if len(new_corners) > 0:
                 new_ids = [self.next_pt_id + i for i in range(len(new_corners))]
                 self.next_pt_id += len(new_corners)
@@ -666,7 +762,7 @@ class ArucoFeatureMapTracker:
                     self.tracked_ids.extend(new_ids)
 
         self.prev_gray_pts = self.tracked_pts.copy()
-        self.prev_gray = gray.copy()
+        self.prev_gray = tracking_gray.copy()
 
         return pnp_success, p_world, self.last_R_c_to_w, source
 
@@ -1399,6 +1495,21 @@ class VisualInertialTracker:
         dist_to_origin = float(np.linalg.norm(p_cam))
         return (z_cam > 0.02) and (dist_to_origin <= 3.0) and (R_w2c[2, 2] < 0.0)
 
+    def _get_gripper_marker_corners(self):
+        """Return only visible gripper marker polygons for V-SLAM masking."""
+        gripper_marker_ids = {
+            getattr(self, 'gripper_tag_a_id', 2),
+            getattr(self, 'gripper_tag_b_id', 3),
+        }
+        return [
+            marker_corners
+            for marker_id, marker_corners in zip(
+                getattr(self, 'last_detected_ids', []),
+                getattr(self, 'last_detected_corners', []),
+            )
+            if marker_id in gripper_marker_ids
+        ]
+
     def detect_marker_pnp(self, frame, camera_matrix, dist_coeffs, return_corners=False):
         """
         Phase 1: Dual-ArUco Rigid Board Detection & Dynamic PnP Solver.
@@ -1466,8 +1577,11 @@ class VisualInertialTracker:
             matched_3d = self.tag_b_3d
             matched_2d = refined_corners[idx_b][0].astype(np.float32)
         else:
-            matched_3d = self.tag_a_3d
-            matched_2d = refined_corners[0][0].astype(np.float32)
+            # Only configured table IDs (0/1) have calibrated table coordinates.
+            # Keep IDs 2/3 for gripper measurement and ignore unknown markers here.
+            if return_corners:
+                return False, None, None, None, None, False, refined_corners
+            return False, None, None, None, None, False
 
         # Solve Perspective-n-Point with physical invariant validation
         success = False
@@ -1706,7 +1820,8 @@ class VisualInertialTracker:
         tracked_pts=None,
         prev_pts=None,
         landmarks_3d=None,
-        gripper_state=None
+        gripper_state=None,
+        feature_mask=None
     ):
         """
         Renders an augmented developer diagnostic visualization on the camera frame:
@@ -1728,14 +1843,21 @@ class VisualInertialTracker:
                 p2 = tracked_pts[i]
                 u1, v1 = int(round(float(p1[0]))), int(round(float(p1[1])))
                 u2, v2 = int(round(float(p2[0]))), int(round(float(p2[1])))
-                if 0 <= u2 < width and 0 <= v2 < height and (abs(u2 - u1) + abs(v2 - v1)) >= 1:
+                point_is_allowed = (
+                    feature_mask is None or
+                    (0 <= u2 < width and 0 <= v2 < height and feature_mask[v2, u2] > 0)
+                )
+                if point_is_allowed and 0 <= u2 < width and 0 <= v2 < height and (abs(u2 - u1) + abs(v2 - v1)) >= 1:
                     cv2.line(annotated, (u1, v1), (u2, v2), (255, 230, 0), 1, cv2.LINE_AA)
 
         # 2. Draw Actively Tracked 2D Feature Keypoints
         if tracked_pts is not None and len(tracked_pts) > 0:
             for pt in tracked_pts:
                 u, v = int(round(float(pt[0]))), int(round(float(pt[1])))
-                if 0 <= u < width and 0 <= v < height:
+                if (
+                    0 <= u < width and 0 <= v < height and
+                    (feature_mask is None or feature_mask[v, u] > 0)
+                ):
                     cv2.circle(annotated, (u, v), 3, (50, 255, 120), -1, cv2.LINE_AA)
                     cv2.circle(annotated, (u, v), 4, (0, 160, 60), 1, cv2.LINE_AA)
 
@@ -1751,7 +1873,10 @@ class VisualInertialTracker:
                     proj_lm = proj_lm.reshape(-1, 2)
                     for pt in proj_lm:
                         u, v = int(round(float(pt[0]))), int(round(float(pt[1])))
-                        if 10 <= u < width - 10 and 10 <= v < height - 10:
+                        if (
+                            10 <= u < width - 10 and 10 <= v < height - 10 and
+                            (feature_mask is None or feature_mask[v, u] > 0)
+                        ):
                             d = 4
                             diamond = np.array([
                                 [u, v - d], [u + d, v], [u, v + d], [u - d, v]
@@ -2098,7 +2223,9 @@ class VisualInertialTracker:
                 euler_curr = euler
             else:
                 # Step 2: ArUco is LOST / Occluded -> Track via Scene Features in ArUco space!
-                f_success, p_feat, R_feat, f_source = feature_tracker.track_without_aruco(gray)
+                f_success, p_feat, R_feat, f_source = feature_tracker.track_without_aruco(
+                    gray, excluded_corners=self._get_gripper_marker_corners()
+                )
                 if f_success:
                     euler = rotation_matrix_to_trajectory_euler(R_feat)
                     src = f_source
@@ -2202,7 +2329,8 @@ class VisualInertialTracker:
                     tracked_pts=feature_tracker.tracked_pts,
                     prev_pts=feature_tracker.prev_gray_pts,
                     landmarks_3d=feature_tracker.landmarks_3d,
-                    gripper_state=grip_state
+                    gripper_state=grip_state,
+                    feature_mask=feature_tracker.last_feature_mask
                 )
                 dev_writer.write(dev_frame)
 

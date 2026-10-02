@@ -1,6 +1,6 @@
 """
 robot_kinematics.py
-Denavit-Hartenberg (DH) Kinematics Engine for SO-100 and SO-101 Robot Arms
+Preset robot kinematics plus direct selected-chain URDF kinematics
 Includes WorkspaceCalibrator for ArUco Table-Plane-to-Robot-Base Coordinate Transformations
 """
 
@@ -8,8 +8,10 @@ import os
 import numpy as np
 import xml.etree.ElementTree as ET
 from scipy.spatial.transform import Rotation as R
-from scipy.optimize import minimize
+from scipy.optimize import minimize, least_squares
 import scipy.signal
+
+KINEMATICS_ENGINE_VERSION = "direct_urdf_chain_v4_omni_body_tcp"
 
 def rodrigues_rot(axis, theta):
     K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
@@ -965,7 +967,6 @@ ROBOT_PRESETS = {
         "name": "SO-ARM101-OMNI-KIN (Default)",
         "description": "Custom OMNI-KIN 5-DOF Manipulator with URDF-matched kinematic parameters, reinforced brackets, and Feetech STS3215 servos.",
         "class": SO101OmniKinKinematics,
-        "dh_table": SO101_OMNIKIN_DH_TABLE,
         "reach_meters": 0.385,
         "payload_kg": 0.50
     },
@@ -973,7 +974,6 @@ ROBOT_PRESETS = {
         "name": "SO-101 (Refined)",
         "description": "5-DOF Open Manipulator with reinforced structural brackets and Feetech STS3215 servos.",
         "class": SO101Kinematics,
-        "dh_table": SO101_DH_TABLE,
         "reach_meters": 0.395,
         "payload_kg": 0.50
     },
@@ -981,7 +981,6 @@ ROBOT_PRESETS = {
         "name": "SO-100 (Classic)",
         "description": "Original 5-DOF LeRobot open embodiment with Feetech STS3215 servos.",
         "class": SO100Kinematics,
-        "dh_table": SO100_DH_TABLE,
         "reach_meters": 0.380,
         "payload_kg": 0.50
     }
@@ -1972,29 +1971,473 @@ class URDFKinematics:
         return arm_joints.astype(joint_arr.dtype)
 
 
+class SerialURDFKinematics:
+    """Kinematics for a user-selected URDF base-to-TCP path, without DH reduction.
+
+    Joint-state convention at the application boundary is degrees for revolute/
+    continuous joints and meters for prismatic joints. FK and IK internals use
+    radians and meters, exactly as specified by URDF.
+    """
+
+    MOVABLE_TYPES = {"revolute", "continuous", "prismatic"}
+
+    @staticmethod
+    def describe_urdf(urdf_content):
+        root = SerialURDFKinematics._read_root(urdf_content)
+        links = [elem.get("name", "") for elem in root.findall("./link") if elem.get("name")]
+        parents = set()
+        children = set()
+        terminal_parent_links = []
+        gripper_parents = []
+        for elem in root.findall("./joint"):
+            p, c = elem.find("parent"), elem.find("child")
+            if p is not None and c is not None:
+                parents.add(p.get("link", ""))
+                children.add(c.get("link", ""))
+                terminal_parent_links.append((p.get("link", ""), c.get("link", "")))
+                joint_name = elem.get("name", "").lower()
+                joint_type = elem.get("type", "")
+                child_name = c.get("link", "").lower()
+                # Match actuator names and explicit finger/jaw links. A joint
+                # upstream of a link called `gripper_base` is the wrist/tool
+                # mount, not the arm TCP candidate.
+                if joint_type in SerialURDFKinematics.MOVABLE_TYPES and (
+                    any(token in joint_name for token in ("grip", "finger", "jaw"))
+                    or any(token in child_name for token in ("finger", "jaw"))
+                ):
+                    gripper_parents.append(p.get("link", ""))
+        leaves = sorted(set(links) - parents)
+        # Suggest the gripper mount as TCP when a movable jaw/finger is the
+        # only terminal mechanism. The selector remains editable in setup.
+        suggested_tcp = sorted(set(gripper_parents))
+        tcp_candidates = suggested_tcp if len(suggested_tcp) == 1 else leaves
+        if not links or not terminal_parent_links:
+            raise ValueError("URDF must define named links and at least one joint.")
+        return {
+            "robot_name": root.get("name", "custom_robot"),
+            "links": links,
+            "base_candidates": sorted(parents - children),
+            "tcp_candidates": tcp_candidates,
+        }
+
+    @staticmethod
+    def _read_root(urdf_content):
+        if not urdf_content or not str(urdf_content).strip():
+            raise ValueError("Empty URDF XML provided.")
+        value = str(urdf_content).strip()
+        try:
+            root = ET.fromstring(value) if value.startswith("<") else ET.parse(value).getroot()
+        except (ET.ParseError, OSError) as exc:
+            raise ValueError(f"Invalid URDF XML: {exc}") from exc
+        if root.tag != "robot":
+            raise ValueError("URDF root element must be <robot>.")
+        return root
+
+    def __init__(self, urdf_content, base_link=None, tcp_link=None, model_name="Custom URDF", **kwargs):
+        self.root = self._read_root(urdf_content)
+        self.model_name = self.root.get("name", model_name)
+        self.robot_name = self.model_name
+        self.base_link = base_link
+        self.tcp_link = tcp_link
+        self.joints_by_parent = {}
+        self.joints_by_child = {}
+        self.all_links = {elem.get("name") for elem in self.root.findall("./link") if elem.get("name")}
+        if not self.all_links:
+            raise ValueError("URDF must define at least one named <link>.")
+
+        joint_names = set()
+        for elem in self.root.findall("./joint"):
+            name = elem.get("name", "").strip()
+            kind = elem.get("type", "").strip()
+            parent_elem, child_elem = elem.find("parent"), elem.find("child")
+            parent = parent_elem.get("link", "") if parent_elem is not None else ""
+            child = child_elem.get("link", "") if child_elem is not None else ""
+            if not name or name in joint_names:
+                raise ValueError(f"URDF joint names must be present and unique (invalid: {name or '<empty>'}).")
+            joint_names.add(name)
+            if kind not in self.MOVABLE_TYPES | {"fixed"}:
+                raise ValueError(f"Joint '{name}' has unsupported type '{kind}'. Supported types: fixed, revolute, continuous, prismatic.")
+            if not parent or not child or parent not in self.all_links or child not in self.all_links:
+                raise ValueError(f"Joint '{name}' references a missing or unnamed parent/child link.")
+            if child in self.joints_by_child:
+                raise ValueError(f"Link '{child}' has more than one parent joint; URDF is not a serial rooted tree.")
+
+            origin = elem.find("origin")
+            xyz = self._vector(origin.get("xyz", "0 0 0") if origin is not None else "0 0 0", 3, f"joint '{name}' origin xyz")
+            rpy = self._vector(origin.get("rpy", "0 0 0") if origin is not None else "0 0 0", 3, f"joint '{name}' origin rpy")
+            axis_elem = elem.find("axis")
+            raw_axis = self._vector(axis_elem.get("xyz", "0 0 1") if axis_elem is not None else "0 0 1", 3, f"joint '{name}' axis")
+            norm = float(np.linalg.norm(raw_axis))
+            if kind in self.MOVABLE_TYPES and norm <= 1e-12:
+                raise ValueError(f"Joint '{name}' must have a non-zero 3D axis.")
+            axis = raw_axis / norm if norm > 1e-12 else np.array([0.0, 0.0, 1.0])
+
+            limit = elem.find("limit")
+            velocity = float(limit.get("velocity")) if limit is not None and limit.get("velocity") is not None else None
+            if velocity is not None and (not np.isfinite(velocity) or velocity <= 0.0):
+                raise ValueError(f"Joint '{name}' has invalid velocity limit; expected a positive finite value.")
+            if kind == "continuous":
+                lo, hi = -np.inf, np.inf
+            elif kind == "fixed":
+                lo, hi = 0.0, 0.0
+            else:
+                if limit is None or limit.get("lower") is None or limit.get("upper") is None:
+                    raise ValueError(f"Joint '{name}' ({kind}) must define finite lower and upper limits.")
+                lo, hi = float(limit.get("lower")), float(limit.get("upper"))
+                if not np.isfinite([lo, hi]).all() or lo >= hi:
+                    raise ValueError(f"Joint '{name}' has invalid limits; lower must be finite and less than upper.")
+
+            transform = np.eye(4, dtype=np.float64)
+            transform[:3, :3] = rpy_to_matrix(rpy)
+            transform[:3, 3] = xyz
+            joint = {
+                "name": name, "type": kind, "parent": parent, "child": child,
+                "xyz": xyz.tolist(), "rpy": rpy.tolist(), "axis": axis.tolist(),
+                "limits": [float(lo), float(hi)], "velocity": velocity,
+                "mimic": elem.find("mimic") is not None, "T_origin": transform,
+            }
+            self.joints_by_parent.setdefault(parent, []).append(joint)
+            self.joints_by_child[child] = joint
+
+        if not self.joints_by_child:
+            raise ValueError("No <joint> definitions found in URDF.")
+        all_parent_links = set(self.joints_by_parent)
+        roots = sorted(self.all_links - set(self.joints_by_child))
+        leaves = sorted(self.all_links - all_parent_links)
+        if self.base_link is None:
+            if len(roots) != 1:
+                raise ValueError(f"Select a base link; URDF has {len(roots)} root links: {', '.join(roots)}.")
+            self.base_link = roots[0]
+        if self.tcp_link is None:
+            if len(leaves) != 1:
+                raise ValueError(f"Select a TCP link; URDF has {len(leaves)} terminal links: {', '.join(leaves)}.")
+            self.tcp_link = leaves[0]
+        if self.base_link not in self.all_links:
+            raise ValueError(f"Selected base link '{self.base_link}' does not exist in the URDF.")
+        if self.tcp_link not in self.all_links:
+            raise ValueError(f"Selected TCP link '{self.tcp_link}' does not exist in the URDF.")
+        if self.base_link == self.tcp_link:
+            raise ValueError("Selected base and TCP links must be different.")
+
+        reversed_path = []
+        cursor = self.tcp_link
+        visited = set()
+        while cursor != self.base_link:
+            if cursor in visited:
+                raise ValueError(f"Cycle detected while finding path from '{self.base_link}' to '{self.tcp_link}'.")
+            visited.add(cursor)
+            joint = self.joints_by_child.get(cursor)
+            if joint is None:
+                raise ValueError(f"No URDF joint path connects base '{self.base_link}' to TCP '{self.tcp_link}'.")
+            reversed_path.append(joint)
+            cursor = joint["parent"]
+        self.chain_joints = list(reversed(reversed_path))
+        mimic_joints = [joint["name"] for joint in self.chain_joints if joint["mimic"]]
+        if mimic_joints:
+            raise ValueError(f"Selected chain contains mimic joint(s) {', '.join(mimic_joints)}; select a TCP before the coupled gripper mechanism.")
+        self.active_joints = [j for j in self.chain_joints if j["type"] in self.MOVABLE_TYPES]
+        if not self.active_joints:
+            raise ValueError("Selected base-to-TCP path has no movable joints.")
+        self.num_joints = len(self.active_joints)
+        self.joint_names = [j["name"] for j in self.active_joints]
+        self.joint_types = [j["type"] for j in self.active_joints]
+        self.joint_units = ["m" if j["type"] == "prismatic" else "deg" for j in self.active_joints]
+        self.joint_limits = [tuple(j["limits"]) for j in self.active_joints]
+        self.q3_safe_max_deg = kwargs.get("q3_safe_max_deg")
+        self.wrist_pitch_idx = min(3, self.num_joints - 1)
+        self.wrist_roll_safe_max_deg = kwargs.get("wrist_roll_safe_max_deg")
+        self.tool_roll_tracking = bool(kwargs.get("tool_roll_tracking", False))
+        self.max_joint_rate_rad_s = kwargs.get("max_joint_rate_rad_s")
+        if self.q3_safe_max_deg is not None and self.num_joints > self.wrist_pitch_idx:
+            lo, hi = self.joint_limits[self.wrist_pitch_idx]
+            self.joint_limits[self.wrist_pitch_idx] = (lo, min(hi, np.radians(float(self.q3_safe_max_deg))))
+        if self.wrist_roll_safe_max_deg is not None and self.num_joints > 4:
+            lo, hi = self.joint_limits[4]
+            safe = np.radians(abs(float(self.wrist_roll_safe_max_deg)))
+            self.joint_limits[4] = (max(lo, -safe), min(hi, safe))
+        self.chain_description = []
+        for joint in self.chain_joints:
+            description = {key: joint[key] for key in ("name", "type", "parent", "child", "xyz", "rpy", "axis", "velocity")}
+            description["limits"] = [None, None] if joint["type"] == "continuous" else list(joint["limits"])
+            self.chain_description.append(description)
+        self.max_reach = float(sum(np.linalg.norm(j["xyz"]) for j in self.chain_joints))
+        for j in self.active_joints:
+            if j["type"] == "prismatic" and np.isfinite(j["limits"]).all():
+                self.max_reach += abs(j["limits"][1] - j["limits"][0])
+        self.reach_angle_rad = 0.0
+        self.reach_angle_deg = 0.0
+        self.specs = {
+            "robot_name": self.robot_name,
+            "base_link": self.base_link,
+            "tcp_link": self.tcp_link,
+            "joint_names": self.joint_names,
+            "joint_types": self.joint_types,
+            "joint_units": self.joint_units,
+            "reach_meters": self.max_reach,
+            "chain": self.chain_description,
+        }
+        q_mid = np.asarray([0.0 if not np.isfinite(lo + hi) else (lo + hi) * 0.5 for lo, hi in self.joint_limits])
+        p_mid = self.forward_kinematics(q_mid)[:3]
+        if np.hypot(p_mid[0], p_mid[1]) > 1e-8:
+            self.reach_angle_rad = float(np.arctan2(p_mid[1], p_mid[0]))
+            self.reach_angle_deg = float(np.degrees(self.reach_angle_rad))
+
+    @staticmethod
+    def _vector(value, length, label):
+        try:
+            result = np.asarray([float(part) for part in str(value).split()], dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} must contain {length} finite numbers.") from exc
+        if result.shape != (length,) or not np.isfinite(result).all():
+            raise ValueError(f"{label} must contain {length} finite numbers.")
+        return result
+
+    def state_to_joint_values(self, joint_state):
+        state = np.asarray(joint_state, dtype=np.float64)
+        if len(state) != self.num_joints:
+            raise ValueError(f"Expected {self.num_joints} arm joint values, received {len(state)}.")
+        if not np.isfinite(state).all():
+            raise ValueError("Joint state contains a non-finite value.")
+        values = state.copy()
+        for i, kind in enumerate(self.joint_types):
+            if kind in ("revolute", "continuous"):
+                values[i] = np.radians(values[i])
+        return values
+
+    def joint_values_to_state(self, joint_values):
+        values = np.asarray(joint_values, dtype=np.float64).copy()
+        if len(values) != self.num_joints:
+            raise ValueError(f"Expected {self.num_joints} arm joint values, received {len(values)}.")
+        for i, kind in enumerate(self.joint_types):
+            if kind in ("revolute", "continuous"):
+                values[i] = np.degrees(values[i])
+        return values
+
+    def _transform_chain(self, q_values):
+        q_values = np.asarray(q_values, dtype=np.float64)
+        if q_values.shape != (self.num_joints,) or not np.isfinite(q_values).all():
+            raise ValueError(f"Expected {self.num_joints} finite internal joint values.")
+        T = np.eye(4, dtype=np.float64)
+        positions = [T[:3, 3].copy()]
+        q_index = 0
+        for joint in self.chain_joints:
+            T = T @ joint["T_origin"]
+            kind = joint["type"]
+            if kind in self.MOVABLE_TYPES:
+                value = q_values[q_index]
+                q_index += 1
+                axis = np.asarray(joint["axis"], dtype=np.float64)
+                motion = np.eye(4, dtype=np.float64)
+                if kind == "prismatic":
+                    motion[:3, 3] = axis * value
+                else:
+                    motion[:3, :3] = rodrigues_rot(axis, value)
+                T = T @ motion
+            positions.append(T[:3, 3].copy())
+        return T, positions
+
+    def forward_kinematics(self, q_values):
+        T, _ = self._transform_chain(q_values)
+        # Application poses use the phone/tracker trajectory Euler convention.
+        # The Omni TCP is a gripper body frame; trajectory Euler values encode
+        # body rotation through a camera-frame X flip. Other selected URDF
+        # chains retain their existing pose convention.
+        pose_rotation = T[:3, :3] @ R_CAM_TO_PHONE if self.tool_roll_tracking else T[:3, :3]
+        return np.concatenate([T[:3, 3], rotation_matrix_to_trajectory_euler(pose_rotation)])
+
+    def forward_kinematics_chain(self, q_values):
+        return self._transform_chain(q_values)[1]
+
+    def clip_joint_limits(self, joint_state):
+        values = self.state_to_joint_values(joint_state)
+        for i, (lo, hi) in enumerate(self.joint_limits):
+            if np.isfinite(lo):
+                values[i] = max(values[i], lo)
+            if np.isfinite(hi):
+                values[i] = min(values[i], hi)
+        return self.joint_values_to_state(values)
+
+    def solve_feasible_ik(self, target_pose, gripper_state=1.0, prev_joints=None, dt_s=None, **kwargs):
+        target = np.asarray(target_pose, dtype=np.float64)
+        if target.shape[0] < 6 or not np.isfinite(target[:6]).all():
+            raise ValueError("IK target must contain finite [x, y, z, roll, pitch, yaw] values.")
+        target_rotation = trajectory_euler_to_rotation_matrix(target[3:6])
+        prev = None
+        if prev_joints is not None:
+            prev_arr = np.asarray(prev_joints, dtype=np.float64)
+            if len(prev_arr) >= self.num_joints and np.isfinite(prev_arr[:self.num_joints]).all():
+                prev = self.state_to_joint_values(prev_arr[:self.num_joints])
+
+        lower = np.empty(self.num_joints, dtype=np.float64)
+        upper = np.empty(self.num_joints, dtype=np.float64)
+        seed = np.empty(self.num_joints, dtype=np.float64)
+        scales = np.ones(self.num_joints, dtype=np.float64)
+        for i, (joint, (lo, hi)) in enumerate(zip(self.active_joints, self.joint_limits)):
+            if joint["type"] == "continuous":
+                center = prev[i] if prev is not None else 0.0
+                lower[i], upper[i] = center - 2.0 * np.pi, center + 2.0 * np.pi
+                seed[i] = center
+            else:
+                lower[i], upper[i] = lo, hi
+                seed[i] = (lo + hi) * 0.5
+            scales[i] = 0.1 if joint["type"] == "prismatic" else 1.0
+            if prev is not None:
+                seed[i] = np.clip(prev[i], lower[i] + 1e-10, upper[i] - 1e-10)
+        if prev is not None and dt_s is not None:
+            dt = float(dt_s)
+            if not np.isfinite(dt) or dt <= 0.0:
+                raise ValueError("dt_s must be a positive finite frame interval.")
+            for i, joint in enumerate(self.active_joints):
+                if joint["type"] == "prismatic":
+                    rate = joint["velocity"] if joint["velocity"] is not None else 0.15
+                elif self.max_joint_rate_rad_s is not None:
+                    rate = self.max_joint_rate_rad_s
+                else:
+                    rate = joint["velocity"] if joint["velocity"] is not None else (2.0 * np.pi / 3.0)
+                step = float(rate) * dt
+                lower[i] = max(lower[i], prev[i] - step)
+                upper[i] = min(upper[i], prev[i] + step)
+                if lower[i] > upper[i]:
+                    lower[i] = upper[i] = float(np.clip(prev[i], self.joint_limits[i][0], self.joint_limits[i][1]))
+                seed[i] = np.clip(seed[i], lower[i] + 1e-10, upper[i] - 1e-10) if upper[i] - lower[i] > 2e-10 else lower[i]
+        # scipy requires a strictly interior initial point and finite optimization bounds.
+        seed = np.minimum(np.maximum(seed, lower + 1e-9), upper - 1e-9)
+
+        # A five-axis arm cannot independently realize an arbitrary 6-DoF pose.
+        # The tracked TCP position is the primary task; trying to fit an
+        # incompatible orientation can move the tool several centimeters away.
+        orientation_weight = kwargs.get("orientation_weight")
+        if orientation_weight is None:
+            orientation_weight = 0.0 if self.num_joints < 6 else 0.02
+        orientation_weight = float(orientation_weight)
+        continuity_weight = float(kwargs.get("continuity_weight", 1e-4))
+        scales = np.asarray([0.1 if kind == "prismatic" else 1.0 for kind in self.joint_types], dtype=np.float64)
+
+        def residual(q):
+            transform, _ = self._transform_chain(q)
+            result = transform[:3, 3] - target[:3]
+            if orientation_weight > 0.0:
+                rotation_error = R.from_matrix(target_rotation @ transform[:3, :3].T).as_rotvec()
+                result = np.concatenate([result, rotation_error * orientation_weight])
+            if prev is not None:
+                result = np.concatenate([result, continuity_weight * (q - prev) / scales])
+            return result
+
+        result = least_squares(residual, seed, bounds=(lower, upper), max_nfev=250, ftol=1e-9, xtol=1e-9, gtol=1e-9)
+        if self.tool_roll_tracking:
+            # This preset's TCP lies on its final wrist-roll axis. Match the
+            # measured gripper dorsal direction with that free joint while
+            # leaving the position-optimized arm joints and TCP position intact.
+            transform, positions = self._transform_chain(result.x)
+            forward = positions[-1] - positions[-2]
+            forward_norm = np.linalg.norm(forward)
+            if forward_norm > 1e-10:
+                forward /= forward_norm
+                dorsal = transform[:3, 2]
+                wanted = -target_rotation[:3, 2]
+                wanted -= forward * np.dot(wanted, forward)
+                wanted_norm = np.linalg.norm(wanted)
+                if wanted_norm > 1e-10:
+                    wanted /= wanted_norm
+                    correction = np.arctan2(
+                        np.dot(forward, np.cross(dorsal, wanted)),
+                        np.dot(dorsal, wanted),
+                    )
+                    result.x[-1] = np.clip(result.x[-1] + correction, lower[-1], upper[-1])
+        achieved_transform, _ = self._transform_chain(result.x)
+        achieved_rotation = achieved_transform[:3, :3] @ R_CAM_TO_PHONE if self.tool_roll_tracking else achieved_transform[:3, :3]
+        achieved = np.concatenate([achieved_transform[:3, 3], rotation_matrix_to_trajectory_euler(achieved_rotation)])
+        position_error = float(np.linalg.norm(achieved_transform[:3, 3] - target[:3]))
+        orientation_error = float(np.linalg.norm(R.from_matrix(target_rotation @ achieved_rotation.T).as_rotvec()))
+        state = self.joint_values_to_state(result.x)
+        joints = np.concatenate([state, [float(gripper_state)]]).astype(np.float32)
+        reasons = []
+        if not result.success:
+            reasons.append("IK_DID_NOT_CONVERGE")
+        if position_error > 0.015:
+            reasons.append("POSITION_ERROR")
+        if position_error > 0.05:
+            reasons.append("OUT_OF_REACH")
+        if orientation_weight > 0.0 and orientation_error > 0.15:
+            reasons.append("ORIENTATION_ERROR")
+        if target[2] < 0.012:
+            reasons.append("TABLE_COLLISION")
+        return {
+            "joints": joints,
+            "achieved_pose": achieved,
+            "is_feasible": not reasons,
+            "error_distance_cm": round(position_error * 100.0, 3),
+            "orientation_error_rad": orientation_error,
+            "clamped_reasons": reasons,
+            "link_positions": [point.tolist() for point in self.forward_kinematics_chain(result.x)],
+        }
+
+    def inverse_kinematics(self, target_pose, gripper_state=1.0, prev_joints=None, **kwargs):
+        return self.solve_feasible_ik(target_pose, gripper_state=gripper_state, prev_joints=prev_joints, **kwargs)["joints"]
+
+    def smooth_joint_trajectory(self, joint_trajectory, fps=30.0, time_window_ms=200, **kwargs):
+        data = np.asarray(joint_trajectory, dtype=np.float64).copy()
+        if data.ndim != 2 or data.shape[1] < self.num_joints + 1:
+            raise ValueError(f"Custom trajectory must have {self.num_joints} arm joints followed by gripper.")
+        arm = np.vstack([self.state_to_joint_values(row[:self.num_joints]) for row in data])
+        window = max(5, int(round(float(time_window_ms) * max(1.0, float(fps)) / 1000.0)) | 1)
+        for joint_idx, joint in enumerate(self.active_joints):
+            if len(arm) >= window:
+                arm[:, joint_idx] = scipy.signal.savgol_filter(arm[:, joint_idx], window_length=window, polyorder=min(2, window - 2))
+            lo, hi = self.joint_limits[joint_idx]
+            if joint["type"] != "continuous":
+                arm[:, joint_idx] = np.clip(arm[:, joint_idx], lo, hi)
+            default_rate = (2.0 * np.pi / 3.0) if joint["type"] != "prismatic" else 0.15
+            rate = (
+                self.max_joint_rate_rad_s
+                if self.max_joint_rate_rad_s is not None and joint["type"] != "prismatic"
+                else (joint["velocity"] if joint["velocity"] is not None else default_rate)
+            )
+            max_step = rate / max(1.0, float(fps))
+            for frame in range(1, len(arm)):
+                arm[frame, joint_idx] = arm[frame - 1, joint_idx] + np.clip(arm[frame, joint_idx] - arm[frame - 1, joint_idx], -max_step, max_step)
+        data[:, :self.num_joints] = np.vstack([self.joint_values_to_state(row) for row in arm])
+        return data.astype(np.asarray(joint_trajectory).dtype, copy=False)
+
+    def update_camera_extrinsics(self, **kwargs):
+        # The URDF already defines TCP geometry; phone/camera calibration is a
+        # separate transform and must never extend or alter this kinematic chain.
+        return None
+
+
 # Subclass specializations backed by URDF descriptions
-class SO101OmniKinKinematics(URDFKinematics):
-    """SO-ARM101-OMNI-KIN 5-DOF Robot Arm Kinematics (Default Project Setup)."""
+class SO101OmniKinKinematics(SerialURDFKinematics):
+    """SO-ARM101-OMNI-KIN kinematics from the selected URDF chain."""
     def __init__(self, q3_safe_max_deg=0.0, **kwargs):
-        urdf_str = get_robot_urdf("so_arm101_omni_kin")
-        super().__init__(urdf_str, model_name="SO-ARM101-OMNI-KIN", q3_safe_max_deg=q3_safe_max_deg, **kwargs)
-        self.dh_table = SO101_OMNIKIN_DH_TABLE
+        super().__init__(
+            get_robot_urdf("so_arm101_omni_kin"), base_link="base", tcp_link="gripper_tcp",
+            model_name="SO-ARM101-OMNI-KIN", q3_safe_max_deg=q3_safe_max_deg,
+            wrist_roll_safe_max_deg=35.0, max_joint_rate_rad_s=np.radians(120.0),
+            tool_roll_tracking=True, **kwargs,
+        )
+        self.robot_name = self.model_name = "SO-ARM101-OMNI-KIN"
 
 
-class SO101Kinematics(URDFKinematics):
-    """SO-101 5-DOF Robot Arm Kinematics (Refined Open Hardware Preset)."""
+class SO101Kinematics(SerialURDFKinematics):
+    """SO-101 kinematics from the selected URDF chain."""
     def __init__(self, q3_safe_max_deg=0.0, **kwargs):
-        urdf_str = get_robot_urdf("so101")
-        super().__init__(urdf_str, model_name="SO-101", q3_safe_max_deg=q3_safe_max_deg, **kwargs)
-        self.dh_table = SO101_DH_TABLE
+        super().__init__(
+            get_robot_urdf("so101"), base_link="base_link", tcp_link="gripper_base",
+            model_name="SO-101", q3_safe_max_deg=q3_safe_max_deg,
+            wrist_roll_safe_max_deg=35.0, max_joint_rate_rad_s=np.radians(120.0), **kwargs,
+        )
+        self.robot_name = self.model_name = "SO-101"
 
 
-class SO100Kinematics(URDFKinematics):
-    """SO-100 5-DOF Robot Arm Kinematics (LeRobot Original Preset)."""
+class SO100Kinematics(SerialURDFKinematics):
+    """SO-100 kinematics from the selected URDF chain."""
     def __init__(self, q3_safe_max_deg=0.0, **kwargs):
-        urdf_str = get_robot_urdf("so100")
-        super().__init__(urdf_str, model_name="SO-100", q3_safe_max_deg=q3_safe_max_deg, **kwargs)
-        self.dh_table = SO100_DH_TABLE
+        super().__init__(
+            get_robot_urdf("so100"), base_link="base_link", tcp_link="gripper_base",
+            model_name="SO-100", q3_safe_max_deg=q3_safe_max_deg,
+            wrist_roll_safe_max_deg=35.0, max_joint_rate_rad_s=np.radians(120.0), **kwargs,
+        )
+        self.robot_name = self.model_name = "SO-100"
 
 
 ROBOT_PRESETS["so_arm101_omni_kin"]["class"] = SO101OmniKinKinematics
@@ -2002,40 +2445,25 @@ ROBOT_PRESETS["so101"]["class"] = SO101Kinematics
 ROBOT_PRESETS["so100"]["class"] = SO100Kinematics
 
 
-def get_robot_solver(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0, custom_dh_table=None, custom_urdf=None, **kwargs):
-    """Factory helper to obtain the kinematic solver instance with camera safety limits."""
+def get_robot_solver(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0, custom_urdf=None, **kwargs):
+    """Build a preset or uploaded solver directly from its URDF chain."""
     if custom_urdf:
-        return URDFKinematics(custom_urdf, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
-    if custom_dh_table:
-        return DHKinematics(custom_dh_table, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
+        base_link = kwargs.pop("custom_urdf_base_link", kwargs.pop("base_link", None))
+        tcp_link = kwargs.pop("custom_urdf_tcp_link", kwargs.pop("tcp_link", None))
+        return SerialURDFKinematics(custom_urdf, base_link=base_link, tcp_link=tcp_link, **kwargs)
     r_type = normalize_robot_type(robot_type)
+    if r_type == "custom_urdf":
+        raise ValueError("Custom URDF kinematics require the original URDF XML and selected base/TCP links.")
     if r_type in ROBOT_PRESETS:
         return ROBOT_PRESETS[r_type]["class"](q3_safe_max_deg=q3_safe_max_deg, **kwargs)
-    urdf_content = get_robot_urdf(r_type)
-    if urdf_content:
-        return URDFKinematics(urdf_content, model_name=r_type, q3_safe_max_deg=q3_safe_max_deg, **kwargs)
     return SO101OmniKinKinematics(q3_safe_max_deg=q3_safe_max_deg, **kwargs)
 
 
 def get_robot_specs(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0):
-    """Returns metadata, DH table, and component breakdown for the specified robot preset."""
+    """Return URDF chain metadata for the specified robot preset."""
     r_type = normalize_robot_type(robot_type)
     preset = ROBOT_PRESETS.get(r_type, ROBOT_PRESETS["so_arm101_omni_kin"])
     urdf_str = get_robot_urdf(r_type)
-    components = None
-    try:
-        _, parsed_specs = URDFParser.parse_urdf(urdf_str, q3_safe_max_deg=q3_safe_max_deg)
-        components = parsed_specs.get("components")
-    except Exception:
-        pass
-
-    dh_table_copy = [dict(row) for row in preset["dh_table"]]
-    wrist_idx = find_wrist_pitch_index(dh_table_copy)
-    if len(dh_table_copy) > wrist_idx and q3_safe_max_deg is not None:
-        limits = list(dh_table_copy[wrist_idx]["limits_deg"])
-        limits[1] = min(limits[1], float(q3_safe_max_deg))
-        dh_table_copy[wrist_idx]["limits_deg"] = limits
-
     solver = get_robot_solver(r_type, q3_safe_max_deg=q3_safe_max_deg)
 
     return {
@@ -2044,10 +2472,14 @@ def get_robot_specs(robot_type="so_arm101_omni_kin", q3_safe_max_deg=0.0):
         "description": preset["description"],
         "reach_meters": preset["reach_meters"],
         "payload_kg": preset["payload_kg"],
-        "dh_table": dh_table_copy,
         "urdf": urdf_str,
-        "components": components,
-        "wrist_pitch_idx": wrist_idx,
+        "base_link": solver.base_link,
+        "tcp_link": solver.tcp_link,
+        "joint_names": solver.joint_names,
+        "joint_types": solver.joint_types,
+        "joint_units": solver.joint_units,
+        "chain": solver.chain_description,
+        "wrist_pitch_idx": solver.wrist_pitch_idx,
         "q3_safe_max_deg": float(q3_safe_max_deg) if q3_safe_max_deg is not None else 0.0,
         "reach_angle_rad": getattr(solver, "reach_angle_rad", 0.0),
         "reach_angle_deg": getattr(solver, "reach_angle_deg", 0.0)
@@ -2522,8 +2954,8 @@ class TrajectoryPlanner:
           - 'aruco_ee_poses': (N, 6) in ArUco Table Frame
           - 'aruco_cam_poses': (N, 6) Camera Poses in ArUco Table Frame
           - 'gripper_states': (N,) 0-100%
-          - 'joint_states': (N, 6) degrees
-          - 'actions': (N, 6) next-step joint states
+          - 'joint_states': (N, movable joints + gripper), with preset/custom units
+          - 'actions': same ordered vector as joint_states
           - 'timestamps': (N,) seconds
           - 'num_frames': N
           - 'is_feasible': bool (True if all waypoints have feasible IK)
@@ -2550,28 +2982,59 @@ class TrajectoryPlanner:
             p_start_robot = self.workspace_calibrator.aruco_to_robot(p_start_arr)
 
         ik_home = self.solver.solve_feasible_ik(p_home, gripper_state=float(home_gripper))
-        ik_start = self.solver.solve_feasible_ik(p_start_robot, gripper_state=float(start_gripper))
-
         q_home = ik_home["joints"]
+        if hasattr(self.solver, "state_to_joint_values"):
+            ik_start = self.solver.solve_feasible_ik(
+                p_start_robot,
+                gripper_state=float(start_gripper),
+                prev_joints=q_home[:self.solver.num_joints]
+            )
+        else:
+            ik_start = self.solver.solve_feasible_ik(p_start_robot, gripper_state=float(start_gripper))
+
         q_start = ik_start["joints"]
+
+        # A quintic blend reaches 1.875 times its average joint speed at its
+        # midpoint. Extend custom-chain approach time as needed to respect the
+        # URDF velocity limits (or the same conservative defaults as smoothing).
+        if hasattr(self.solver, "chain_joints"):
+            home_internal = self.solver.state_to_joint_values(q_home[:self.solver.num_joints])
+            start_internal = self.solver.state_to_joint_values(q_start[:self.solver.num_joints])
+            required_duration = 0.0
+            for index, joint in enumerate(self.solver.active_joints):
+                default_rate = (2.0 * np.pi / 3.0) if joint["type"] != "prismatic" else 0.15
+                rate = joint["velocity"] if joint["velocity"] is not None else default_rate
+                required_duration = max(
+                    required_duration,
+                    1.875 * abs(start_internal[index] - home_internal[index]) / rate,
+                )
+            duration_s = max(float(duration_s), required_duration)
 
         num_frames = max(10, int(round(duration_s * fps)))
         tau_vals = np.linspace(0.0, 1.0, num_frames)
 
         robot_ee = np.zeros((num_frames, 6), dtype=np.float64)
         grippers = np.zeros(num_frames, dtype=np.float64)
-        joint_states = np.zeros((num_frames, 6), dtype=np.float64)
+        joint_states = np.zeros((num_frames, len(q_home)), dtype=np.float64)
+        link_positions = []
 
         for i, tau in enumerate(tau_vals):
             s = self.quintic_blend(tau)
             # Joint-space C^2 quintic minimum-jerk blend (MoveJ)
             q_i = q_home + s * (q_start - q_home)
-            q_i = self.solver.clip_joint_limits(q_i)
+            if hasattr(self.solver, "state_to_joint_values"):
+                q_i[:self.solver.num_joints] = self.solver.clip_joint_limits(q_i[:self.solver.num_joints])
+                fk_values = self.solver.state_to_joint_values(q_i[:self.solver.num_joints])
+            else:
+                q_i = self.solver.clip_joint_limits(q_i)
+                fk_values = np.radians(q_i[:self.solver.num_joints])
             joint_states[i] = q_i
 
             # Forward kinematics for exact Cartesian EE pose
-            fk = self.solver.forward_kinematics(np.radians(q_i[:5]))
+            fk = self.solver.forward_kinematics(fk_values)
             robot_ee[i] = fk
+            if hasattr(self.solver, "forward_kinematics_chain"):
+                link_positions.append([point.tolist() for point in self.solver.forward_kinematics_chain(fk_values)])
             grippers[i] = float(home_gripper) + s * (float(start_gripper) - float(home_gripper))
 
         # Transform to ArUco frame
@@ -2591,6 +3054,7 @@ class TrajectoryPlanner:
             "aruco_cam_poses": aruco_cam.tolist(),
             "gripper_states": grippers.tolist(),
             "joint_states": joint_states.tolist(),
+            "link_positions": link_positions,
             "actions": actions.tolist(),
             "timestamps": timestamps.tolist(),
             "num_frames": num_frames,

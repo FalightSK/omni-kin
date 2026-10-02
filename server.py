@@ -27,27 +27,29 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
-from fastapi import FastAPI, Request, File, UploadFile, Form, Response, Body
+from fastapi import FastAPI, Request, File, UploadFile, Form, Response, Body, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from visual_tracker import VisualInertialTracker
+from visual_tracker import ArucoFeatureMapTracker, VisualInertialTracker
 from lerobot_exporter import LeRobotExporter, find_feasible_window
 from robot_kinematics import (
     WorkspaceCalibrator,
     CameraGripperCalibrator,
     TrajectoryPlanner,
     DEFAULT_INITIAL_POSITION,
+    KINEMATICS_ENGINE_VERSION,
     get_robot_specs,
     get_robot_solver,
     get_robot_urdf,
-    URDFParser,
+    SerialURDFKinematics,
     ROBOT_PRESETS
 )
 from integrity import (
     MAX_JSON_BYTES, MAX_UPLOAD_BYTES, dataset_slug, ensure_finite_number,
-    episode_manifest, frame_timestamps, legacy_manifest, reject_unsafe_xml,
+    VSLAM_PROCESSING_VERSION, episode_manifest, episode_needs_vslam_reprocess,
+    frame_timestamps, legacy_manifest, reject_unsafe_xml,
     sha256_file,
 )
 
@@ -145,19 +147,33 @@ def save_robot_config(cfg):
     except Exception as e:
         print(f"Error saving {ROBOT_CONFIG_FILE}: {e}")
 
+def validate_custom_urdf_config(config):
+    """Fail before changing config if an active custom chain is not selectable."""
+    if not config.get("custom_urdf_enabled"):
+        return None
+    urdf_text = config.get("custom_urdf")
+    base_link = config.get("custom_urdf_base_link")
+    tcp_link = config.get("custom_urdf_tcp_link")
+    if not urdf_text or not base_link or not tcp_link:
+        raise ValueError("An active custom URDF requires its XML, selected base link, and selected TCP link.")
+    return SerialURDFKinematics(urdf_text, base_link=base_link, tcp_link=tcp_link)
+
 ROBOT_CONFIG = load_robot_config()
 # A previously uploaded URDF is inert until the operator explicitly applies it.
+ROBOT_CONFIG.pop("custom_dh_table", None)
 if not ROBOT_CONFIG.get("custom_urdf_enabled", False):
-    ROBOT_CONFIG.pop("custom_dh_table", None)
     ROBOT_CONFIG.pop("custom_specs", None)
     ROBOT_CONFIG.pop("custom_urdf", None)
+    ROBOT_CONFIG.pop("custom_urdf_base_link", None)
+    ROBOT_CONFIG.pop("custom_urdf_tcp_link", None)
     if ROBOT_CONFIG.get("robot_type") == "custom_urdf":
         ROBOT_CONFIG["robot_type"] = "so_arm101_omni_kin"
 _init_solver = get_robot_solver(
     ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
     q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-    custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
-    custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+    custom_urdf=ROBOT_CONFIG.get("custom_urdf"),
+    custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"),
+    custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
 )
 ROBOT_CONFIG["reach_angle_deg"] = getattr(_init_solver, "reach_angle_deg", 0.0)
 
@@ -207,7 +223,10 @@ visual_tracker.configure_gripper_markers(ROBOT_CONFIG.get("gripper_marker_tracki
 lerobot_exporter = LeRobotExporter(
     output_dir=EXPORT_DIR,
     robot_type=ROBOT_CONFIG["robot_type"],
-    workspace_calibrator=workspace_calibrator
+    workspace_calibrator=workspace_calibrator,
+    custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+    custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"),
+    custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
 )
 
 def safe_to_list(arr, fallback=None):
@@ -304,6 +323,9 @@ def _validate_and_mark_reprocessed_episode(ep: dict):
         status="processed",
         validation={"state": "passed", "errors": [], "trajectory_frames": frame_count},
     )
+    ep["vslam_processing_version"] = VSLAM_PROCESSING_VERSION
+    ep["vslam_migration_state"] = "current"
+    ep["dev_video_revision"] = uuid.uuid4().hex
 
 
 def _ensure_idle(operation: str):
@@ -331,6 +353,11 @@ def save_episode_meta(ep_data):
         meta_path = os.path.join(ep_dir, "episode_meta.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(ep_data, f, indent=2)
+        manifest = ep_data.get("manifest")
+        if isinstance(manifest, dict):
+            manifest_path = os.path.join(ep_dir, "episode_manifest.json")
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
     except Exception as e:
         print(f"Error saving episode metadata: {e}")
 
@@ -338,16 +365,22 @@ def sync_episode_kinematics(ep, calib=None):
     """
     Computes and stores server-side joint_states, robot_ee_poses, and actions for an episode.
     These are used by the frontend Viewport3D for 1:1 export/preview parity without client-side IK re-solve.
-    Dynamically adheres to any loaded URDF data / custom_dh_table and respects each episode's
+    Dynamically adheres to the selected custom URDF chain and respects each episode's
     independent optimal workspace base position.
     """
     try:
+        if (
+            ep.get("manifest") is not None
+            and ep.get("manifest", {}).get("vslam_processing_version") != VSLAM_PROCESSING_VERSION
+        ):
+            ep["kinematics_stale"] = True
+            ep["kinematics_stale_reason"] = "Episode must be reprocessed with masked V-SLAM first"
+            return None
         use_custom = ROBOT_CONFIG.get("custom_urdf_enabled", False)
         r_solver = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if use_custom else None,
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if use_custom else None
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if use_custom else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link") if use_custom else None, custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link") if use_custom else None,
         )
         gripper_cfg = ROBOT_CONFIG.get("gripper_offset", {})
         if hasattr(r_solver, "update_camera_extrinsics"):
@@ -413,9 +446,14 @@ def sync_episode_kinematics(ep, calib=None):
         ik_errors_cm = []
         for i in range(len(ee_robot)):
             try:
-                res = r_solver.solve_feasible_ik(ee_robot[i], gripper_state=float(grippers[i]), prev_joints=prev_q)
+                res = r_solver.solve_feasible_ik(
+                    ee_robot[i],
+                    gripper_state=float(grippers[i]),
+                    prev_joints=prev_q,
+                    dt_s=1.0 / max(1.0, float(ep.get("fps", 30.0))),
+                )
                 q = res["joints"]
-                prev_q = q[:5]
+                prev_q = q[:r_solver.num_joints]
                 link_positions.append(res.get("link_positions", []))
                 feasible_count += int(bool(res.get("is_feasible", False)))
                 ik_errors_cm.append(float(res.get("error_distance_cm", 0.0)))
@@ -425,21 +463,29 @@ def sync_episode_kinematics(ep, calib=None):
         joints = np.array(joints, dtype=np.float32)
         joints[:, -1] = grippers  # Ensure gripper column stays normalized
 
-        # 5. Smooth joint trajectory (Savitzky-Golay + slew-rate limiter)
-        if hasattr(r_solver, "smooth_joint_trajectory"):
-            joints = r_solver.smooth_joint_trajectory(joints, fps=float(ep.get("fps", 30.0)))
+        # Joint continuity and velocity bounds are enforced during IK. A second
+        # joint-space smoothing pass would move the FK TCP off the recorded path.
 
         ep['joint_states'] = joints.tolist()
+        ep['joint_names'] = list(getattr(r_solver, "joint_names", [])) + ["gripper"]
+        ep['joint_types'] = list(getattr(r_solver, "joint_types", ["revolute"] * getattr(r_solver, "num_joints", 5))) + ["gripper"]
+        ep['joint_units'] = list(getattr(r_solver, "joint_units", ["deg"] * getattr(r_solver, "num_joints", 5))) + ["normalized"]
+        if hasattr(r_solver, "base_link") and hasattr(r_solver, "tcp_link"):
+            ep["selected_base_link"] = r_solver.base_link
+            ep["selected_tcp_link"] = r_solver.tcp_link
 
         # 6. Forward kinematics → robot_ee_poses (FK-synchronized, in robot base frame)
         fk_robot = []
         fk_links = []
         for i in range(len(joints)):
-            q_rad = np.radians(joints[i, :5])
-            fk_p = r_solver.forward_kinematics(q_rad)
+            if hasattr(r_solver, "state_to_joint_values"):
+                q_values = r_solver.state_to_joint_values(joints[i, :r_solver.num_joints])
+            else:
+                q_values = np.radians(joints[i, :r_solver.num_joints])
+            fk_p = r_solver.forward_kinematics(q_values)
             fk_robot.append(fk_p)
             if hasattr(r_solver, "forward_kinematics_chain"):
-                chain = r_solver.forward_kinematics_chain(q_rad)
+                chain = r_solver.forward_kinematics_chain(q_values)
                 fk_links.append([p.tolist() for p in chain])
         ep['robot_ee_poses'] = np.array(fk_robot, dtype=np.float32).tolist()
         if fk_links:
@@ -466,6 +512,7 @@ def sync_episode_kinematics(ep, calib=None):
         actions = np.roll(joints, -1, axis=0)
         actions[-1] = joints[-1]
         ep['actions'] = actions.tolist()
+        ep["kinematics_engine_version"] = KINEMATICS_ENGINE_VERSION
 
         save_episode_meta(ep)
         print(f"[{time.strftime('%H:%M:%S')}] ✅ Synced kinematics for episode {ep.get('episode_id', '?')} ({len(joints)} frames, reach={ep['reach_angle_deg']}°)")
@@ -473,6 +520,119 @@ def sync_episode_kinematics(ep, calib=None):
     except Exception as e:
         print(f"[{time.strftime('%H:%M:%S')}] ⚠️  sync_episode_kinematics failed for {ep.get('episode_id', '?')}: {e}")
         return None
+
+
+def _versioned_episode_video_url(ep_uid: str, filename: str, revision: str) -> str:
+    return f"/recordings/{ep_uid}/{filename}?v={VSLAM_PROCESSING_VERSION}-{revision}"
+
+
+def _reprocess_episode_from_video(
+    ep: dict,
+    *,
+    config_snapshot=None,
+    calib=None,
+    smooth=True,
+    smooth_method="savgol",
+    smooth_window_ms=250,
+):
+    """Rebuild poses, gripper states, and diagnostics from the source video.
+
+    All existing-record migration, explicit reprocessing, and robot trajectory
+    recalculation goes through this function so none can reuse legacy V-SLAM
+    poses or a legacy diagnostic video.
+    """
+    video_path = ep.get("video_path", "")
+    if not os.path.isfile(video_path):
+        raise ValueError("Episode source video is missing")
+
+    frame_count, fps = _validate_video(video_path)
+    tracker = _new_tracker(config_snapshot or _config_snapshot())
+    ep_dir = os.path.dirname(video_path)
+    episode_id = ep.get("episode_id", f"episode_{ep.get('episode_index', 0)}")
+    dev_path = os.path.join(ep_dir, "dev_visualization.mp4")
+    canny_path = os.path.join(ep_dir, "canny_visualization.mp4")
+
+    poses, telemetry = tracker.reprocess_episode_trajectory(
+        video_path,
+        ep.get("imu_data", []),
+        fps=fps,
+        output_dev_video_path=dev_path,
+        output_canny_video_path=canny_path,
+        return_dev_info=True,
+        smooth=smooth,
+        smooth_method=smooth_method,
+        smooth_window_ms=smooth_window_ms,
+    )
+    for rendered_path in (dev_path, canny_path):
+        rendered_frames, _ = _validate_video(rendered_path)
+        if rendered_frames != frame_count:
+            raise ValueError(
+                f"Diagnostic video {os.path.basename(rendered_path)} has {rendered_frames} frames; expected {frame_count}"
+            )
+    poses = np.asarray(poses, dtype=np.float64)
+    if poses.ndim != 2 or poses.shape[0] != frame_count or poses.shape[1] < 6:
+        raise ValueError(
+            f"Masked V-SLAM returned {len(poses) if poses.ndim else 0} poses for {frame_count} video frames"
+        )
+
+    existing_gripper = ep.get("gripper_states") or []
+    detected_gripper = any(
+        state.get("detected", False)
+        for state in (getattr(tracker, "last_gripper_states", None) or [])
+    )
+    marker_gripper = getattr(tracker, "last_resolved_gripper_values", None) or []
+    if detected_gripper and len(marker_gripper) == frame_count:
+        gripper_states = [round(float(value), 1) for value in marker_gripper]
+    elif len(existing_gripper) == frame_count:
+        gripper_states = [float(value) for value in existing_gripper]
+    else:
+        gripper_states = [100.0] * frame_count
+
+    raw_poses = safe_to_list(getattr(tracker, "last_raw_trajectory", None), poses)
+    ep.update({
+        "poses": poses.tolist(),
+        "raw_poses": raw_poses,
+        "gripper_states": gripper_states,
+        "dev_telemetry": telemetry,
+        "num_frames": frame_count,
+        "fps": fps,
+        "duration": frame_count / fps,
+        "timestamps": frame_timestamps(frame_count, fps),
+        "imu_data": ep.get("imu_data", []),
+        "gripper_offset_applied": camera_gripper_calibrator.get_config(),
+        "active_smoothing": {
+            "method": smooth_method if smooth else "raw",
+            "time_window_ms": int(smooth_window_ms),
+        },
+        "vslam_migration_state": "processing",
+        "vslam_processing_version": VSLAM_PROCESSING_VERSION,
+    })
+    ep["manifest"] = episode_manifest(
+        source_sha256=sha256_file(video_path),
+        frame_count=frame_count,
+        fps=fps,
+        imu_samples=len(ep.get("imu_data") or []),
+        config_snapshot=config_snapshot or _config_snapshot(),
+        status="processing",
+        validation={"state": "pending", "errors": ["Kinematics synchronization pending"]},
+    )
+    ee_poses = camera_gripper_calibrator.transform_trajectory(poses, to_gripper=True)
+    ep["ee_poses"] = np.asarray(ee_poses, dtype=np.float64).tolist()
+
+    if sync_episode_kinematics(ep, calib=calib) is None:
+        raise ValueError("Authoritative kinematics synchronization failed")
+
+    _validate_and_mark_reprocessed_episode(ep)
+    revision = ep["dev_video_revision"]
+    ep["dev_video_url"] = _versioned_episode_video_url(
+        episode_id, "dev_visualization.mp4", revision
+    )
+    ep["canny_video_url"] = _versioned_episode_video_url(
+        episode_id, "canny_visualization.mp4", revision
+    )
+    ep["video_url"] = ep.get("video_url") or f"/recordings/{episode_id}/recording.mp4"
+    save_episode_meta(ep)
+    return ep
 
 
 def load_episodes_from_disk():
@@ -492,17 +652,38 @@ def load_episodes_from_disk():
                     if "manifest" not in ep_data:
                         # Never silently bless data produced before integrity checks.
                         ep_data["manifest"] = legacy_manifest()
-                    if 'dev_video_url' not in ep_data and os.path.exists(os.path.join(item_path, "dev_visualization.mp4")):
-                        ep_data['dev_video_url'] = f"/recordings/{item}/dev_visualization.mp4"
-                    if 'canny_video_url' not in ep_data and os.path.exists(os.path.join(item_path, "canny_visualization.mp4")):
-                        ep_data['canny_video_url'] = f"/recordings/{item}/canny_visualization.mp4"
-                    if ('ee_poses' not in ep_data or not ep_data['ee_poses'] or 'gripper_offset_applied' not in ep_data) and 'poses' in ep_data:
+                    if episode_needs_vslam_reprocess(ep_data):
+                        ep_data["vslam_migration_state"] = "pending"
+                        # Hide saved pre-mask overlays until migration replaces them.
+                        ep_data["dev_video_url"] = None
+                        ep_data["canny_video_url"] = None
+                    else:
+                        revision = ep_data.get("dev_video_revision") or VSLAM_PROCESSING_VERSION
+                        ep_data["vslam_processing_version"] = VSLAM_PROCESSING_VERSION
+                        ep_data["vslam_migration_state"] = "current"
+                        ep_data["dev_video_revision"] = revision
+                        if os.path.exists(os.path.join(item_path, "dev_visualization.mp4")):
+                            ep_data["dev_video_url"] = _versioned_episode_video_url(item, "dev_visualization.mp4", revision)
+                        if os.path.exists(os.path.join(item_path, "canny_visualization.mp4")):
+                            ep_data["canny_video_url"] = _versioned_episode_video_url(item, "canny_visualization.mp4", revision)
+                        if not os.path.exists(os.path.join(item_path, "dev_visualization.mp4")):
+                            ep_data["dev_video_url"] = None
+                        if not os.path.exists(os.path.join(item_path, "canny_visualization.mp4")):
+                            ep_data["canny_video_url"] = None
+                    if not episode_needs_vslam_reprocess(ep_data) and (
+                        'ee_poses' not in ep_data
+                        or not ep_data['ee_poses']
+                        or 'gripper_offset_applied' not in ep_data
+                    ) and 'poses' in ep_data:
                         ee_p = camera_gripper_calibrator.transform_trajectory(ep_data['poses'], to_gripper=True)
                         ep_data['ee_poses'] = ee_p.tolist()
                         act = np.roll(ee_p, -1, axis=0)
                         act[-1] = ee_p[-1]
                         ep_data['actions'] = act.tolist()
                         ep_data['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
+                    # Keep the standalone manifest aligned with the authoritative
+                    # episode metadata, including after startup migration checks.
+                    save_episode_meta(ep_data)
                     loaded.append(ep_data)
             except Exception as e:
                 print(f"Error reading {meta_path}: {e}")
@@ -512,46 +693,18 @@ def load_episodes_from_disk():
                 video_filename = video_files[0]
                 video_path = os.path.join(item_path, video_filename)
                 try:
-                    cap = cv2.VideoCapture(video_path)
-                    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-                    cap.release()
-                    dev_path = os.path.join(item_path, "dev_visualization.mp4")
-                    canny_path = os.path.join(item_path, "canny_visualization.mp4")
-                    poses, telem = visual_tracker.process_video_and_imu(
-                        video_path,
-                        [],
-                        fps=fps,
-                        output_dev_video_path=dev_path,
-                        output_canny_video_path=canny_path,
-                        return_dev_info=True
-                    )
-                    actions = np.roll(poses, -1, axis=0)
-                    actions[-1] = poses[-1]
-                    timestamps = np.linspace(0, len(poses) / fps, len(poses))
                     ep_data = {
                         'episode_index': len(loaded),
                         'episode_id': item,
                         'task': 'demonstration',
                         'video_path': video_path,
                         'video_url': f'/recordings/{item}/{video_filename}',
-                        'dev_video_url': f'/recordings/{item}/dev_visualization.mp4',
-                        'canny_video_url': f'/recordings/{item}/canny_visualization.mp4',
-                        'dev_telemetry': telem,
-                        'num_frames': len(poses),
-                        'fps': fps,
-                        'duration': len(poses) / fps,
                         'anchor': 'aruco_feature_imu_fusion',
                         'marker_size_cm': 10.0,
-                        'poses': poses.tolist(),
-                        'raw_poses': safe_to_list(getattr(visual_tracker, 'last_raw_trajectory', None), poses),
-                        'ee_poses': poses.tolist(),
-                        'gripper_states': [100.0] * len(poses),
-                        'actions': actions.tolist(),
-                        'timestamps': timestamps.tolist(),
                         'imu_data': [],
                         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
                     }
-                    save_episode_meta(ep_data)
+                    _reprocess_episode_from_video(ep_data)
                     loaded.append(ep_data)
                 except Exception as e:
                     print(f"Error auto-processing {item}: {e}")
@@ -559,13 +712,14 @@ def load_episodes_from_disk():
     r_solver = None
     for idx, ep in enumerate(loaded):
         ep['episode_index'] = idx
-        if 'feasible_window' not in ep or not ep['feasible_window']:
+        if not episode_needs_vslam_reprocess(ep) and ('feasible_window' not in ep or not ep['feasible_window']):
             if r_solver is None:
                 r_solver = get_robot_solver(
                     ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
                     q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-                    custom_dh_table=ROBOT_CONFIG.get("custom_dh_table"),
-                    custom_urdf=ROBOT_CONFIG.get("custom_urdf")
+                    custom_urdf=ROBOT_CONFIG.get("custom_urdf"),
+                    custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"),
+                    custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
                 )
             raw_p = ep.get('ee_poses') or ep.get('poses')
             if raw_p and len(raw_p) > 0:
@@ -596,13 +750,38 @@ def load_episodes_from_disk():
     EPISODES_DB = loaded
 
     # Sync kinematics for episodes that don't have pre-computed joint_states / robot_ee_poses or are missing TCP link positions
+    expected_link_count = len(_init_solver.chain_joints) + 1 if hasattr(_init_solver, "chain_joints") else None
+
+    def has_stale_custom_kinematics(ep):
+        if not ROBOT_CONFIG.get("custom_urdf_enabled") or expected_link_count is None:
+            return False
+        cached_joints = ep.get("joint_states") or []
+        return (
+            ep.get("robot_type") != "custom_urdf"
+            or ep.get("selected_base_link") != _init_solver.base_link
+            or ep.get("selected_tcp_link") != _init_solver.tcp_link
+            or (cached_joints and len(cached_joints[0]) != _init_solver.num_joints + 1)
+        )
+
     needs_sync = [
         ep for ep in EPISODES_DB
-        if not ep.get('joint_states')
-        or not ep.get('robot_ee_poses')
-        or not ep.get('link_positions')
-        or not ep.get('workspace_calibration')
-        or (ep.get('link_positions') and len(ep['link_positions'][0]) < 7)
+        if not episode_needs_vslam_reprocess(ep)
+        and (
+            not ep.get('joint_states')
+            or not ep.get('robot_ee_poses')
+            or not ep.get('link_positions')
+            or not ep.get('workspace_calibration')
+            or ep.get("kinematics_engine_version") != KINEMATICS_ENGINE_VERSION
+            or (
+                ep.get('link_positions')
+                and (
+                    len(ep['link_positions'][0]) != expected_link_count
+                    if expected_link_count is not None
+                    else len(ep['link_positions'][0]) < 7
+                )
+            )
+            or has_stale_custom_kinematics(ep)
+        )
     ]
     if needs_sync:
         print(f"[{time.strftime('%H:%M:%S')}] 🔧 Computing kinematics for {len(needs_sync)} episode(s) needing TCP sync...")
@@ -703,11 +882,12 @@ def _sync_execute_processing_job(job):
     # 2. Server-Side Visual-Inertial fusion
     dev_video_filename = "dev_visualization.mp4"
     dev_video_path = os.path.join(ep_dir, dev_video_filename)
-    dev_video_url = f"/recordings/{ep_uid}/{dev_video_filename}"
+    dev_video_revision = uuid.uuid4().hex
+    dev_video_url = _versioned_episode_video_url(ep_uid, dev_video_filename, dev_video_revision)
 
     canny_video_filename = "canny_visualization.mp4"
     canny_video_path = os.path.join(ep_dir, canny_video_filename)
-    canny_video_url = f"/recordings/{ep_uid}/{canny_video_filename}"
+    canny_video_url = _versioned_episode_video_url(ep_uid, canny_video_filename, dev_video_revision)
 
     anchored_poses, dev_telemetry = job_tracker.process_video_and_imu(
         video_path,
@@ -771,6 +951,9 @@ def _sync_execute_processing_job(job):
         'video_url': video_url,
         'dev_video_url': dev_video_url,
         'canny_video_url': canny_video_url,
+        'dev_video_revision': dev_video_revision,
+        'vslam_processing_version': VSLAM_PROCESSING_VERSION,
+        'vslam_migration_state': 'current',
         'dev_telemetry': dev_telemetry,
         'num_frames': num_pts,
         'fps': fps,
@@ -810,8 +993,7 @@ def _sync_execute_processing_job(job):
             r_solver_ep = get_robot_solver(
                 ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
                 q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-                custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
-                custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+                custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"), custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
             )
             calibrated["reach_angle_rad"] = getattr(r_solver_ep, "reach_angle_rad", 0.0)
             ROBOT_CONFIG.update(calibrated)
@@ -828,6 +1010,14 @@ def _sync_execute_processing_job(job):
         }
         save_episode_meta(episode_data)
         raise ValueError("Authoritative kinematics validation failed")
+    _validate_and_mark_reprocessed_episode(episode_data)
+    episode_data['dev_video_url'] = _versioned_episode_video_url(
+        ep_uid, dev_video_filename, episode_data['dev_video_revision']
+    )
+    episode_data['canny_video_url'] = _versioned_episode_video_url(
+        ep_uid, canny_video_filename, episode_data['dev_video_revision']
+    )
+    save_episode_meta(episode_data)
     print(f"[{time.strftime('%H:%M:%S')}] 🎉 Episode #{ep_idx} successfully calculated via ArUco+Feature+IMU fusion ({num_pts} frames)!\n")
     return episode_data
 
@@ -840,6 +1030,7 @@ def _background_processing_worker_thread():
     while True:
         try:
             job = PROCESSING_QUEUE.get()
+            job_type = job.get("job_type", "upload")
             PROCESSING_STATUS["is_processing"] = True
             PROCESSING_STATUS["pending_count"] = PROCESSING_QUEUE.qsize()
             PROCESSING_STATUS["current_job"] = {
@@ -852,7 +1043,16 @@ def _background_processing_worker_thread():
             print(f"\n[{time.strftime('%H:%M:%S')}] ⚙️ [Worker] Starting background processing for Job {job['job_id']} ('{job['task']}'). Queue remaining: {PROCESSING_QUEUE.qsize()}")
 
             try:
-                episode_data = _sync_execute_processing_job(job)
+                if job_type == "vslam_migration":
+                    episode_data = next(
+                        (ep for ep in EPISODES_DB if ep.get("episode_id") == job.get("episode_id")),
+                        None,
+                    )
+                    if episode_data is None:
+                        raise ValueError("Episode disappeared before V-SLAM migration")
+                    _reprocess_episode_from_video(episode_data)
+                else:
+                    episode_data = _sync_execute_processing_job(job)
                 PROCESSING_STATUS["completed_count"] += 1
                 PROCESSING_STATUS["recent_jobs"].append({
                     "job_id": job["job_id"],
@@ -874,10 +1074,22 @@ def _background_processing_worker_thread():
                     "error": str(e),
                     "failed_at": time.strftime("%Y-%m-%d %H:%M:%S")
                 })
-                try:
-                    _save_job_manifest(job, "failed", [str(e)])
-                except Exception:
-                    pass
+                if job_type == "vslam_migration":
+                    target = next(
+                        (ep for ep in EPISODES_DB if ep.get("episode_id") == job.get("episode_id")),
+                        None,
+                    )
+                    if target is not None:
+                        target["vslam_migration_state"] = "failed"
+                        target["vslam_migration_error"] = str(e)
+                        target["dev_video_url"] = None
+                        target["canny_video_url"] = None
+                        save_episode_meta(target)
+                else:
+                    try:
+                        _save_job_manifest(job, "failed", [str(e)])
+                    except Exception:
+                        pass
                 print(f"[{time.strftime('%H:%M:%S')}] ❌ [Worker] Failed processing Job {job['job_id']}: {e}")
             finally:
                 if len(PROCESSING_STATUS["recent_jobs"]) > 20:
@@ -893,6 +1105,34 @@ def _background_processing_worker_thread():
 # Launch worker thread once on server initialization
 _worker_thread = threading.Thread(target=_background_processing_worker_thread, daemon=True, name="OmniKinWorker")
 _worker_thread.start()
+VSLAM_MIGRATIONS_QUEUED = False
+
+
+@app.on_event("startup")
+async def queue_saved_episode_vslam_migrations():
+    """Queue every saved episode whose poses/video predate marker masking."""
+    global VSLAM_MIGRATIONS_QUEUED
+    if VSLAM_MIGRATIONS_QUEUED:
+        return
+    VSLAM_MIGRATIONS_QUEUED = True
+    queued = 0
+    for ep in EPISODES_DB:
+        if not episode_needs_vslam_reprocess(ep):
+            continue
+        ep["vslam_migration_state"] = "pending"
+        ep["dev_video_url"] = None
+        ep["canny_video_url"] = None
+        PROCESSING_QUEUE.put({
+            "job_type": "vslam_migration",
+            "job_id": f"vslam-migrate-{ep.get('episode_id', ep.get('episode_index'))}-{VSLAM_PROCESSING_VERSION}",
+            "episode_id": ep.get("episode_id"),
+            "episode_index": ep.get("episode_index"),
+            "task": f"Migrate episode #{ep.get('episode_index')} to masked V-SLAM",
+        })
+        queued += 1
+    PROCESSING_STATUS["pending_count"] = PROCESSING_QUEUE.qsize()
+    if queued:
+        print(f"[{time.strftime('%H:%M:%S')}] ♻️ Queued {queued} saved episode(s) for masked V-SLAM migration.")
 
 def get_local_ip():
     try:
@@ -1324,8 +1564,18 @@ async def print_gripper_markers_page(
 ):
     """
     Returns an HTML print template for printing the two small gripper jaw ArUco markers
-    (Tag 2 & Tag 3) at EXACT 22.0mm physical scale with cutting guides and calibration ruler.
+    (Tag 2 & Tag 3 by default) at the requested physical scale with cutting guides and ruler.
     """
+    if not np.isfinite(size_mm) or size_mm <= 0:
+        raise HTTPException(status_code=400, detail="size_mm must be a positive finite number")
+
+    ruler_marks = "".join(
+        f'<div class="r-tick" style="left: {millimeters / size_mm * 100:.1f}%; height: {tick_height}mm;"></div>'
+        f'<div class="r-lbl" style="left: {millimeters / size_mm * 100:.1f}%">{millimeters}mm</div>'
+        for millimeters, tick_height in ((5, 3), (10, 4), (15, 3))
+        if millimeters < size_mm
+    )
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1430,11 +1680,11 @@ async def print_gripper_markers_page(
 
         /* EXACT PHYSICAL MILLIMETER DIMENSIONS FOR BLACK ARUCO SQUARE */
         .gripper-marker-img {{
-            width: {size_mm}mm;
-            height: {size_mm}mm;
+            width: {size_mm:g}mm;
+            height: {size_mm:g}mm;
             display: block;
             image-rendering: pixelated;
-            border: 1px solid #000;
+            border: 0;
         }}
 
         .marker-tag-name {{
@@ -1466,7 +1716,7 @@ async def print_gripper_markers_page(
             margin-bottom: 3mm;
         }}
         .ruler-bar {{
-            width: {size_mm}mm;
+            width: {size_mm:g}mm;
             height: 8mm;
             border-top: 2px solid #000;
             position: relative;
@@ -1506,7 +1756,7 @@ async def print_gripper_markers_page(
             Print at <strong>Scale: 100% (Actual Size)</strong> on standard A4 paper.<br>
             Each black marker square is scaled to exactly <strong>{size_mm:.1f} mm</strong>.
         </p>
-        <button class="print-btn" onclick="window.print()">PRINT 22MM GRIPPER MARKERS</button>
+        <button class="print-btn" onclick="window.print()">PRINT {size_mm:.0f}MM GRIPPER MARKERS</button>
         <div style="margin-top: 10px; font-size: 12px;">
             <a href="/api/marker/print_dual" style="color: #2563eb; text-decoration: underline;">Switch to Dual-ArUco Table Board (10cm + 5cm)</a>
         </div>
@@ -1544,14 +1794,7 @@ async def print_gripper_markers_page(
                 <div class="r-tick" style="left: 0; height: 5mm;"></div>
                 <div class="r-lbl" style="left: 0;">0</div>
 
-                <div class="r-tick" style="left: 22.7%; height: 3mm;"></div>
-                <div class="r-lbl" style="left: 22.7%;">5mm</div>
-
-                <div class="r-tick" style="left: 45.5%; height: 4mm;"></div>
-                <div class="r-lbl" style="left: 45.5%;">10mm</div>
-
-                <div class="r-tick" style="left: 68.2%; height: 3mm;"></div>
-                <div class="r-lbl" style="left: 68.2%;">15mm</div>
+                {ruler_marks}
 
                 <div class="r-tick" style="right: 0; height: 5mm;"></div>
                 <div class="r-lbl" style="right: 0;">{size_mm:.0f}mm</div>
@@ -1574,7 +1817,6 @@ async def print_gripper_markers_page(
 
 @app.get("/api/episodes")
 async def get_episodes():
-    load_episodes_from_disk()
     return JSONResponse(EPISODES_DB)
 
 def _safe_rmtree(path: str, retries: int = 3, delay: float = 0.15):
@@ -1896,6 +2138,7 @@ async def generate_sample_recording(task: str = "draw 3d circle", shape: str = "
     """
     ep_idx = len(EPISODES_DB)
     sample_uid = f"sample_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+    sample_video_revision = uuid.uuid4().hex
     ep_dir = os.path.join(RECORDINGS_DIR, sample_uid)
     os.makedirs(ep_dir, exist_ok=True)
 
@@ -1913,12 +2156,12 @@ async def generate_sample_recording(task: str = "draw 3d circle", shape: str = "
 
     dev_video_filename = "dev_visualization.mp4"
     dev_video_path = os.path.join(ep_dir, dev_video_filename)
-    dev_video_url = f"/recordings/{sample_uid}/{dev_video_filename}"
+    dev_video_url = _versioned_episode_video_url(sample_uid, dev_video_filename, sample_video_revision)
     dev_out = cv2.VideoWriter(dev_video_path, fourcc, fps, (640, 480))
 
     canny_video_filename = "canny_visualization.mp4"
     canny_video_path = os.path.join(ep_dir, canny_video_filename)
-    canny_video_url = f"/recordings/{sample_uid}/{canny_video_filename}"
+    canny_video_url = _versioned_episode_video_url(sample_uid, canny_video_filename, sample_video_revision)
     canny_out = cv2.VideoWriter(canny_video_path, fourcc, fps, (640, 480))
 
     marker_img = visual_tracker.generate_marker_image(marker_id=0, side_pixels=140, border_pixels=10)
@@ -1980,7 +2223,8 @@ async def generate_sample_recording(task: str = "draw 3d circle", shape: str = "
             ids_list=[0],
             tracked_pts=synth_pts,
             prev_pts=synth_prev,
-            landmarks_3d=synth_lms
+            landmarks_3d=synth_lms,
+            feature_mask=ArucoFeatureMapTracker._build_feature_mask(frame.shape, marker_corners),
         )
         dev_out.write(dev_frame)
 
@@ -2047,6 +2291,10 @@ async def generate_sample_recording(task: str = "draw 3d circle", shape: str = "
         'video_url': video_url,
         'dev_video_url': dev_video_url,
         'canny_video_url': canny_video_url,
+        'dev_video_revision': sample_video_revision,
+        'vslam_processing_version': VSLAM_PROCESSING_VERSION,
+        'vslam_migration_state': 'current',
+        'trajectory_source': 'synthetic',
         'dev_telemetry': dev_telemetry,
         'num_frames': frame_count,
         'fps': fps,
@@ -2062,6 +2310,16 @@ async def generate_sample_recording(task: str = "draw 3d circle", shape: str = "
         'imu_data': [],
         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
     }
+
+    episode_data['manifest'] = episode_manifest(
+        source_sha256=sha256_file(video_path),
+        frame_count=frame_count,
+        fps=fps,
+        imu_samples=0,
+        config_snapshot=_config_snapshot(),
+        status='processed',
+        validation={'state': 'passed', 'errors': [], 'trajectory_frames': frame_count},
+    )
 
     EPISODES_DB.append(episode_data)
     save_episode_meta(episode_data)
@@ -2108,20 +2366,6 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
     if not target_ep:
         return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
 
-    video_path = target_ep.get('video_path', '')
-    imu_data = target_ep.get('imu_data', [])
-
-    if not os.path.exists(video_path):
-        return JSONResponse({"status": "error", "message": "Episode video file missing"}, status_code=400)
-
-    fps = target_ep.get('fps', 30.0)
-    ep_dir = os.path.dirname(video_path)
-    dev_video_path = os.path.join(ep_dir, "dev_visualization.mp4")
-    canny_video_path = os.path.join(ep_dir, "canny_visualization.mp4")
-    ep_uid = target_ep.get('episode_id', f"episode_{episode_index}")
-    dev_video_url = f"/recordings/{ep_uid}/dev_visualization.mp4"
-    canny_video_url = f"/recordings/{ep_uid}/canny_visualization.mp4"
-
     smooth_opt = True
     smooth_method = "savgol"
     smooth_window_ms = 250
@@ -2129,51 +2373,34 @@ async def reprocess_episode(episode_index: int, payload: dict = Body(None)):
         smooth_opt = payload.get('smooth', True)
         smooth_method = payload.get('smooth_method', 'savgol')
         smooth_window_ms = int(payload.get('smooth_window_ms', 250))
-
-    new_poses, dev_telemetry = visual_tracker.reprocess_episode_trajectory(
-        video_path,
-        imu_data,
-        fps=fps,
-        output_dev_video_path=dev_video_path,
-        output_canny_video_path=canny_video_path,
-        return_dev_info=True,
-        smooth=smooth_opt,
-        smooth_method=smooth_method,
-        smooth_window_ms=smooth_window_ms
-    )
-    new_poses = np.array(new_poses)
-    ee_poses = camera_gripper_calibrator.transform_trajectory(new_poses, to_gripper=True)
-
-    target_ep['poses'] = new_poses.tolist()
-    target_ep['raw_poses'] = safe_to_list(getattr(visual_tracker, 'last_raw_trajectory', None), new_poses)
-    target_ep['ee_poses'] = ee_poses.tolist()
-    actions = np.roll(ee_poses, -1, axis=0)
-    actions[-1] = ee_poses[-1]
-    target_ep['actions'] = actions.tolist()
-    target_ep['dev_video_url'] = dev_video_url
-    target_ep['canny_video_url'] = canny_video_url
-    target_ep['dev_telemetry'] = dev_telemetry
-    target_ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
-    target_ep['active_smoothing'] = {'method': smooth_method, 'time_window_ms': smooth_window_ms}
-
-    # Re-sync full kinematics (joint_states, robot_ee_poses, fk_table_poses, actions) on filtered poses
-    if sync_episode_kinematics(target_ep) is None:
-        raise ValueError("Authoritative kinematics validation failed")
-    _validate_and_mark_reprocessed_episode(target_ep)
-    save_episode_meta(target_ep)
+    try:
+        _reprocess_episode_from_video(
+            target_ep,
+            smooth=smooth_opt,
+            smooth_method=smooth_method,
+            smooth_window_ms=smooth_window_ms,
+        )
+    except Exception as exc:
+        target_ep["vslam_migration_state"] = "failed"
+        target_ep["vslam_migration_error"] = str(exc)
+        target_ep["dev_video_url"] = None
+        target_ep["canny_video_url"] = None
+        save_episode_meta(target_ep)
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
 
     return JSONResponse({
         "status": "success",
         "episode_index": episode_index,
-        "num_frames": len(new_poses),
-        "poses": target_ep['poses'],
-        "ee_poses": target_ep['ee_poses'],
+        "num_frames": target_ep["num_frames"],
+        "poses": target_ep["poses"],
+        "ee_poses": target_ep["ee_poses"],
         "joint_states": target_ep.get('joint_states', []),
         "robot_ee_poses": target_ep.get('robot_ee_poses', []),
         "fk_table_poses": target_ep.get('fk_table_poses', []),
         "fk_camera_poses": target_ep.get('fk_camera_poses', []),
-        "dev_video_url": dev_video_url,
-        "canny_video_url": canny_video_url
+        "dev_video_url": target_ep["dev_video_url"],
+        "canny_video_url": target_ep["canny_video_url"],
+        "vslam_processing_version": target_ep["vslam_processing_version"]
     })
 
 @app.post("/api/episodes/{episode_index}/smooth")
@@ -2190,6 +2417,12 @@ async def smooth_episode_trajectory(episode_index: int, payload: dict = Body(...
 
     if not target_ep:
         return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+
+    if episode_needs_vslam_reprocess(target_ep):
+        return JSONResponse({
+            "status": "error",
+            "message": "Reprocess this episode with the current masked V-SLAM pipeline before smoothing it.",
+        }, status_code=409)
 
     raw_poses = target_ep.get('raw_poses') or target_ep.get('poses', [])
     if not raw_poses or len(raw_poses) < 4:
@@ -2231,45 +2464,38 @@ async def smooth_episode_trajectory(episode_index: int, payload: dict = Body(...
 @app.post("/api/episodes/{episode_index}/dev_video")
 async def generate_episode_dev_video(episode_index: int):
     """
-    Ensures that a developer diagnostic video (dev_visualization.mp4) exists for an episode,
-    generating it on-demand if it does not already exist.
+    Regenerates a legacy or missing diagnostic view through the active masked V-SLAM pipeline.
     """
     global EPISODES_DB
+    try:
+        _ensure_idle("regenerate the diagnostic video")
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
     target_ep = next((e for e in EPISODES_DB if e['episode_index'] == episode_index), None)
     if not target_ep:
         return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
 
-    video_path = target_ep.get('video_path', '')
-    if not os.path.exists(video_path):
-        return JSONResponse({"status": "error", "message": "Video recording missing"}, status_code=400)
-
-    ep_dir = os.path.dirname(video_path)
-    dev_video_path = os.path.join(ep_dir, "dev_visualization.mp4")
-    canny_video_path = os.path.join(ep_dir, "canny_visualization.mp4")
-    ep_uid = target_ep.get('episode_id', f"episode_{episode_index}")
-    dev_video_url = f"/recordings/{ep_uid}/dev_visualization.mp4"
-    canny_video_url = f"/recordings/{ep_uid}/canny_visualization.mp4"
-
-    if not os.path.exists(dev_video_path) or target_ep.get('dev_telemetry') is None:
-        fps = target_ep.get('fps', 30.0)
-        _, dev_telemetry = visual_tracker.process_video_and_imu(
-            video_path,
-            target_ep.get('imu_data', []),
-            fps=fps,
-            output_dev_video_path=dev_video_path,
-            output_canny_video_path=canny_video_path,
-            return_dev_info=True
-        )
-        target_ep['dev_telemetry'] = dev_telemetry
-
-    target_ep['dev_video_url'] = dev_video_url
-    target_ep['canny_video_url'] = canny_video_url
-    save_episode_meta(target_ep)
+    dev_path = os.path.join(os.path.dirname(target_ep.get("video_path", "")), "dev_visualization.mp4")
+    if (
+        episode_needs_vslam_reprocess(target_ep)
+        or not os.path.isfile(dev_path)
+        or target_ep.get("dev_telemetry") is None
+    ):
+        try:
+            _reprocess_episode_from_video(target_ep)
+        except Exception as exc:
+            target_ep["vslam_migration_state"] = "failed"
+            target_ep["vslam_migration_error"] = str(exc)
+            target_ep["dev_video_url"] = None
+            target_ep["canny_video_url"] = None
+            save_episode_meta(target_ep)
+            return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
     return JSONResponse({
         "status": "success",
-        "dev_video_url": dev_video_url,
-        "canny_video_url": canny_video_url,
-        "dev_telemetry": target_ep.get('dev_telemetry', [])
+        "dev_video_url": target_ep["dev_video_url"],
+        "canny_video_url": target_ep["canny_video_url"],
+        "vslam_processing_version": target_ep.get("vslam_processing_version"),
+        "dev_telemetry": target_ep.get("dev_telemetry", []),
     })
 
 @app.patch("/api/episodes/{episode_index}/task")
@@ -2299,8 +2525,7 @@ async def update_episode_task(episode_index: int, payload: dict = Body(...)):
 @app.get("/api/robot/config")
 async def get_robot_config():
     """
-    Returns the current active robot preset, workspace offset calibration (table plane Z=0),
-    and Denavit-Hartenberg (DH) parameter specifications for all available presets.
+    Returns the current robot preset, workspace calibration, and URDF chain specifications.
     """
     q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
     presets = [
@@ -2331,20 +2556,25 @@ async def update_robot_config(request: Request):
         ):
             if field in payload:
                 payload[field] = ensure_finite_number(payload[field], field, minimum, maximum)
+        if not payload.get("reset_to_preset", False):
+            validate_custom_urdf_config({**ROBOT_CONFIG, **payload})
         if "custom_urdf_enabled" in payload:
             ROBOT_CONFIG["custom_urdf_enabled"] = bool(payload["custom_urdf_enabled"])
-        if "custom_dh_table" in payload and payload["custom_dh_table"]:
-            ROBOT_CONFIG["custom_dh_table"] = payload["custom_dh_table"]
         if "custom_specs" in payload and payload["custom_specs"]:
             ROBOT_CONFIG["custom_specs"] = payload["custom_specs"]
         if "custom_urdf" in payload and payload["custom_urdf"]:
             ROBOT_CONFIG["custom_urdf"] = payload["custom_urdf"]
+        for field in ("custom_urdf_base_link", "custom_urdf_tcp_link"):
+            if field in payload and payload[field]:
+                ROBOT_CONFIG[field] = str(payload[field])
 
         if payload.get("reset_to_preset", False):
             ROBOT_CONFIG["custom_urdf_enabled"] = False
             ROBOT_CONFIG.pop("custom_dh_table", None)
             ROBOT_CONFIG.pop("custom_specs", None)
             ROBOT_CONFIG.pop("custom_urdf", None)
+            ROBOT_CONFIG.pop("custom_urdf_base_link", None)
+            ROBOT_CONFIG.pop("custom_urdf_tcp_link", None)
             if "robot_type" in payload:
                 from robot_kinematics import normalize_robot_type
                 r_type = normalize_robot_type(payload["robot_type"])
@@ -2368,6 +2598,8 @@ async def update_robot_config(request: Request):
                     ROBOT_CONFIG.pop("custom_dh_table", None)
                     ROBOT_CONFIG.pop("custom_specs", None)
                     ROBOT_CONFIG.pop("custom_urdf", None)
+                    ROBOT_CONFIG.pop("custom_urdf_base_link", None)
+                    ROBOT_CONFIG.pop("custom_urdf_tcp_link", None)
         if "offset_x" in payload:
             ROBOT_CONFIG["offset_x"] = float(payload["offset_x"])
         if "offset_y" in payload:
@@ -2398,8 +2630,7 @@ async def update_robot_config(request: Request):
         r_solver_up = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"), custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
         )
         reach_rad = getattr(r_solver_up, "reach_angle_rad", 0.0)
         ROBOT_CONFIG["reach_angle_deg"] = getattr(r_solver_up, "reach_angle_deg", 0.0)
@@ -2420,17 +2651,35 @@ async def update_robot_config(request: Request):
             offset_z=ROBOT_CONFIG["offset_z"],
             yaw_deg=ROBOT_CONFIG["yaw_deg"],
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"), custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
         )
 
         updated_count = 0
+        failed_episodes = []
         if payload.get("apply_to_episodes", False) or payload.get("recalculate", False):
             for ep in EPISODES_DB:
-                poses = ep.get("poses") or ep.get("raw_poses", [])
-                if poses and len(poses) > 0:
-                    sync_episode_kinematics(ep)
+                try:
+                    if ep.get("trajectory_source") == "synthetic":
+                        if sync_episode_kinematics(ep) is None:
+                            raise ValueError("Synthetic trajectory kinematics synchronization failed")
+                    else:
+                        _reprocess_episode_from_video(ep)
                     updated_count += 1
+                except Exception as exc:
+                    ep["vslam_migration_state"] = "failed"
+                    ep["vslam_migration_error"] = str(exc)
+                    ep["dev_video_url"] = None
+                    ep["canny_video_url"] = None
+                    save_episode_meta(ep)
+                    failed_episodes.append({"episode_id": ep.get("episode_id"), "error": str(exc)})
+
+        if failed_episodes:
+            return JSONResponse({
+                "status": "error",
+                "message": f"Masked V-SLAM updated {updated_count} episode(s); {len(failed_episodes)} failed and remain blocked from export.",
+                "failed_episodes": failed_episodes,
+                "config": ROBOT_CONFIG,
+            }, status_code=400)
 
         print(f"[{time.strftime('%H:%M:%S')}] 🤖 Robot Config Updated: Model={ROBOT_CONFIG['robot_type']}, Offset=({ROBOT_CONFIG['offset_x']:.2f}m, {ROBOT_CONFIG['offset_y']:.2f}m, Yaw={ROBOT_CONFIG['yaw_deg']:.1f}°), q3_safe_max={ROBOT_CONFIG.get('q3_safe_max_deg', 0.0)}° (Synced {updated_count} episodes)")
 
@@ -2484,13 +2733,31 @@ async def update_gripper_offset_endpoint(request: Request):
 
         apply_to_episodes = bool(payload.get("apply_to_episodes", False))
         updated_count = 0
+        failed_episodes = []
         if apply_to_episodes:
             for ep in EPISODES_DB:
-                poses = ep.get("poses") or ep.get("raw_poses", [])
-                if poses and len(poses) > 0:
-                    sync_episode_kinematics(ep)
-                    save_episode_meta(ep)
+                try:
+                    if ep.get("trajectory_source") == "synthetic":
+                        if sync_episode_kinematics(ep) is None:
+                            raise ValueError("Synthetic trajectory kinematics synchronization failed")
+                    else:
+                        _reprocess_episode_from_video(ep)
                     updated_count += 1
+                except Exception as exc:
+                    ep["vslam_migration_state"] = "failed"
+                    ep["vslam_migration_error"] = str(exc)
+                    ep["dev_video_url"] = None
+                    ep["canny_video_url"] = None
+                    save_episode_meta(ep)
+                    failed_episodes.append({"episode_id": ep.get("episode_id"), "error": str(exc)})
+
+        if failed_episodes:
+            return JSONResponse({
+                "status": "error",
+                "message": f"Masked V-SLAM updated {updated_count} episode(s); {len(failed_episodes)} failed and remain blocked from export.",
+                "failed_episodes": failed_episodes,
+                "gripper_offset": camera_gripper_calibrator.get_config(),
+            }, status_code=400)
 
         print(f"[{time.strftime('%H:%M:%S')}] 🦾 Gripper TCP Offset Updated: Pitch={pitch}°, Fwd={fwd}cm, Hgt={hgt}cm, Enabled={enabled} (Applied to {updated_count} episodes)")
 
@@ -2510,9 +2777,8 @@ async def update_gripper_offset_endpoint(request: Request):
 @app.post("/api/robot/recalculate_trajectory")
 async def recalculate_trajectory_endpoint(request: Request):
     """
-    Recalculates 3D end-effector TCP trajectories, action vectors, and inverse kinematics
-    feasibility for recorded episodes based on the latest active robot setup (placement offset,
-    gripper extrinsic calibration, initial standby position, and robot model DH specs).
+    Reprocesses source videos through the active masked V-SLAM pipeline, then recalculates
+    end-effector trajectories and inverse kinematics for the latest robot setup.
     """
     global ROBOT_CONFIG, EPISODES_DB
     try:
@@ -2521,23 +2787,33 @@ async def recalculate_trajectory_endpoint(request: Request):
         payload = {}
 
     try:
+        _ensure_idle("recalculate trajectories")
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
+
+    try:
         # 1. Optionally apply updated config from payload if provided
         new_config = payload.get("robot_config") or payload.get("config")
         if new_config and isinstance(new_config, dict):
+            if not new_config.get("reset_to_preset", False):
+                validate_custom_urdf_config({**ROBOT_CONFIG, **new_config})
             if "custom_urdf_enabled" in new_config:
                 ROBOT_CONFIG["custom_urdf_enabled"] = bool(new_config["custom_urdf_enabled"])
-            if "custom_dh_table" in new_config and new_config["custom_dh_table"]:
-                ROBOT_CONFIG["custom_dh_table"] = new_config["custom_dh_table"]
             if "custom_specs" in new_config and new_config["custom_specs"]:
                 ROBOT_CONFIG["custom_specs"] = new_config["custom_specs"]
             if "custom_urdf" in new_config and new_config["custom_urdf"]:
                 ROBOT_CONFIG["custom_urdf"] = new_config["custom_urdf"]
+            for field in ("custom_urdf_base_link", "custom_urdf_tcp_link"):
+                if field in new_config and new_config[field]:
+                    ROBOT_CONFIG[field] = str(new_config[field])
 
             if new_config.get("reset_to_preset", False):
                 ROBOT_CONFIG["custom_urdf_enabled"] = False
                 ROBOT_CONFIG.pop("custom_dh_table", None)
                 ROBOT_CONFIG.pop("custom_specs", None)
                 ROBOT_CONFIG.pop("custom_urdf", None)
+                ROBOT_CONFIG.pop("custom_urdf_base_link", None)
+                ROBOT_CONFIG.pop("custom_urdf_tcp_link", None)
                 if "robot_type" in new_config:
                     from robot_kinematics import normalize_robot_type
                     r_type = normalize_robot_type(new_config["robot_type"])
@@ -2560,6 +2836,8 @@ async def recalculate_trajectory_endpoint(request: Request):
                         ROBOT_CONFIG.pop("custom_dh_table", None)
                         ROBOT_CONFIG.pop("custom_specs", None)
                         ROBOT_CONFIG.pop("custom_urdf", None)
+                        ROBOT_CONFIG.pop("custom_urdf_base_link", None)
+                        ROBOT_CONFIG.pop("custom_urdf_tcp_link", None)
             if "offset_x" in new_config:
                 ROBOT_CONFIG["offset_x"] = float(new_config["offset_x"])
             if "offset_y" in new_config:
@@ -2594,19 +2872,16 @@ async def recalculate_trajectory_endpoint(request: Request):
                 offset_z=ROBOT_CONFIG["offset_z"],
                 yaw_deg=ROBOT_CONFIG["yaw_deg"],
                 q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-                custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
-                custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+                custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"), custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
             )
 
         # 2. Determine target episodes to recalculate
         ep_idx = payload.get("episode_index")
-        target_episodes = []
         if ep_idx is not None and not payload.get("all_episodes", False):
-            for ep in EPISODES_DB:
-                if ep.get("episode_index") == int(ep_idx):
-                    target_episodes.append(ep)
-                    break
-        if not target_episodes:
+            target_episodes = [ep for ep in EPISODES_DB if ep.get("episode_index") == int(ep_idx)]
+            if not target_episodes:
+                return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+        else:
             target_episodes = list(EPISODES_DB)
 
         if not target_episodes:
@@ -2621,17 +2896,13 @@ async def recalculate_trajectory_endpoint(request: Request):
         r_solver = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"), custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
         )
         workspace_calibrator.reach_angle_rad = getattr(r_solver, "reach_angle_rad", 0.0)
 
         updated_count = 0
+        failed_episodes = []
         for ep in target_episodes:
-            base_poses = ep.get("raw_poses") or ep.get("poses", [])
-            if not base_poses or len(base_poses) == 0:
-                continue
-
             target_calib = None
             if new_config and isinstance(new_config, dict) and any(k in new_config for k in ("offset_x", "offset_y", "offset_z", "yaw_deg")):
                 target_calib = {
@@ -2642,9 +2913,34 @@ async def recalculate_trajectory_endpoint(request: Request):
                     "reach_angle_rad": getattr(r_solver, "reach_angle_rad", 0.0)
                 }
 
-            # Full kinematics sync: ee_poses, joint_states, robot_ee_poses, actions (FK-synchronized)
-            sync_episode_kinematics(ep, calib=target_calib)
-            updated_count += 1
+            try:
+                if ep.get("trajectory_source") == "synthetic":
+                    if sync_episode_kinematics(ep, calib=target_calib) is None:
+                        raise ValueError("Synthetic trajectory kinematics synchronization failed")
+                else:
+                    _reprocess_episode_from_video(ep, calib=target_calib)
+                updated_count += 1
+            except Exception as exc:
+                ep["vslam_migration_state"] = "failed"
+                ep["vslam_migration_error"] = str(exc)
+                ep["dev_video_url"] = None
+                ep["canny_video_url"] = None
+                save_episode_meta(ep)
+                failed_episodes.append({
+                    "episode_id": ep.get("episode_id"),
+                    "episode_index": ep.get("episode_index"),
+                    "error": str(exc),
+                })
+
+        if failed_episodes:
+            return JSONResponse({
+                "status": "error",
+                "message": f"Masked V-SLAM recalculated {updated_count} episode(s); {len(failed_episodes)} failed and remain blocked from export.",
+                "episodes_updated": updated_count,
+                "failed_episodes": failed_episodes,
+                "config": ROBOT_CONFIG,
+                "episodes": EPISODES_DB,
+            }, status_code=400)
 
         print(f"[{time.strftime('%H:%M:%S')}] 🔄 Recalculated trajectories for {updated_count} episode(s) based on active robot setup: {ROBOT_CONFIG.get('robot_type')} @ ({ROBOT_CONFIG.get('offset_x')}m, {ROBOT_CONFIG.get('offset_y')}m, Yaw={ROBOT_CONFIG.get('yaw_deg')}°)")
 
@@ -2713,8 +3009,7 @@ async def auto_align_robot_endpoint(request: Request):
         r_solver = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"), custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
         )
         reach_rad = getattr(r_solver, "reach_angle_rad", 0.0)
         ROBOT_CONFIG["reach_angle_deg"] = getattr(r_solver, "reach_angle_deg", 0.0)
@@ -2740,7 +3035,10 @@ async def auto_align_robot_endpoint(request: Request):
             offset_y=ROBOT_CONFIG["offset_y"],
             offset_z=ROBOT_CONFIG["offset_z"],
             yaw_deg=ROBOT_CONFIG["yaw_deg"],
-            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
+            q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
+            custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"),
+            custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
         )
 
         # Recalculate kinematics for target episode (and all episodes if requested)
@@ -2813,8 +3111,7 @@ async def get_approach_path_endpoint(request: Request):
         r_solver = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"), custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
         )
         trajectory_planner.solver = r_solver
         trajectory_planner.workspace_calibrator = workspace_calibrator
@@ -2910,8 +3207,7 @@ async def solve_ik_endpoint(request: Request):
         r_solver = get_robot_solver(
             ROBOT_CONFIG.get("robot_type", "so_arm101_omni_kin"),
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"), custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
         )
         in_robot_frame = payload.get("in_robot_frame", False)
 
@@ -2964,20 +3260,29 @@ async def get_robot_urdf_endpoint(robot_type: str = None):
 @app.post("/api/robot/urdf/parse")
 async def parse_urdf_endpoint(request: Request):
     """
-    Parses an arbitrary input URDF XML string, extracts the serial kinematic joint chain,
-    and returns the corresponding Denavit-Hartenberg (DH) parameter table and kinematic specs.
+    Describes URDF links and, when selectors are supplied, validates the exact base-to-TCP chain.
     """
     try:
         payload = await request.json()
         urdf_text = payload.get("urdf_text", "")
         reject_unsafe_xml(urdf_text)
-
-        q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
-        dh_table, specs = URDFParser.parse_urdf(urdf_text, q3_safe_max_deg=q3_safe)
+        description = SerialURDFKinematics.describe_urdf(urdf_text)
+        base_link = payload.get("base_link") or (description["base_candidates"][0] if len(description["base_candidates"]) == 1 else None)
+        tcp_link = payload.get("tcp_link") or (description["tcp_candidates"][0] if len(description["tcp_candidates"]) == 1 else None)
+        if not base_link or not tcp_link:
+            return JSONResponse({
+                "status": "selection_required",
+                **description,
+                "message": "Select the arm base and TCP links, then parse the selected chain."
+            })
+        solver = SerialURDFKinematics(urdf_text, base_link=base_link, tcp_link=tcp_link)
         return JSONResponse({
             "status": "success",
-            "dh_table": dh_table,
-            "specs": specs
+            **description,
+            "base_link": solver.base_link,
+            "tcp_link": solver.tcp_link,
+            "chain": solver.chain_description,
+            "specs": solver.specs
         })
     except Exception as err:
         return JSONResponse({
@@ -2988,7 +3293,7 @@ async def parse_urdf_endpoint(request: Request):
 @app.post("/api/robot/urdf/apply")
 async def apply_urdf_endpoint(request: Request):
     """
-    Parses an input URDF and applies the resulting DH table directly to the active robot configuration.
+    Applies the selected direct URDF chain as the active custom robot model.
     """
     global ROBOT_CONFIG, EPISODES_DB
     try:
@@ -2996,18 +3301,25 @@ async def apply_urdf_endpoint(request: Request):
         payload = await request.json()
         urdf_text = payload.get("urdf_text", "")
         reject_unsafe_xml(urdf_text)
-        q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
-        dh_table, specs = URDFParser.parse_urdf(urdf_text, q3_safe_max_deg=q3_safe)
+        description = SerialURDFKinematics.describe_urdf(urdf_text)
+        base_link = payload.get("base_link") or (description["base_candidates"][0] if len(description["base_candidates"]) == 1 else None)
+        tcp_link = payload.get("tcp_link") or (description["tcp_candidates"][0] if len(description["tcp_candidates"]) == 1 else None)
+        if not base_link or not tcp_link:
+            raise ValueError("Select both a base link and TCP link before applying this URDF.")
+        solver = SerialURDFKinematics(urdf_text, base_link=base_link, tcp_link=tcp_link)
+        specs = solver.specs
         robot_name = specs.get("robot_name", "custom_robot").lower()
+        q3_safe = ROBOT_CONFIG.get("q3_safe_max_deg", 0.0)
 
         ROBOT_CONFIG["robot_type"] = "custom_urdf"
-        ROBOT_CONFIG["custom_dh_table"] = dh_table
+        ROBOT_CONFIG.pop("custom_dh_table", None)
         ROBOT_CONFIG["custom_specs"] = specs
         ROBOT_CONFIG["custom_urdf"] = urdf_text
+        ROBOT_CONFIG["custom_urdf_base_link"] = solver.base_link
+        ROBOT_CONFIG["custom_urdf_tcp_link"] = solver.tcp_link
         ROBOT_CONFIG["custom_urdf_enabled"] = True
-        r_solver_urdf = get_robot_solver(custom_urdf=urdf_text, q3_safe_max_deg=q3_safe)
-        reach_rad = getattr(r_solver_urdf, "reach_angle_rad", 0.0)
-        ROBOT_CONFIG["reach_angle_deg"] = getattr(r_solver_urdf, "reach_angle_deg", 0.0)
+        reach_rad = getattr(solver, "reach_angle_rad", 0.0)
+        ROBOT_CONFIG["reach_angle_deg"] = getattr(solver, "reach_angle_deg", 0.0)
         workspace_calibrator.reach_angle_rad = reach_rad
         save_robot_config(ROBOT_CONFIG)
 
@@ -3018,14 +3330,17 @@ async def apply_urdf_endpoint(request: Request):
             offset_z=ROBOT_CONFIG.get("offset_z", 0.0),
             yaw_deg=ROBOT_CONFIG.get("yaw_deg", 90.0),
             q3_safe_max_deg=q3_safe,
-            custom_dh_table=dh_table,
-            custom_urdf=urdf_text
+            custom_urdf=urdf_text,
+            custom_urdf_base_link=solver.base_link,
+            custom_urdf_tcp_link=solver.tcp_link
         )
 
         recalc_count = 0
         for ep in EPISODES_DB:
-            poses = ep.get("poses") or ep.get("raw_poses", [])
-            if poses and len(poses) > 0:
+            if episode_needs_vslam_reprocess(ep):
+                _reprocess_episode_from_video(ep)
+                recalc_count += 1
+            elif ep.get("poses") or ep.get("raw_poses"):
                 sync_episode_kinematics(ep)
                 recalc_count += 1
 
@@ -3034,7 +3349,7 @@ async def apply_urdf_endpoint(request: Request):
         return JSONResponse({
             "status": "success",
             "message": f"Custom URDF '{robot_name}' applied successfully. Recalculated {recalc_count} episode(s).",
-            "dh_table": dh_table,
+            "chain": solver.chain_description,
             "specs": specs,
             "config": ROBOT_CONFIG,
             "episodes_updated": recalc_count,
@@ -3054,9 +3369,11 @@ async def export_lerobot(request: Request = None):
 
     try:
         unverified = [ep.get("episode_id", ep.get("episode_index")) for ep in EPISODES_DB
-                      if ep.get("manifest", {}).get("validation", {}).get("state") != "passed"]
+                      if ep.get("manifest", {}).get("validation", {}).get("state") != "passed"
+                      or episode_needs_vslam_reprocess(ep)
+                      or ep.get("vslam_migration_state") == "failed"]
         if unverified:
-            return JSONResponse({"status": "error", "message": "Reprocess legacy or failed episodes before export", "episodes": unverified}, status_code=409)
+            return JSONResponse({"status": "error", "message": "Migrate/reprocess all episodes with the current masked V-SLAM pipeline before export", "episodes": unverified}, status_code=409)
         payload = {}
         if request:
             try:
@@ -3075,8 +3392,7 @@ async def export_lerobot(request: Request = None):
             offset_z=ROBOT_CONFIG["offset_z"],
             yaw_deg=ROBOT_CONFIG["yaw_deg"],
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
-            custom_dh_table=ROBOT_CONFIG.get("custom_dh_table") if ROBOT_CONFIG.get("custom_urdf_enabled") else None,
-            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None
+            custom_urdf=ROBOT_CONFIG.get("custom_urdf") if ROBOT_CONFIG.get("custom_urdf_enabled") else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link"), custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link")
         )
         use_ts = bool(payload.get("use_timestamp", True))
         ds_name = dataset_slug(payload.get("dataset_name", "mobile_aruco_3d_trajectories"))

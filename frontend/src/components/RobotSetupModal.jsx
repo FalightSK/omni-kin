@@ -42,7 +42,7 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
     }
   });
   const [presets, setPresets] = useState([]);
-  const [activeTab, setActiveTab] = useState(initialTab || 'offset'); // 'offset' | 'gripper' | 'initial_pos' | 'dh_table' | 'urdf'
+  const [activeTab, setActiveTab] = useState(initialTab || 'offset'); // 'offset' | 'gripper' | 'initial_pos' | 'kinematics' | 'urdf'
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isRecalculating, setIsRecalculating] = useState(false);
@@ -55,8 +55,11 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
   const [urdfText, setUrdfText] = useState('');
   const [isParsingUrdf, setIsParsingUrdf] = useState(false);
   const [urdfStatus, setUrdfStatus] = useState(null); // { type: 'success'|'error'|'info', message: '' }
-  const [customDhTable, setCustomDhTable] = useState(null);
+  const [customChain, setCustomChain] = useState(null);
   const [customSpecs, setCustomSpecs] = useState(null);
+  const [urdfLinks, setUrdfLinks] = useState([]);
+  const [urdfBaseLink, setUrdfBaseLink] = useState('');
+  const [urdfTcpLink, setUrdfTcpLink] = useState('');
   const fileInputRef = useRef(null);
 
   useEffect(() => {
@@ -67,17 +70,31 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
       .then((data) => {
         if (data.config) {
           setConfig(data.config);
-          if (data.config.custom_urdf_enabled && data.config.custom_dh_table) setCustomDhTable(data.config.custom_dh_table);
+          if (data.config.custom_urdf_enabled && data.config.custom_specs?.chain) setCustomChain(data.config.custom_specs.chain);
           if (data.config.custom_urdf_enabled && data.config.custom_specs) setCustomSpecs(data.config.custom_specs);
           if (data.config.custom_urdf_enabled && data.config.custom_urdf) setUrdfText(data.config.custom_urdf);
+          if (data.config.custom_urdf_enabled) {
+            setUrdfBaseLink(data.config.custom_urdf_base_link || data.config.custom_specs?.base_link || '');
+            setUrdfTcpLink(data.config.custom_urdf_tcp_link || data.config.custom_specs?.tcp_link || '');
+            if (data.config.custom_urdf) {
+              fetch('/api/robot/urdf/parse', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ urdf_text: data.config.custom_urdf })
+              }).then((res) => res.json()).then((description) => setUrdfLinks(description.links || [])).catch(console.error);
+            }
+          }
         }
         if (data.presets) {
           setPresets(data.presets);
           const activeP = data.presets.find((p) => p.robot_type === data.config?.robot_type) || data.presets[0];
           if (!data.config?.custom_urdf_enabled) {
             setUrdfText('');
-            setCustomDhTable(null);
+            setCustomChain(null);
             setCustomSpecs(null);
+            setUrdfLinks([]);
+            setUrdfBaseLink('');
+            setUrdfTcpLink('');
           }
           if (activeP && activeP.components && !data.config?.custom_specs) {
             setCustomSpecs(activeP);
@@ -89,32 +106,33 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
 
   if (!isOpen) return null;
 
-  const isCustomUrdf = Boolean(config.custom_urdf_enabled || config.robot_type === 'custom_urdf' || customDhTable);
+  const isCustomUrdf = Boolean(config.custom_urdf_enabled || config.robot_type === 'custom_urdf' || customChain);
 
   const currentPreset = presets.find((p) => p.robot_type === config.robot_type) || {
     name: isCustomUrdf ? (customSpecs?.robot_name || config.custom_specs?.robot_name || 'CUSTOM URDF').toUpperCase() : (config.robot_type || 'SO101').toUpperCase(),
     description: isCustomUrdf ? 'Custom URDF Kinematics' : 'Robotic Manipulator',
     reach_meters: (customSpecs?.reach_meters || config.custom_specs?.reach_meters || 0.395),
     payload_kg: 0.50,
-    dh_table: customDhTable || config.custom_dh_table || []
+    chain: []
   };
 
-  const activeDhTable = customDhTable || (isCustomUrdf ? config.custom_dh_table : null) || currentPreset.dh_table;
   const activeSpecs = customSpecs || (isCustomUrdf ? config.custom_specs : null) || currentPreset;
+  const activeChain = customChain || activeSpecs?.chain || currentPreset.chain || [];
 
   const handleFieldChange = (field, val) => {
     setConfig((prev) => ({ ...prev, [field]: val }));
   };
 
   const handleModelSelect = (rType) => {
-    setCustomDhTable(null);
+    setCustomChain(null);
     setCustomSpecs(null);
+    setUrdfBaseLink('');
+    setUrdfTcpLink('');
     setUrdfText('');
     setConfig((prev) => ({
       ...prev,
       robot_type: rType,
       custom_urdf_enabled: false,
-      custom_dh_table: null,
       custom_specs: null,
       custom_urdf: null,
       reset_to_preset: true
@@ -122,15 +140,22 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
   };
 
   const handleSave = async () => {
+    if ((config.custom_urdf_enabled || config.robot_type === 'custom_urdf') && (!customChain || !urdfBaseLink || !urdfTcpLink)) {
+      setActiveTab('urdf');
+      setUrdfStatus({ type: 'error', message: 'Parse the currently selected custom base-to-TCP chain before saving robot settings.' });
+      return;
+    }
     setIsSaving(true);
     setSaveSuccess(false);
     try {
       const payload = {
         ...config,
-        custom_dh_table: customDhTable,
+        robot_type: customChain ? 'custom_urdf' : config.robot_type,
+        custom_urdf_base_link: urdfBaseLink,
+        custom_urdf_tcp_link: urdfTcpLink,
         custom_specs: customSpecs,
         custom_urdf: urdfText,
-        custom_urdf_enabled: !!customDhTable,
+        custom_urdf_enabled: !!(customChain && urdfBaseLink && urdfTcpLink),
         apply_to_episodes: true
       };
       const res = await fetch('/api/robot/config', {
@@ -152,15 +177,22 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
   };
 
   const handleRecalculateAndSave = async () => {
+    if ((config.custom_urdf_enabled || config.robot_type === 'custom_urdf') && (!customChain || !urdfBaseLink || !urdfTcpLink)) {
+      setActiveTab('urdf');
+      setUrdfStatus({ type: 'error', message: 'Parse the currently selected custom base-to-TCP chain before recalculating.' });
+      return;
+    }
     setIsRecalculating(true);
     setRecalcSuccess(false);
     try {
       const payloadConfig = {
         ...config,
-        custom_dh_table: customDhTable,
+        robot_type: customChain ? 'custom_urdf' : config.robot_type,
+        custom_urdf_base_link: urdfBaseLink,
+        custom_urdf_tcp_link: urdfTcpLink,
         custom_specs: customSpecs,
         custom_urdf: urdfText,
-        custom_urdf_enabled: !!customDhTable
+        custom_urdf_enabled: !!(customChain && urdfBaseLink && urdfTcpLink)
       };
       // 1. Save config first so server persists latest parameters
       const saveRes = await fetch('/api/robot/config', {
@@ -325,15 +357,23 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
       const res = await fetch('/api/robot/urdf/parse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urdf_text: urdfText })
+        body: JSON.stringify({ urdf_text: urdfText, base_link: urdfBaseLink || undefined, tcp_link: urdfTcpLink || undefined })
       });
       const data = await res.json();
+      setUrdfLinks(data.links || []);
+      if (data.base_link || data.base_candidates?.length === 1) setUrdfBaseLink(data.base_link || data.base_candidates[0]);
+      if (data.tcp_link || data.tcp_candidates?.length === 1) setUrdfTcpLink(data.tcp_link || data.tcp_candidates[0]);
+      if (data.status === 'selection_required') {
+        setCustomChain(null);
+        setUrdfStatus({ type: 'info', message: data.message || 'Select the arm base and TCP links to continue.' });
+        return;
+      }
       if (data.status === 'success') {
-        setCustomDhTable(data.dh_table);
         setCustomSpecs(data.specs);
+        setCustomChain(data.chain);
         setUrdfStatus({
           type: 'success',
-          message: `Parsed "${data.specs.robot_name}" (${data.specs.revolute_joints} joints, Reach: ${(data.specs.reach_meters * 100).toFixed(1)} cm).`
+          message: `Parsed ${data.chain.filter((joint) => joint.type !== 'fixed').length} selected-chain joints from ${data.base_link} to ${data.tcp_link}.`
         });
       } else {
         setUrdfStatus({
@@ -353,17 +393,24 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
 
   const handleApplyUrdf = async () => {
     if (!urdfText.trim()) return;
+    if (!urdfBaseLink || !urdfTcpLink) {
+      setUrdfStatus({ type: 'error', message: 'Select both the arm base and TCP links before applying.' });
+      return;
+    }
     setIsParsingUrdf(true);
     try {
       const res = await fetch('/api/robot/urdf/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urdf_text: urdfText })
+        body: JSON.stringify({ urdf_text: urdfText, base_link: urdfBaseLink, tcp_link: urdfTcpLink })
       });
       const data = await res.json();
       if (data.status === 'success') {
-        setCustomDhTable(data.dh_table);
+        setCustomChain(data.chain);
         setCustomSpecs(data.specs);
+        setUrdfLinks(data.specs?.chain?.flatMap((joint) => [joint.parent, joint.child]) || []);
+        setUrdfBaseLink(data.specs?.base_link || urdfBaseLink);
+        setUrdfTcpLink(data.specs?.tcp_link || urdfTcpLink);
         if (data.config) {
           setConfig(data.config);
           if (onConfigSaved) onConfigSaved(data.config);
@@ -397,6 +444,11 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
       const content = event.target?.result;
       if (typeof content === 'string') {
         setUrdfText(content);
+        setCustomChain(null);
+        setCustomSpecs(null);
+        setUrdfLinks([]);
+        setUrdfBaseLink('');
+        setUrdfTcpLink('');
         setUrdfStatus({
           type: 'info',
           message: `Loaded ${file.name}. Click Parse URDF below.`
@@ -423,7 +475,7 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
   };
 
   const distToMarker = Math.sqrt(config.offset_x ** 2 + config.offset_y ** 2);
-  const isKinematicsTab = activeTab === 'dh_table' || activeTab === 'urdf';
+  const isKinematicsTab = activeTab === 'kinematics' || activeTab === 'urdf';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-fade-in">
@@ -516,7 +568,7 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
           </button>
 
           <button
-            onClick={() => setActiveTab(activeTab === 'urdf' ? 'urdf' : 'dh_table')}
+            onClick={() => setActiveTab(activeTab === 'urdf' ? 'urdf' : 'kinematics')}
             className={`pb-2 transition-colors border-b-2 font-medium flex items-center gap-1.5 ${
               isKinematicsTab
                 ? 'border-white text-white font-semibold'
@@ -1169,22 +1221,22 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
             </div>
           )}
 
-          {/* TAB 4: KINEMATICS (DH TABLE & URDF CONVERTER) */}
+          {/* TAB 4: URDF KINEMATICS */}
           {isKinematicsTab && (
             <div className="flex flex-col gap-3">
-              {/* Sub-Tabs: DH vs URDF */}
+              {/* Sub-Tabs: selected URDF chain and importer */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5 p-0.5 bg-[#050505] border border-neutral-800 rounded-lg">
                   <button
                     type="button"
-                    onClick={() => setActiveTab('dh_table')}
+                    onClick={() => setActiveTab('kinematics')}
                     className={`px-3 py-1 rounded-md text-xs transition-colors ${
-                      activeTab === 'dh_table'
+                      activeTab === 'kinematics'
                         ? 'bg-neutral-800 text-white font-medium'
                         : 'text-neutral-400 hover:text-white'
                     }`}
                   >
-                    DH Parameters Table
+                    URDF Joint Chain
                   </button>
                   <button
                     type="button"
@@ -1199,13 +1251,10 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                   </button>
                 </div>
 
-                {customDhTable && (
+                {customChain && (
                   <button
                     type="button"
-                    onClick={() => {
-                      setCustomDhTable(null);
-                      setCustomSpecs(null);
-                    }}
+                    onClick={() => handleModelSelect('so_arm101_omni_kin')}
                     className="text-[11px] text-neutral-400 hover:text-white flex items-center gap-1 transition-colors"
                   >
                     <RotateCcw className="w-3 h-3" />
@@ -1214,52 +1263,32 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                 )}
               </div>
 
-              {/* Subview 1: DH Table */}
-              {activeTab === 'dh_table' && (
-                <div className="bg-[#050505] border border-neutral-800 rounded-xl overflow-hidden flex flex-col">
+              {activeTab === 'kinematics' && (
+                <div className="bg-[#050505] border border-neutral-800 rounded-xl overflow-hidden">
+                  <div className="px-3 py-2 text-xs text-neutral-400 border-b border-neutral-800">
+                    {activeSpecs?.base_link || currentPreset.base_link || urdfBaseLink || 'Base'} → {activeSpecs?.tcp_link || currentPreset.tcp_link || urdfTcpLink || 'TCP'} · URDF origins and axes are used directly.
+                  </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-xs font-mono">
                       <thead className="bg-[#0a0a0a] text-neutral-400 text-[10px] uppercase border-b border-neutral-800 tracking-wider">
-                        <tr>
-                          <th className="p-2">Joint</th>
-                          <th className="p-2">Name</th>
-                          <th className="p-2">θ Offset</th>
-                          <th className="p-2">d (cm)</th>
-                          <th className="p-2">a (cm)</th>
-                          <th className="p-2">α</th>
-                          <th className="p-2">Limits</th>
-                        </tr>
+                        <tr><th className="p-2">#</th><th className="p-2">Joint</th><th className="p-2">Type / state unit</th><th className="p-2">Parent → child</th><th className="p-2">Axis</th><th className="p-2">URDF limits (rad / m)</th></tr>
                       </thead>
                       <tbody className="divide-y divide-neutral-800/60 text-neutral-300">
-                        {activeDhTable.map((row) => (
-                          <tr key={row.joint_idx} className="hover:bg-neutral-900/40">
-                            <td className="p-2 font-bold text-white">q{row.joint_idx}</td>
-                            <td className="p-2 text-neutral-200">{row.name.replace(/q\d+_/, '')}</td>
-                            <td className="p-2">{row.theta_offset_deg.toFixed(1)}°</td>
-                            <td className="p-2 text-neutral-200">{(row.d * 100).toFixed(1)}</td>
-                            <td className="p-2 text-neutral-200">{(row.a * 100).toFixed(1)}</td>
-                            <td className="p-2">{row.alpha_deg.toFixed(0)}°</td>
-                            <td className="p-2 text-neutral-400 text-[11px]">
-                              [{row.limits_deg[0]}°, {row.limits_deg[1]}°]
-                            </td>
+                        {activeChain.map((joint, index) => (
+                          <tr key={joint.name}>
+                            <td className="p-2">{index + 1}</td><td className="p-2 text-white">{joint.name}</td>
+                            <td className="p-2">{joint.type}{joint.type === 'fixed' ? '' : ` / ${joint.type === 'prismatic' ? 'm' : 'deg'}`}</td>
+                            <td className="p-2">{joint.parent} → {joint.child}</td>
+                            <td className="p-2">{joint.type === 'fixed' ? '—' : `[${joint.axis.map((v) => Number(v).toFixed(3)).join(', ')}]`}</td>
+                            <td className="p-2">{joint.type === 'fixed' ? 'fixed transform' : joint.type === 'continuous' ? 'unbounded' : `[${joint.limits.map((v) => Number(v).toFixed(4)).join(', ')}]`}</td>
                           </tr>
                         ))}
-                        <tr className="hover:bg-neutral-900/40">
-                          <td className="p-2 font-bold text-white">q5</td>
-                          <td className="p-2 text-neutral-200">gripper</td>
-                          <td className="p-2">—</td>
-                          <td className="p-2 text-neutral-500">—</td>
-                          <td className="p-2 text-neutral-500">—</td>
-                          <td className="p-2">—</td>
-                          <td className="p-2 text-neutral-400 text-[11px]">[0%, 100%]</td>
-                        </tr>
                       </tbody>
                     </table>
                   </div>
-
                   <div className="p-2.5 bg-[#080808] border-t border-neutral-800/80 flex items-center justify-between text-[11px] font-mono text-neutral-400">
+                    <span>{activeSpecs?.joint_names?.length || activeChain.filter((joint) => joint.type !== 'fixed').length} movable joints · state uses degrees for revolute joints and meters for prismatic joints, followed by normalized gripper.</span>
                     <span>Reach: {(((activeSpecs && activeSpecs.reach_meters) || currentPreset.reach_meters) * 100).toFixed(1)} cm</span>
-                    <span>Payload: {(((activeSpecs && activeSpecs.payload_kg) || currentPreset.payload_kg) * 1000).toFixed(0)} g</span>
                   </div>
                 </div>
               )}
@@ -1346,11 +1375,45 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                   <textarea
                     rows="7"
                     value={urdfText}
-                    onChange={(e) => setUrdfText(e.target.value)}
+                    onChange={(e) => {
+                      setUrdfText(e.target.value);
+                      setCustomChain(null);
+                      setCustomSpecs(null);
+                      setUrdfLinks([]);
+                      setUrdfBaseLink('');
+                      setUrdfTcpLink('');
+                    }}
                     placeholder="Paste URDF XML here..."
                     className="w-full bg-[#000000] border border-neutral-800 rounded-xl p-3 text-[11px] font-mono text-neutral-200 focus:border-neutral-600 focus:outline-none resize-none"
                     spellCheck={false}
                   />
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
+                      Arm base link
+                      <select
+                        value={urdfBaseLink}
+                        onChange={(e) => { setUrdfBaseLink(e.target.value); setCustomChain(null); setCustomSpecs(null); }}
+                        disabled={!urdfLinks.length}
+                        className="bg-[#050505] border border-neutral-800 rounded-lg px-2 py-1.5 text-xs text-neutral-200 disabled:opacity-50"
+                      >
+                        <option value="">Select base link</option>
+                        {urdfLinks.map((link) => <option key={`base-${link}`} value={link}>{link}</option>)}
+                      </select>
+                    </label>
+                    <label className="flex flex-col gap-1 text-[11px] text-neutral-400">
+                      TCP link
+                      <select
+                        value={urdfTcpLink}
+                        onChange={(e) => { setUrdfTcpLink(e.target.value); setCustomChain(null); setCustomSpecs(null); }}
+                        disabled={!urdfLinks.length}
+                        className="bg-[#050505] border border-neutral-800 rounded-lg px-2 py-1.5 text-xs text-neutral-200 disabled:opacity-50"
+                      >
+                        <option value="">Select TCP link</option>
+                        {urdfLinks.map((link) => <option key={`tcp-${link}`} value={link}>{link}</option>)}
+                      </select>
+                    </label>
+                  </div>
 
                   <div className="flex items-center justify-end gap-2">
                     <button
@@ -1364,7 +1427,7 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                     <button
                       type="button"
                       onClick={handleApplyUrdf}
-                      disabled={isParsingUrdf || !urdfText.trim()}
+                      disabled={isParsingUrdf || !urdfText.trim() || !urdfBaseLink || !urdfTcpLink}
                       className="px-3 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 text-xs font-medium border border-neutral-800 disabled:opacity-40 transition-colors"
                     >
                       Apply Kinematics

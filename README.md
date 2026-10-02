@@ -12,7 +12,7 @@ flowchart TD
         Server["server.py"]
         PnP["8-Point Rigid Board solvePnP"]
         EKF["12-State EKF Sensor Fusion"]
-        IK["DH Inverse Kinematics & Clearance"]
+        IK["Preset Kinematics & Direct Custom URDF IK"]
         Server --> PnP --> EKF --> IK
     end
 
@@ -78,11 +78,17 @@ Collecting real-world robot manipulation demonstrations typically requires:
 
 - 🎯 **8-Point Dual-ArUco Rigid Board PnP**: Combines Tag A (10 cm, origin) and Tag B (5 cm, offset) into an over-determined 8-corner geometry. Eliminates planar flipping ambiguities common in single-marker setups.
 - 📐 **12-State Extended Kalman Filter (EKF)**: Fuses 30 FPS camera visual poses with 100 Hz+ phone IMU acceleration and angular velocity for drift-free, smooth 3D motion tracking.
-- 🦾 **Universal Multi-Embodiment Support**: Out-of-the-box presets for **SO-ARM101-OMNI-KIN**, **SO-ARM101**, and **SO-ARM100**, plus instant upload and parsing for any custom 5–6 DOF URDF manipulator.
-- 🛡️ **Universal Camera Mount Crash Prevention**: Computes 3D Euclidean clearance between phone camera and robot forearm link segment in real time. Automatically bounds wrist pitch $q_3$ to prevent damaging top-mounted camera brackets.
+- 🦾 **Universal Multi-Embodiment Support & Live Custom URDF Pipeline**:
+  - Out-of-the-box presets for **SO-ARM101-OMNI-KIN**, **SO-ARM101**, and **SO-ARM100**.
+  - Built-in presets and custom URDFs use the selected base-to-TCP joint path directly; fixed, revolute, continuous, and prismatic joints keep their URDF origins, axes, and limits.
+  - Custom joint vectors follow selected-chain order (revolute/continuous in degrees, prismatic in meters), followed by the separate normalized gripper channel.
+  - **Instant Multi-Episode Recalculation**: Applying a selected URDF chain recalculates recorded demonstrations and updates its 3D preview and export actions.
+- 🎯 **Per-Episode Independent Base Optimization**: Automatically optimizes robot base placement ($X, Y, Z, \text{yaw}$) independently for every recorded demonstration to maximize workspace manipulability and eliminate reach singularities.
+- 🗑️ **Robust Demonstration Management**: In-place task prompt editing on the timeline, and resilient Windows-safe episode deletion with continuous monotonic re-indexing ($0 \dots N-1$).
+- 🛡️ **Kinematic Safety Checks**: URDF joint limits and table-height checks are enforced. URDF visual/collision geometry is not simulated.
 - 🔀 **Two Trajectory Modes**:
   - `free_form`: Unconstrained demonstrations starting at the first recorded frame (best for diverse pretraining).
-  - `initial_aware`: Automatically calculates a MoveJ joint-space $C^2$ minimum-jerk approach path connecting the canonical robot standby home pose ($X=0.24\,\text{m}, Y=0.00\,\text{m}, Z=0.20\,\text{m}, \text{pitch}=-20.0^\circ$) to the demonstration start point with zero reach errors and guaranteed collision safety (best for fine-tuning).
+  - `initial_aware`: Calculates a MoveJ joint-space $C^2$ path from canonical standby to the demonstration start. Custom chains use bounded URDF IK; physically verify clearance before hardware use.
 - ✂️ **Automated Feasible Workspace Trimming**: Automatically detects and trims out-of-reach boundary frames ($r < 17.6\,\text{cm}$) where the human operator holds the phone near their chest before or after the demonstration, while preserving exact 1:1 video-to-parquet frame synchronization.
 - 📊 **Synchronized Web Dashboard**:
   - Real-time Three.js 3D viewport showing the robot arm executing the demonstration.
@@ -90,7 +96,7 @@ Collecting real-world robot manipulation demonstrations typically requires:
   - Synchronized video playback with Picture-in-Picture (PiP), horizontal, and vertical split layouts.
   - Interactive Savitzky-Golay and Moving Average trajectory smoothing slider.
   - Diagnostic Dev View with ArUco 3D axes, OpenCV Canny edge monitor, and live telemetry.
-- 📦 **Official LeRobot v2.1 Dataset Exporter**: Exports Parquet tables, MP4 video chunks, and JSON metadata (`info.json`, `stats.json`, `tasks.jsonl`, `episodes.jsonl`) fully compatible with Hugging Face `lerobot`.
+- 📦 **Official LeRobot v2.1 Dataset Exporter**: Exports Parquet tables, MP4 video chunks, and JSON metadata (`info.json`, `stats.json`, `tasks.jsonl`, `episodes.jsonl`) fully compatible with Hugging Face `lerobot`. Presets retain their existing feature layout; custom exports record selected-chain joint names, types, units, and links.
 
 ---
 
@@ -282,7 +288,7 @@ Click the **"⚙️ Robot Setup"** button in the desktop dashboard navigation ba
   - `SO-ARM101-OMNI-KIN` *(Default)*
   - `SO-ARM101`
   - `SO-ARM100`
-- *Or upload your own custom URDF*: Click **"Upload URDF"** to drag-and-drop any `.urdf` file. The server automatically parses links, joints, limits, and builds the DH kinematic table.
+- *Or upload your own custom URDF*: Click **"Upload URDF"**, then select the arm base and TCP links. The selected chain is evaluated from the URDF transforms and axes directly; gripper mechanism joints should remain downstream of the selected TCP.
 
 #### 2. Workspace Calibration Tab
 Calibrates where the physical robot base sits relative to the ArUco marker origin $(0, 0, 0)$:
@@ -368,7 +374,7 @@ flowchart TD
 | Mode | Key in API | Characteristics | When to Use |
 | :--- | :--- | :--- | :--- |
 | **Free-Form** | `free_form` | Trajectory starts immediately from the human's first hand motion. No added approach path. | Pretraining foundation models; capturing unstructured human demonstrations. |
-| **Initial-Position Aware** | `initial_aware` | Automatically prepends a MoveJ joint-space $C^2$ minimum-jerk spline (~45 frames) starting from canonical home ($X=0.24, Y=0.00, Z=0.20, \text{pitch}=-20^\circ$) to the first feasible demonstration frame with zero reach errors and guaranteed collision safety. | Fine-tuning policies on physical robots requiring predictable start/docking positions. |
+| **Initial-Position Aware** | `initial_aware` | Prepends a MoveJ joint-space $C^2$ spline (~45 frames) from canonical home to the first feasible demonstration frame. Custom chains use declared joint limits; no URDF collision geometry is simulated. | Fine-tuning with predictable starts; physically verify clearance before hardware use. |
 
 ---
 
@@ -389,7 +395,7 @@ lerobot_exports/pick_apple_omnikin_v1/
 │   └── chunk-000/
 │       └── file-000.parquet               <-- Full tabular data (states, poses, actions)
 ├── meta/
-│   ├── info.json                          <-- LeRobot schema, FPS, dynamic DH joint names
+│   ├── info.json                          <-- LeRobot schema, FPS, preset or custom-chain joint metadata
 │   ├── stats.json                         <-- Mean, std, min, max per feature
 │   ├── tasks.jsonl                        <-- Task mapping
 │   ├── episodes.jsonl                     <-- Episode index, duration, frame counts
@@ -413,11 +419,11 @@ lerobot_exports/pick_apple_omnikin_v1/
 | `next.done` | `bool` | `True` only on the terminal frame of an episode; `False` otherwise |
 | `task_index` | `int64` | Numerical task identifier corresponding to `meta/tasks.jsonl` |
 | `task` | `string` | Natural language task description (e.g. `"reach to object"`) |
-| `observation.state` | `float32[N]` | Robot joint angles in degrees + gripper percentage `[0, 100]` |
+| `observation.state` | `float32[N]` | Selected joint values followed by normalized gripper `[0, 1]`; preset joints use degrees, custom prismatic joints use meters |
 | `observation.ee_pose` | `float32[6]` | 6-DOF Cartesian pose `[x, y, z, roll, pitch, yaw]` in robot base frame |
 | `action` | `float32[N]` | Next-frame target joint angles ($\mathbf{a}_t = \mathbf{q}_{t+1}$, last frame copies $\mathbf{q}_T$) |
 
-*Note: $N$ matches the number of revolute joints plus 1 for the gripper. Joint names in `info.json` are dynamically loaded from your active URDF/DH table.*
+*Note: $N$ is the number of selected movable joints plus 1 for gripper. Custom exports record joint names, types, units, base/TCP links, and ordered chain transforms in `meta/info.json`.*
 
 ---
 
@@ -460,17 +466,14 @@ OmniKin comes pre-configured with the following manipulators:
 | `so_arm101_omni_kin` | **SO-ARM101-OMNI-KIN** *(Default)* | 5 + Gripper | Joint 3 (`wrist_pitch_joint`) | 38.5 cm | 500 g |
 | `so101` | **SO-ARM101** | 5 + Gripper | Joint 3 (`q3_wrist_pitch`) | 38.5 cm | 500 g |
 | `so100` | **SO-ARM100** | 5 + Gripper | Joint 3 (`q3_wrist_pitch`) | 35.0 cm | 400 g |
-| `custom` | **Uploaded URDF** | 5–6 + Gripper | *Auto-detected dynamically* | *Auto* | *Auto* |
+| `custom` | **Uploaded URDF** | Any selected movable chain + Gripper | Selected base/TCP | *Auto* | *Auto* |
 
 ### Uploading a Custom Robot URDF
 1. Click **"Robot Setup"** in the top navbar.
 2. In the **Embodiment** tab, click **"Upload URDF"**.
 3. Select your `.urdf` file.
-4. The system automatically:
-   - Identifies the kinematic chain from base link to end-effector flange.
-   - Computes standard Denavit-Hartenberg (DH) parameters ($d, a, \alpha, \theta$).
-   - Dynamically discovers the wrist pitch joint using semantic token matching (`wrist`, `pitch`, `flex`, `tilt`).
-   - Determines joint limit ranges and maps them to the 3D visualizer and IK engine.
+4. Choose the arm base and TCP links from the parsed link selectors. When the URDF has one unambiguous arm/gripper boundary, the setup suggests it; otherwise select the links explicitly.
+5. The system uses each selected joint origin, local axis, type, and limits directly. Keep gripper mechanism joints outside the arm path; the phone-derived gripper value remains a separate normalized channel.
 
 ---
 
@@ -561,7 +564,7 @@ The FastAPI backend exposes the following REST endpoints:
 ### Robot Configuration & Calibration
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/robot/config` | Returns current embodiment, DH table, workspace calibration, and wrist safety index |
+| `GET` | `/api/robot/config` | Returns current embodiment, preset DH data where applicable, custom-chain selectors, workspace calibration, and safety settings |
 | `POST` | `/api/robot/config` | Updates robot type, workspace offsets ($X, Y, Z, \text{Yaw}$), and safety limits |
 | `GET` | `/api/robot/initial_position` | Returns the canonical standby/home pose configuration |
 | `POST` | `/api/robot/initial_position` | Updates the standby/home pose for `initial_aware` mode |
@@ -595,26 +598,31 @@ The FastAPI backend exposes the following REST endpoints:
 
 ## 🧪 Testing & Verification
 
-Execute the test suite to verify pipeline functionality:
+Execute the automated test suite with `pytest`:
 
 ```bash
-# Test 1: ArUco 8-point PnP & 12-state EKF fusion pipeline
-python test_aruco_pipeline.py
-
-# Test 2: Multi-embodiment robot kinematics and 3D clearance safety
-python test_robot_kinematics.py
-
-# Test 3: URDF parser and DH parameter generator
-python test_urdf_converter.py
-
-# Test 4: End-to-end LeRobot dataset exporter
-python test_pipeline.py
-
-# Test 5: End-to-end Auto-Trim, MoveJ approach planning, & 1:1 Video-Parquet sync
-python verify_export_and_kinematics.py
+# Run all 24 unit, kinematics, URDF converter, integrity, and export pipeline tests
+pytest -v
 ```
 
-All test scripts verify mathematical invariants, joint bounds, and schema conformance.
+Or run focused subsystem test suites individually:
+
+```bash
+# Test 1: ArUco 8-point PnP, 12-state EKF fusion, and virtual SLAM recovery
+pytest test_aruco_pipeline.py -v
+
+# Test 2: Multi-embodiment robot kinematics and 3D Euclidean clearance barrier
+pytest test_robot_kinematics.py -v
+
+# Test 3: Direct URDF chain FK/IK, URDF compatibility parsing, & episode recalculation
+pytest test_urdf_converter.py -v
+
+# Test 4: End-to-end dataset export with independent per-episode base positions
+pytest test_pipeline.py -v
+
+# Test 5: Dataset security, frame timestamps, and LeRobot action-shifting invariants
+pytest test_integrity.py -v
+```
 
 ---
 

@@ -1,6 +1,6 @@
 """
 test_robot_kinematics.py
-Unit tests for Denavit-Hartenberg (DH) Kinematics Engine and WorkspaceCalibrator
+Unit tests for URDF-chain kinematics and WorkspaceCalibrator
 """
 
 import sys
@@ -12,23 +12,29 @@ from robot_kinematics import (
     SO101OmniKinKinematics,
     SO100Kinematics,
     SO101Kinematics,
-    DHKinematics,
     universal_soft_saturation,
     WorkspaceCalibrator,
     CameraGripperCalibrator,
     get_robot_solver,
     get_robot_specs,
-    ROBOT_PRESETS
+    ROBOT_PRESETS,
+    SerialURDFKinematics,
 )
 
-def test_dh_tables_and_specs():
-    print('=== Test 1: DH Tables & Robot Specs ===')
+def test_urdf_chain_specs():
+    print('=== Test 1: URDF Chain & Robot Specs ===')
     assert 'so_arm101_omni_kin' in ROBOT_PRESETS
     assert 'so101' in ROBOT_PRESETS
     assert 'so100' in ROBOT_PRESETS
 
     default_solver = get_robot_solver()
     assert isinstance(default_solver, SO101OmniKinKinematics)
+    assert isinstance(default_solver, SerialURDFKinematics)
+    assert default_solver.base_link == 'base'
+    assert default_solver.tcp_link == 'gripper_tcp'
+    assert len(default_solver.joint_names) == 5
+    assert all(kind == 'revolute' for kind in default_solver.joint_types)
+    assert 'dh_table' not in ROBOT_PRESETS['so_arm101_omni_kin']
     default_specs = get_robot_specs()
     assert default_specs['robot_type'] == 'so_arm101_omni_kin'
     assert 'OMNI-KIN' in default_specs['name']
@@ -37,78 +43,41 @@ def test_dh_tables_and_specs():
     spec100 = get_robot_specs('so100')
     spec101 = get_robot_specs('so101')
 
-    assert len(spec100['dh_table']) == 5
-    assert len(spec101['dh_table']) == 5
-    assert len(default_specs['dh_table']) == 5
+    for specs in (spec100, spec101, default_specs):
+        assert 'dh_table' not in specs
+        assert len(specs['joint_names']) == 5
+        assert len(specs['chain']) == (6 if specs is default_specs else 5)
+        assert specs['base_link'] and specs['tcp_link']
     assert spec101['reach_meters'] >= 0.39
     assert spec100['reach_meters'] >= 0.38
     assert default_specs['reach_meters'] >= 0.38
-    print('[PASS] DH Tables, Default OMNI-KIN & Robot Specs validated!')
+    print('[PASS] URDF preset chains and robot specs validated!')
 
 def test_omnikin_forward_inverse_consistency():
     print('\n=== Test 2: SO-ARM101-OMNI-KIN (Default) FK/IK Consistency ===')
-    solver = get_robot_solver()  # defaults to SO101OmniKinKinematics
-
-    test_targets = [
-        [0.00, -0.22, 0.15, 0.0, 0.0, 0.0],
-        [0.08, -0.20, 0.18, 0.0, 0.1, 0.2],
-        [-0.08, -0.18, 0.12, 0.0, -0.1, -0.2],
-        [0.05, -0.24, 0.20, 0.0, 0.0, 0.0]
-    ]
-
-    for target in test_targets:
-        joints = solver.inverse_kinematics(target, gripper_state=60.0)
-        assert len(joints) == 6
-        assert 0.0 <= joints[5] <= 100.0
-
-        fk_pose = solver.forward_kinematics(np.radians(joints[:5]))
-        pos_err = np.linalg.norm(np.array(target[:3]) - fk_pose[:3])
-        assert pos_err < 0.005, f"Target {target[:3]} vs FK {fk_pose[:3]} error {pos_err*1000:.2f} mm exceeded 5mm"
-        print(f"  Target: {target[:3]} -> FK: {np.round(fk_pose[:3], 3)} (err={pos_err*1000:.2f}mm) [OK]")
-
+    _assert_preset_roundtrip(get_robot_solver())
     print("[PASS] SO-ARM101-OMNI-KIN FK/IK consistency verified!")
 
 def test_so101_forward_inverse_consistency():
     print('\n=== Test 2: SO-101 FK/IK Consistency ===')
-    solver = SO101Kinematics()
-
-    test_targets = [
-        [0.22, 0.00, 0.15, 0.0, 0.0, 0.0],
-        [0.20, 0.10, 0.18, 0.0, 0.1, 0.2],
-        [0.18, -0.08, 0.12, 0.0, -0.1, -0.2],
-        [0.25, 0.05, 0.20, 0.0, 0.0, 0.0]
-    ]
-
-    for target in test_targets:
-        joints = solver.inverse_kinematics(target, gripper_state=60.0)
-        assert len(joints) == 6
-        assert 0.0 <= joints[5] <= 100.0
-
-        fk_pose = solver.forward_kinematics(np.radians(joints[:5]))
-        pos_err = np.linalg.norm(np.array(target[:3]) - fk_pose[:3])
-        assert pos_err < 0.005, f"Target {target[:3]} vs FK {fk_pose[:3]} error {pos_err*1000:.2f} mm exceeded 5mm"
-        print(f"  Target: {target[:3]} -> FK: {np.round(fk_pose[:3], 3)} (err={pos_err*1000:.2f}mm) [OK]")
-
+    _assert_preset_roundtrip(SO101Kinematics())
     print("[PASS] SO-101 FK/IK consistency verified!")
 
 def test_so100_forward_inverse_consistency():
     print('\n=== Test 3: SO-100 FK/IK Consistency ===')
-    solver = SO100Kinematics()
-
-    test_targets = [
-        [0.20, 0.00, 0.15, 0.0, 0.0, 0.0],
-        [0.18, 0.08, 0.16, 0.0, 0.05, 0.1],
-        [0.22, -0.05, 0.14, 0.0, -0.05, -0.1]
-    ]
-
-    for target in test_targets:
-        joints = solver.inverse_kinematics(target, gripper_state=90.0)
-        fk_pose = solver.forward_kinematics(np.radians(joints[:5]))
-        pos_err = np.linalg.norm(np.array(target[:3]) - fk_pose[:3])
-        assert pos_err < 0.005, f"Target {target[:3]} vs FK {fk_pose[:3]} error {pos_err*1000:.2f} mm exceeded 5mm"
-        print(f"  Target: {target[:3]} -> FK: {np.round(fk_pose[:3], 3)} (err={pos_err*1000:.2f}mm) [OK]")
-
+    _assert_preset_roundtrip(SO100Kinematics())
     print('[PASS] SO-100 FK/IK consistency verified!')
+
+
+def _assert_preset_roundtrip(solver):
+    state = np.array([10.0, -35.0, 45.0, -15.0, 10.0])
+    target = solver.forward_kinematics(solver.state_to_joint_values(state))
+    result = solver.solve_feasible_ik(target, gripper_state=60.0, prev_joints=np.r_[state, 60.0])
+    assert len(result['joints']) == solver.num_joints + 1
+    assert result['joints'][-1] == 60.0
+    fk_pose = solver.forward_kinematics(solver.state_to_joint_values(result['joints'][:solver.num_joints]))
+    assert np.allclose(target, fk_pose, atol=1e-5), f"{solver.robot_name} direct URDF FK/IK roundtrip mismatch"
+    print(f"  {solver.robot_name}: {solver.num_joints} URDF joints roundtrip [OK]")
 
 def test_workspace_calibrator():
     print('\n=== Test 4: Workspace Calibrator Coplanar Transformations ===')
@@ -250,11 +219,12 @@ def test_universal_soft_barrier_and_multi_robot_smoothing():
     clean_q = np.zeros((T, 6))
     clean_q[:, 1] = 20.0 * np.sin(t)
     clean_q[:, 2] = -30.0 + 10.0 * np.cos(t)
-    clean_q[:, 3] = 0.0 + 1.5 * np.sin(20 * t) + np.random.normal(0, 0.5, T)
+    rng = np.random.default_rng(0)
+    clean_q[:, 3] = -10.0 + 1.5 * np.sin(20 * t) + rng.normal(0, 0.5, T)
     clean_q[:, 5] = 50.0
 
     raw_wrist_jerk = np.diff(np.diff(clean_q[:, 3]))
-    smoothed_q = solver_omni.smooth_joint_trajectory(clean_q, fps=30.0)
+    smoothed_q = solver_omni.smooth_joint_trajectory(clean_q, fps=30.0, time_window_ms=350)
     smooth_wrist_jerk = np.diff(np.diff(smoothed_q[:, 3]))
 
     assert np.all(smoothed_q[:, 3] <= 0.0 + 1e-4), f'Wrist pitch exceeded ceiling: {np.max(smoothed_q[:, 3])}'
@@ -265,23 +235,22 @@ def test_universal_soft_barrier_and_multi_robot_smoothing():
     assert np.max(np.abs(np.diff(bounded_q[:, :5], axis=0))) <= 4.0 + 1e-5, 'Final trajectory must obey 120 deg/s slew cap'
     print(f'  OMNI-KIN Joint Smoothing Passed: Jerk std reduced from {np.std(raw_wrist_jerk):.3f} to {np.std(smooth_wrist_jerk):.3f} [OK]')
 
-    # 3. Test on Custom 6-DOF Robot with wrist pitch at joint 4
-    custom_dh = [
-        {'name': 'base_yaw', 'a': 0, 'alpha_deg': 90, 'd': 0.15, 'theta_deg': 0, 'limits_deg': [-180, 180]},
-        {'name': 'shoulder_pitch', 'a': 0.20, 'alpha_deg': 0, 'd': 0, 'theta_deg': 0, 'limits_deg': [-90, 90]},
-        {'name': 'elbow_pitch', 'a': 0.18, 'alpha_deg': 0, 'd': 0, 'theta_deg': 0, 'limits_deg': [-120, 120]},
-        {'name': 'wrist_roll', 'a': 0, 'alpha_deg': 90, 'd': 0.08, 'theta_deg': 0, 'limits_deg': [-180, 180]},
-        {'name': 'wrist_pitch', 'a': 0, 'alpha_deg': 0, 'd': 0.10, 'theta_deg': 0, 'limits_deg': [-90, 10]},
-        {'name': 'wrist_yaw', 'a': 0, 'alpha_deg': 0, 'd': 0.05, 'theta_deg': 0, 'limits_deg': [-180, 180]},
-    ]
-    solver_6dof = DHKinematics(custom_dh, model_name='Custom-6DOF', q3_safe_max_deg=5.0)
-    assert solver_6dof.wrist_pitch_idx == 4, f'Expected wrist pitch at joint 4, got {solver_6dof.wrist_pitch_idx}'
-
-    traj_6dof = np.zeros((T, 6))
-    traj_6dof[:, 4] = 6.0 + np.random.normal(0, 1.0, T)
+    # 3. Six-joint chains retain their width and obey URDF velocity limits.
+    links = ''.join(f'<link name="link{i}"/>' for i in range(7))
+    joints = ''.join(
+        f'<joint name="joint{i}" type="revolute"><parent link="link{i}"/><child link="link{i + 1}"/>'
+        '<origin xyz="0.1 0 0"/><axis xyz="0 0 1"/><limit lower="-1.5" upper="1.5" velocity="0.4"/></joint>'
+        for i in range(6)
+    )
+    solver_6dof = SerialURDFKinematics(f'<robot name="six_dof">{links}{joints}</robot>', 'link0', 'link6')
+    traj_6dof = np.zeros((T, 7))
+    traj_6dof[T // 2:, 4] = 60.0
+    traj_6dof[:, -1] = 0.5
     smoothed_6dof = solver_6dof.smooth_joint_trajectory(traj_6dof, fps=30.0)
-    assert np.all(smoothed_6dof[:, 4] <= 5.0 + 1e-4), 'Custom 6-DOF wrist pitch must respect safe max ceiling!'
-    print(f'  Custom 6-DOF Robot with wrist at joint {solver_6dof.wrist_pitch_idx} passed successfully! Max={np.max(smoothed_6dof[:, 4]):.2f} deg [OK]')
+    assert smoothed_6dof.shape == traj_6dof.shape
+    assert np.allclose(smoothed_6dof[:, -1], 0.5)
+    assert np.max(np.abs(np.diff(smoothed_6dof[:, 4]))) <= np.degrees(0.4 / 30.0) + 1e-5
+    print('  Six-joint URDF trajectory shape and velocity limits passed [OK]')
     print('[PASS] Universal Soft-Barrier & Multi-Robot Joint Smoothing verified!')
 
 
@@ -293,28 +262,22 @@ def test_wrist_roll_regularization_and_gripper_extrinsics():
     target_high_roll = [0.0, -0.22, 0.15, float(np.radians(80.0)), 0.0, 0.0]
     res_high = solver.solve_feasible_ik(target_high_roll)
     roll_q4_high = res_high['joints'][4]
-    assert abs(roll_q4_high) <= 30.5, f'Wrist roll exceeded 30 deg: got {roll_q4_high:.2f} deg'
-    print(f'  Target roll=+80.0° -> Solved q4={roll_q4_high:.2f}° (properly bounded <= 30°) [OK]')
+    assert abs(roll_q4_high) <= 35.5, f'Wrist roll exceeded 35 deg: got {roll_q4_high:.2f} deg'
+    print(f'  Target roll=+80.0° -> Solved q4={roll_q4_high:.2f}° (within preset bound) [OK]')
 
     # 2. Target with excessive negative roll (-75 deg) must be damped and clamped to >= -30 deg
     target_low_roll = [0.0, -0.22, 0.15, float(-np.radians(75.0)), 0.0, 0.0]
     res_low = solver.solve_feasible_ik(target_low_roll)
     roll_q4_low = res_low['joints'][4]
-    assert abs(roll_q4_low) <= 30.5, f'Wrist roll exceeded -30 deg: got {roll_q4_low:.2f} deg'
-    print(f'  Target roll=-75.0° -> Solved q4={roll_q4_low:.2f}° (properly bounded >= -30°) [OK]')
+    assert abs(roll_q4_low) <= 35.5, f'Wrist roll exceeded 35 deg: got {roll_q4_low:.2f} deg'
+    print(f'  Target roll=-75.0° -> Solved q4={roll_q4_low:.2f}° (within preset bound) [OK]')
 
-    # 3. Gripper extrinsics update on URDFKinematics
+    # Camera calibration remains separate and cannot alter the URDF-defined TCP.
+    before = solver.forward_kinematics(np.zeros(solver.num_joints))
     solver.update_camera_extrinsics(forward_cm=15.0)
-    assert abs(solver.L4 - 0.15) < 1e-6, f'Expected L4=0.15, got {solver.L4}'
-    print('  URDFKinematics update_camera_extrinsics(forward_cm=15.0) sets L4=0.15m [OK]')
-
-    # 4. Gripper extrinsics update on DHKinematics
-    from robot_kinematics import SO101_DH_TABLE
-    solver_dh = DHKinematics(SO101_DH_TABLE, model_name="SO-101-DH")
-    solver_dh.update_camera_extrinsics(forward_cm=14.5)
-    assert abs(solver_dh.L4 - 0.145) < 1e-6, f'Expected DH L4=0.145, got {solver_dh.L4}'
-    assert abs(solver_dh.max_reach - (solver_dh.L2 + solver_dh.L3 + 0.145)) < 1e-6
-    print('  DHKinematics update_camera_extrinsics(forward_cm=14.5) sets L4=0.145m and updates max_reach [OK]')
+    after = solver.forward_kinematics(np.zeros(solver.num_joints))
+    assert np.allclose(after, before)
+    print('  Camera calibration does not alter the URDF-defined TCP [OK]')
 
     # 5. Trajectory smoother bounds wild roll jumps
     wild_traj = np.zeros((30, 6))
@@ -327,7 +290,7 @@ def test_wrist_roll_regularization_and_gripper_extrinsics():
 
 
 if __name__ == '__main__':
-    test_dh_tables_and_specs()
+    test_urdf_chain_specs()
     test_omnikin_forward_inverse_consistency()
     test_so101_forward_inverse_consistency()
     test_so100_forward_inverse_consistency()

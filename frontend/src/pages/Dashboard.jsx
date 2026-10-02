@@ -232,6 +232,9 @@ export default function Dashboard({
           }
         } else if (prevCompletedCountRef.current === null) {
           prevCompletedCountRef.current = completedCount;
+          if (completedCount > 0 && onRefreshEpisodes) {
+            onRefreshEpisodes();
+          }
         }
         prevIsProcessingRef.current = data.is_processing;
 
@@ -515,7 +518,7 @@ export default function Dashboard({
   const robotTcpZ = dz;
   const distToRobot = Math.hypot(robotTcpX, robotTcpY, robotTcpZ);
 
-  const isCustomUrdf = Boolean(activeRobotConfig?.custom_urdf_enabled || activeRobotConfig?.robot_type === 'custom_urdf' || activeRobotConfig?.custom_dh_table);
+  const isCustomUrdf = Boolean(activeRobotConfig?.custom_urdf_enabled || activeRobotConfig?.robot_type === 'custom_urdf' || activeRobotConfig?.custom_urdf);
   const robotName = isCustomUrdf
     ? (activeRobotConfig?.custom_specs?.robot_name || 'CUSTOM-URDF').toUpperCase()
     : (activeRobotConfig?.robot_type || 'so_arm101_omni_kin').toUpperCase().replace(/_/g, '-');
@@ -795,6 +798,11 @@ export default function Dashboard({
                 approachEePoses={approachData?.aruco_ee_poses || []}
                 approachGripperStates={approachData?.gripper_states || []}
                 approachCamPoses={approachData?.aruco_cam_poses || []}
+                approachJointStates={approachData?.joint_states || []}
+                approachLinkPositions={approachData?.link_positions || []}
+                approachRobotEePoses={approachData?.robot_ee_poses || []}
+                approachIsFeasible={approachData?.is_feasible}
+                approachErrorCm={approachData?.max_error_cm}
                 isApproachPhase={isApproachPhase}
                 approachFrameIndex={approachFrameIndex}
                 jointStates={jointStates}
@@ -910,6 +918,11 @@ export default function Dashboard({
                 approachEePoses={approachData?.aruco_ee_poses || []}
                 approachGripperStates={approachData?.gripper_states || []}
                 approachCamPoses={approachData?.aruco_cam_poses || []}
+                approachJointStates={approachData?.joint_states || []}
+                approachLinkPositions={approachData?.link_positions || []}
+                approachRobotEePoses={approachData?.robot_ee_poses || []}
+                approachIsFeasible={approachData?.is_feasible}
+                approachErrorCm={approachData?.max_error_cm}
                 isApproachPhase={isApproachPhase}
                 approachFrameIndex={approachFrameIndex}
                 jointStates={jointStates}

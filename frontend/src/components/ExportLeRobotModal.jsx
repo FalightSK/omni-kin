@@ -25,12 +25,14 @@ export default function ExportLeRobotModal({
   if (!isOpen) return null;
 
   const totalFrames = episodes.reduce((acc, ep) => acc + (ep.num_frames || (ep.poses ? ep.poses.length : 0)), 0);
-  const isCustomUrdf = Boolean(robotConfig?.custom_urdf_enabled || robotConfig?.robot_type === 'custom_urdf' || robotConfig?.custom_dh_table);
+  const isCustomUrdf = Boolean(robotConfig?.custom_urdf_enabled || robotConfig?.robot_type === 'custom_urdf' || robotConfig?.custom_urdf);
   const robotType = isCustomUrdf
     ? (robotConfig?.custom_specs?.robot_name || 'CUSTOM-URDF').toUpperCase()
     : (robotConfig?.robot_type || 'so_arm101_omni_kin').toUpperCase().replace(/_/g, '-');
   const unverifiedEpisodes = episodes.filter(
     (episode) => episode?.manifest?.validation?.state !== 'passed'
+      || episode?.vslam_migration_state !== 'current'
+      || !episode?.vslam_processing_version
   );
 
   const handleExport = async () => {
