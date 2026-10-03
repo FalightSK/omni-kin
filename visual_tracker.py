@@ -19,6 +19,48 @@ from scipy.spatial.transform import Rotation as R
 R_CAM_TO_PHONE = np.diag([1.0, -1.0, -1.0])
 
 
+def gripper_opening_percent(open_distance_mm, max_open_distance_mm):
+    """Return the current clear jaw gap as a fraction of this record's maximum."""
+    open_mm = float(open_distance_mm)
+    max_open_mm = float(max_open_distance_mm)
+    if not np.isfinite(open_mm) or not np.isfinite(max_open_mm) or max_open_mm <= 0.0:
+        return 0.0
+    return float(np.clip(open_mm / max_open_mm * 100.0, 0.0, 100.0))
+
+
+def resolve_gripper_opening(states, marker_size_mm=22.0):
+    """Normalize clear jaw gaps to the record maximum and hold through marker loss."""
+    detected = []
+    for index, state in enumerate(states):
+        if state.get("detected") and state.get("dist_mm") is not None:
+            center_distance = float(state["dist_mm"])
+            if np.isfinite(center_distance):
+                # The tag centers are one marker width farther apart than the clear jaw gap.
+                opening_distance = round(max(center_distance - float(marker_size_mm), 0.0), 1)
+                detected.append((index, opening_distance))
+    if not detected:
+        return [100.0] * len(states), None
+
+    max_open_mm = max(opening_distance for _, opening_distance in detected)
+    per_frame = [None] * len(states)
+    for index, opening_distance in detected:
+        per_frame[index] = gripper_opening_percent(opening_distance, max_open_mm)
+
+    last_value = next(value for value in per_frame if value is not None)
+    resolved = []
+    for value in per_frame:
+        if value is not None:
+            last_value = value
+        resolved.append(round(last_value, 1))
+
+    return resolved, {
+        "source": "record_max_open_distance",
+        "marker_size_mm": round(float(marker_size_mm), 2),
+        "max_open_distance_mm": round(max_open_mm, 1),
+        "formula": "clamp(opening_distance_mm / max_open_distance_mm * 100, 0, 100)",
+    }
+
+
 def rotation_matrix_to_trajectory_euler(R_c_to_w):
     """
     Computes [roll, pitch, yaw] in radians from camera-to-world rotation matrix:
@@ -835,8 +877,7 @@ class VisualInertialTracker:
         self.gripper_tag_a_id = 2
         self.gripper_tag_b_id = 3
         self.gripper_marker_size_m = 0.022   # 22.0 mm
-        self.gripper_open_dist_m = 0.060     # 60.0 mm -> 100% open
-        self.gripper_close_dist_m = 0.028    # 28.0 mm -> 0% closed
+        self.max_gripper_opening_mm = 0.0
         hs_grip = self.gripper_marker_size_m / 2.0
         self.gripper_marker_3d = np.array([
             [-hs_grip,  hs_grip, 0.0],
@@ -848,6 +889,7 @@ class VisualInertialTracker:
             "detected": False,
             "gripper_val": 100.0,
             "dist_mm": None,
+            "opening_mm": None,
             "corners_a": None,
             "corners_b": None,
             "center_a": None,
@@ -855,6 +897,7 @@ class VisualInertialTracker:
         }
         self.last_gripper_states = []
         self.last_resolved_gripper_values = []
+        self.last_gripper_calibration = None
 
         # Extended Kalman Filter Tuning Parameters
         self.ekf_params = {
@@ -921,7 +964,7 @@ class VisualInertialTracker:
     def configure_gripper_markers(self, config_dict=None):
         """
         Configures gripper jaw ArUco marker tracking parameters from robot_config.json.
-        Defaults to Tag 2 & 3, 22mm width, 60mm open, 28mm closed.
+        Defaults to Tag 2 & 3 with 22mm markers.
         """
         if not config_dict:
             return
@@ -940,26 +983,27 @@ class VisualInertialTracker:
                 [ hs_grip, -hs_grip, 0.0],
                 [-hs_grip, -hs_grip, 0.0]
             ], dtype=np.float32)
-        if "open_distance_mm" in config_dict:
-            self.gripper_open_dist_m = float(config_dict["open_distance_mm"]) / 1000.0
-        if "close_distance_mm" in config_dict:
-            self.gripper_close_dist_m = float(config_dict["close_distance_mm"]) / 1000.0
+
+    def _missing_gripper_state(self):
+        """Keep the previous jaw estimate while marker detections are unavailable."""
+        previous = getattr(self, "last_gripper_state", {}) or {}
+        return {
+            "detected": False,
+            "gripper_val": float(previous.get("gripper_val", 100.0)),
+            "dist_mm": previous.get("dist_mm"),
+            "opening_mm": previous.get("opening_mm"),
+            "corners_a": None,
+            "corners_b": None,
+            "center_a": None,
+            "center_b": None,
+        }
 
     def detect_gripper_state(self, corners, ids_flat, camera_matrix, dist_coeffs):
         """
         Detects physical open/close state of gripper from jaw ArUco markers (Tag 2 & 3, 22mm).
-        CRITICAL CONSTRAINT: If markers are not detected or missing, this MUST NOT fail or
-        throw an error, but must safely default to Open (100.0%).
+        Missing markers hold the previous estimate; before any detection this defaults to open.
         """
-        fallback_state = {
-            "detected": False,
-            "gripper_val": 100.0,
-            "dist_mm": None,
-            "corners_a": None,
-            "corners_b": None,
-            "center_a": None,
-            "center_b": None
-        }
+        fallback_state = self._missing_gripper_state()
 
         if not getattr(self, 'gripper_tracking_enabled', True):
             return fallback_state
@@ -1010,20 +1054,16 @@ class VisualInertialTracker:
                 marker_size_m = getattr(self, 'gripper_marker_size_m', 0.022)
                 dist_m = float((d_px / w_px) * marker_size_m)
 
-            dist_mm = dist_m * 1000.0
-            open_mm = getattr(self, 'gripper_open_dist_m', 0.060) * 1000.0
-            close_mm = getattr(self, 'gripper_close_dist_m', 0.028) * 1000.0
-
-            if open_mm > close_mm:
-                ratio = (dist_mm - close_mm) / (open_mm - close_mm)
-                gripper_val = float(np.clip(ratio * 100.0, 0.0, 100.0))
-            else:
-                gripper_val = 100.0
+            dist_mm = round(dist_m * 1000.0, 1)
+            opening_mm = round(max(dist_mm - self.gripper_marker_size_m * 1000.0, 0.0), 1)
+            self.max_gripper_opening_mm = max(self.max_gripper_opening_mm, opening_mm)
+            gripper_val = gripper_opening_percent(opening_mm, self.max_gripper_opening_mm)
 
             return {
                 "detected": True,
                 "gripper_val": round(gripper_val, 1),
-                "dist_mm": round(float(dist_mm), 1),
+                "dist_mm": dist_mm,
+                "opening_mm": opening_mm,
                 "corners_a": c_a.tolist(),
                 "corners_b": c_b.tolist(),
                 "center_a": [round(float(center_a[0]), 1), round(float(center_a[1]), 1)],
@@ -1526,15 +1566,7 @@ class VisualInertialTracker:
         if ids is None or len(ids) == 0:
             self.last_detected_ids = []
             self.last_detected_corners = []
-            self.last_gripper_state = {
-                "detected": False,
-                "gripper_val": 100.0,
-                "dist_mm": None,
-                "corners_a": None,
-                "corners_b": None,
-                "center_a": None,
-                "center_b": None
-            }
+            self.last_gripper_state = self._missing_gripper_state()
             self.last_rvec = None
             self.last_tvec = None
             if return_corners:
@@ -1928,9 +1960,9 @@ class VisualInertialTracker:
                 pt_b = (int(round(float(cb[0]))), int(round(float(cb[1]))))
                 cv2.line(annotated, pt_a, pt_b, (255, 0, 255), 2, cv2.LINE_AA)
                 mid_pt = ((pt_a[0] + pt_b[0]) // 2, (pt_a[1] + pt_b[1]) // 2 - 10)
-                d_mm = gripper_state.get('dist_mm', 0.0)
+                gap_mm = gripper_state.get('opening_mm', 0.0)
                 g_val = gripper_state.get('gripper_val', 100.0)
-                g_lbl = f"Gripper: {g_val:.0f}% ({d_mm:.1f}mm)"
+                g_lbl = f"Jaw gap: {gap_mm:.1f}mm | {g_val:.0f}% open"
                 cv2.putText(annotated, g_lbl, (mid_pt[0] + 1, mid_pt[1] + 1), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 2, cv2.LINE_AA)
                 cv2.putText(annotated, g_lbl, mid_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 100, 255), 1, cv2.LINE_AA)
 
@@ -2007,10 +2039,13 @@ class VisualInertialTracker:
 
         # Line 3: Live Gripper Telemetry Readout
         if gripper_state and gripper_state.get('detected'):
-            grip_txt = f"Gripper: {gripper_state['gripper_val']:.0f}% ({gripper_state['dist_mm']:.1f}mm) [TAGS 2&3]"
+            grip_txt = (
+                f"Jaw gap: {gripper_state['opening_mm']:.1f}mm | "
+                f"{gripper_state['gripper_val']:.1f}% open [TAGS 2&3]"
+            )
             grip_col = (255, 120, 255)
         else:
-            grip_txt = "Gripper: OPEN 100% (Default / Tags 2&3 Not In View)"
+            grip_txt = "Gripper markers: Not detected (Tags 2&3)"
             grip_col = (160, 160, 180)
         cv2.putText(annotated, grip_txt, (18, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.40, grip_col, 1, cv2.LINE_AA)
 
@@ -2164,6 +2199,9 @@ class VisualInertialTracker:
         self.last_detected_ids = []
         self.last_detected_corners = []
         self.last_raw_trajectory = None
+        self.max_gripper_opening_mm = 0.0
+        self.last_gripper_state = {}
+        self.last_gripper_state = self._missing_gripper_state()
 
         dev_writer = None
         canny_writer = None
@@ -2278,6 +2316,7 @@ class VisualInertialTracker:
                     'detected': grip_state['detected'],
                     'value': grip_state['gripper_val'],
                     'dist_mm': grip_state['dist_mm'],
+                    'opening_mm': grip_state.get('opening_mm'),
                     'open_pct': grip_state['gripper_val']
                 },
                 'pose': p_curr.tolist() if p_curr is not None else [0.0, 0.0, 0.0],
@@ -2399,24 +2438,20 @@ class VisualInertialTracker:
                 final_trajectory, fps=fps, method=smooth_method, time_window_ms=smooth_window_ms
             )
 
-        # Resolve frame-by-frame gripper trajectory with continuity holding
+        # Resolve frame-by-frame gripper trajectory with continuity holding.
+        resolved_gripper_values, self.last_gripper_calibration = resolve_gripper_opening(
+            detected_gripper_states,
+            marker_size_mm=self.gripper_marker_size_m * 1000.0,
+        )
+        first_gap = next((state.get('opening_mm') for state in detected_gripper_states if state.get('detected')), None)
+        last_gap = first_gap
+        for state, value in zip(detected_gripper_states, resolved_gripper_values):
+            if state.get('detected'):
+                last_gap = state.get('opening_mm')
+            elif state.get('opening_mm') is None and last_gap is not None:
+                state['opening_mm'] = last_gap
+            state['gripper_val'] = value
         self.last_gripper_states = detected_gripper_states
-        resolved_gripper_values = []
-        has_any_gripper = any(g.get('detected', False) for g in detected_gripper_states)
-        if has_any_gripper:
-            last_val = 100.0
-            for g in detected_gripper_states:
-                if g.get('detected'):
-                    last_val = g['gripper_val']
-                    break
-            for g in detected_gripper_states:
-                if g.get('detected'):
-                    last_val = g['gripper_val']
-                resolved_gripper_values.append(last_val)
-        else:
-            # Gripper tags not detected in this video: safely default to 100.0 (Open) with zero failure
-            resolved_gripper_values = [100.0] * num_frames
-
         self.last_resolved_gripper_values = resolved_gripper_values
 
         # Synchronize final trajectory and gripper values into dev_telemetry
@@ -2427,6 +2462,8 @@ class VisualInertialTracker:
             if i_frame < len(resolved_gripper_values):
                 if 'gripper' not in item:
                     item['gripper'] = {}
+                if i_frame < len(detected_gripper_states):
+                    item['gripper']['opening_mm'] = detected_gripper_states[i_frame].get('opening_mm')
                 item['gripper']['value'] = resolved_gripper_values[i_frame]
                 item['gripper']['open_pct'] = resolved_gripper_values[i_frame]
 

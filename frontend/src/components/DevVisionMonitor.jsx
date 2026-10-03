@@ -292,7 +292,9 @@ export default function DevVisionMonitor({
       const midX = (c2[0] + c3[0]) / 2;
       const midY = (c2[1] + c3[1]) / 2 - 12;
       const grip = frameTelem.gripper;
-      const distStr = grip?.dist_mm ? `${grip.dist_mm}mm` : 'Detected';
+      const distStr = grip?.opening_mm != null
+        ? `${grip.opening_mm}mm gap`
+        : (grip?.dist_mm ? `${grip.dist_mm}mm centers` : 'Detected');
       const valStr = grip?.value !== undefined ? `${grip.value.toFixed(0)}%` : '100%';
       const badgeText = `Gripper: ${valStr} (${distStr})`;
 
@@ -418,6 +420,8 @@ export default function DevVisionMonitor({
   const tag2 = bboxes.find((b) => b.id === 2);
   const tag3 = bboxes.find((b) => b.id === 3);
   const isGripperActive = Boolean(currTelemetry?.gripper?.detected || (tag2 && tag3));
+  const hasGripperHistory = devTelemetry.some((frame) => frame?.gripper?.detected);
+  const gripperStatus = isGripperActive ? '● Tracking' : hasGripperHistory ? '◌ Holding Last' : '○ Default Open';
 
   return (
     <div
@@ -725,26 +729,34 @@ export default function DevVisionMonitor({
               className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border ${
                 isGripperActive
                   ? 'bg-fuchsia-950/60 text-fuchsia-300 border-fuchsia-800/60'
-                  : 'bg-neutral-950 text-neutral-500 border-neutral-800'
+                  : hasGripperHistory
+                    ? 'bg-amber-950/40 text-amber-300 border-amber-800/50'
+                    : 'bg-neutral-950 text-neutral-500 border-neutral-800'
               }`}
             >
-              {isGripperActive ? '● Tracking' : '○ Default Open'}
+              {gripperStatus}
             </span>
           </div>
 
           <div className="text-[11px] text-neutral-300 flex flex-col gap-0.5 pt-1">
             <div className="flex justify-between">
-              <span className="text-neutral-500">Jaw Distance:</span>
+              <span className="text-neutral-500">Marker Centers:</span>
               <span className="font-semibold text-white">
                 {currTelemetry?.gripper?.dist_mm ? `${currTelemetry.gripper.dist_mm} mm` : '—'}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-neutral-500">Gripper State:</span>
+              <span className="text-neutral-500">Clear Jaw Gap:</span>
+              <span className="font-semibold text-white">
+                {currTelemetry?.gripper?.opening_mm != null ? `${currTelemetry.gripper.opening_mm} mm` : '—'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-neutral-500">Jaw Opening:</span>
               <span className="text-fuchsia-300 font-semibold">
                 {currTelemetry?.gripper?.value !== undefined
-                  ? `${currTelemetry.gripper.value.toFixed(0)}% (${currTelemetry.gripper.value > 50 ? 'Open' : 'Closed'})`
-                  : '100% (Open)'}
+                  ? `${currTelemetry.gripper.value.toFixed(1)}% open`
+                  : '100% open (default)'}
               </span>
             </div>
             <div className="flex justify-between">

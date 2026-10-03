@@ -1073,7 +1073,6 @@ export default function Viewport3D({
     const isApproachActive = trajectoryMode === 'initial_aware' && isApproachPhase && approachEePoses && approachEePoses.length > 0;
 
     let targetGripper = [0.15, 0.05, 0.15, 0, 0, 0];
-    let activeGripVal = 50.0;
     let targetCam = null;
     let ikRes = null;
     let activeJointState = null;
@@ -1083,11 +1082,6 @@ export default function Viewport3D({
     if (isApproachActive) {
       const idx = Math.min(Math.max(0, approachFrameIndex), (approachEePoses?.length || 1) - 1);
       targetGripper = approachEePoses[idx] || targetGripper;
-      if (approachGripperStates && approachGripperStates.length > idx && approachGripperStates[idx] !== undefined) {
-        activeGripVal = Number(approachGripperStates[idx]);
-      } else {
-        activeGripVal = 100.0;
-      }
       if (approachCamPoses && approachCamPoses.length > idx) {
         targetCam = approachCamPoses[idx];
       }
@@ -1106,10 +1100,6 @@ export default function Viewport3D({
         const idx = Math.min(currentFrameIndex, activePoses.length - 1);
         targetGripper = activePoses[idx];
         activeRobotPose = robotEePoses[idx] || null;
-        if (gripperStates && gripperStates.length > idx && gripperStates[idx] !== undefined) {
-          activeGripVal = Number(gripperStates[idx]);
-        }
-
         if (linkPositions && linkPositions.length > idx && Array.isArray(linkPositions[idx]) && linkPositions[idx].length >= ((robotConfig?.custom_urdf_enabled || robotConfig?.robot_type === 'custom_urdf') ? 2 : 6)) {
           activeLinkPositions = linkPositions[idx];
           const serverJoints = jointStates[idx];
@@ -1454,6 +1444,9 @@ export default function Viewport3D({
   const displayRobotName = isCustomUrdf
     ? (robotConfig?.custom_specs?.robot_name || 'CUSTOM-URDF').toUpperCase()
     : robot_type.toUpperCase().replace(/_/g, '-');
+  const displayGripperPercent = trajectoryMode === 'initial_aware' && isApproachPhase
+    ? approachGripperStates?.[approachFrameIndex]
+    : gripperStates?.[currentFrameIndex];
 
   return (
     <div className="w-full h-full relative select-none overflow-hidden group">
@@ -1703,19 +1696,11 @@ export default function Viewport3D({
             </div>
             <div className="text-[10px] text-neutral-400 flex flex-col gap-0.5 mt-0.5">
               <div className="flex justify-between">
-                <span className="text-neutral-500">Gripper Cylinder:</span>
-                <span className="text-neutral-200 font-semibold">Anodized Black</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-500">Parallel Fingers:</span>
-                <span className="text-neutral-200 font-semibold">Hardened Jaws</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-500">Dynamic State:</span>
+                <span className="text-neutral-500">Jaw Opening:</span>
                 <span className="text-white font-bold">
-                  {gripperStates && gripperStates[currentFrameIndex] !== undefined
-                    ? `${Number(gripperStates[currentFrameIndex]).toFixed(0)}% Open`
-                    : '50% (Nominal)'}
+                  {displayGripperPercent !== undefined && Number.isFinite(Number(displayGripperPercent))
+                    ? `${Number(displayGripperPercent).toFixed(1)}% open`
+                    : (isApproachPhase ? '100% open' : '50% (Nominal)')}
                 </span>
               </div>
               <div className="flex justify-between pt-1 border-t border-neutral-800 text-[9.5px]">

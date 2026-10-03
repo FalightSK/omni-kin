@@ -7,7 +7,7 @@ import os
 import cv2
 import numpy as np
 import pytest
-from visual_tracker import ArucoFeatureMapTracker, VisualInertialTracker, VisualInertialEKF
+from visual_tracker import ArucoFeatureMapTracker, VisualInertialTracker, VisualInertialEKF, resolve_gripper_opening
 
 def test_marker_generation():
     tracker = VisualInertialTracker(tag_a_size=0.10, tag_b_size=0.05, tag_a_id=0, tag_b_id=1)
@@ -16,6 +16,22 @@ def test_marker_generation():
     assert tag_a_img is not None and tag_a_img.shape == (400, 400)
     assert tag_b_img is not None and tag_b_img.shape == (200, 200)
     print("[PASS] test_marker_generation passed!")
+
+def test_gripper_opening_uses_record_max_and_holds_last_value():
+    states = [
+        {"detected": True, "dist_mm": 108.0},
+        {"detected": False, "dist_mm": None},
+        {"detected": True, "dist_mm": 70.0},
+        {"detected": False, "dist_mm": None},
+    ]
+    values, calibration = resolve_gripper_opening(states, marker_size_mm=22.0)
+
+    assert calibration["source"] == "record_max_open_distance"
+    assert calibration["max_open_distance_mm"] == 86.0
+    assert values == [100.0, 100.0, 55.8, 55.8]
+    repeated_values, _ = resolve_gripper_opening(states, marker_size_mm=22.0)
+    assert repeated_values == values
+
 
 def test_dual_board_pnp_scenarios():
     tracker = VisualInertialTracker(
@@ -250,8 +266,8 @@ def test_gripper_marker_tracking():
     """
     Unit tests for gripper jaw ArUco marker tracking (Tag 2 & Tag 3, 22mm).
     Verifies:
-      1. Accurate open/close percentage mapping based on physical distance (28mm closed to 60mm open).
-      2. ZERO-FAILURE FALLBACK: Missing tags must NEVER fail or raise errors and must default to Open (100.0%).
+      1. Record-maximum percentage mapping after subtracting the marker width from center spacing.
+      2. Missing tags hold the previous estimate, or default open before the first detection.
       3. Integration inside detect_marker_pnp.
     """
     tracker = VisualInertialTracker(
@@ -262,12 +278,10 @@ def test_gripper_marker_tracking():
         "tag_id_a": 2,
         "tag_id_b": 3,
         "marker_size_mm": 22.0,
-        "open_distance_mm": 60.0,
-        "close_distance_mm": 28.0
     })
     camera_matrix, dist_coeffs = tracker.estimate_camera_matrix(1280, 720)
 
-    # 1. Test missing tags (Tag 2 & 3 not in frame) -> Must return detected=False, val=100.0
+    # 1. Before any detection, missing tags default to open.
     res_empty = tracker.detect_gripper_state([], [], camera_matrix, dist_coeffs)
     assert not res_empty["detected"], "Empty markers should not be detected"
     assert res_empty["gripper_val"] == 100.0, f"Expected 100.0 (Open default), got {res_empty['gripper_val']}"
@@ -276,16 +290,16 @@ def test_gripper_marker_tracking():
     dummy_corners = [np.array([[[100, 100], [140, 100], [140, 140], [100, 140]]], dtype=np.float32)]
     res_single = tracker.detect_gripper_state(dummy_corners, [2], camera_matrix, dist_coeffs)
     assert not res_single["detected"], "Single tag should not trigger gripper detection"
-    assert res_single["gripper_val"] == 100.0, "Missing Tag 3 must default to 100.0 (Open)"
+    assert res_single["gripper_val"] == 100.0, "Before any tag pair is detected, default open is 100%"
 
     # 2. Test both Tag 2 & 3 present at varying distances in synthetic image
     tag2_img = tracker.generate_raw_marker(marker_id=2, side_pixels=80)
     tag3_img = tracker.generate_raw_marker(marker_id=3, side_pixels=80)
 
-    # Case A: Wide open gripper (~60mm equivalent in pixel scale)
+    # Case A: 60mm center spacing minus the 22mm marker width gives a 38mm clear gap.
     frame_open = np.ones((720, 1280, 3), dtype=np.uint8) * 240
     # Marker width 80px represents 22mm -> scale ~ 3.63 px/mm
-    # Open distance 60mm -> ~218 px center-to-center distance
+    # Center distance 60mm -> ~218 px center-to-center distance
     frame_open[250:330, 400:480] = cv2.cvtColor(tag2_img, cv2.COLOR_GRAY2BGR)
     frame_open[250:330, 618:698] = cv2.cvtColor(tag3_img, cv2.COLOR_GRAY2BGR)
 
@@ -294,11 +308,15 @@ def test_gripper_marker_tracking():
     assert not det_open, "Gripper-only ArUco IDs must never be used as table references"
     assert getattr(tracker, "last_rvec", None) is None and getattr(tracker, "last_tvec", None) is None, "Gripper-only detections must not create a table pose"
     assert grip_open["detected"], "Both Tag 2 & 3 should be detected"
-    assert grip_open["gripper_val"] >= 90.0, f"Wide distance should be ~100% open, got {grip_open['gripper_val']}% ({grip_open['dist_mm']}mm)"
+    assert grip_open["opening_mm"] == pytest.approx(grip_open["dist_mm"] - 22.0, abs=0.1)
+    assert grip_open["gripper_val"] == 100.0
+    missing_after_open = tracker.detect_gripper_state([], [], camera_matrix, dist_coeffs)
+    assert not missing_after_open["detected"]
+    assert missing_after_open["gripper_val"] == grip_open["gripper_val"]
+    assert missing_after_open["opening_mm"] == grip_open["opening_mm"]
     print(f"[PASS] Gripper OPEN state detected: {grip_open['gripper_val']}% ({grip_open['dist_mm']}mm)")
 
-    # Case B: Closed gripper (~28mm equivalent in pixel scale)
-    # Closed distance 28mm -> ~102 px center-to-center distance
+    # Case B: A smaller gap is a proportional reduction from the maximum gap.
     frame_closed = np.ones((720, 1280, 3), dtype=np.uint8) * 240
     frame_closed[250:330, 500:580] = cv2.cvtColor(tag2_img, cv2.COLOR_GRAY2BGR)
     frame_closed[250:330, 602:682] = cv2.cvtColor(tag3_img, cv2.COLOR_GRAY2BGR)
@@ -306,7 +324,10 @@ def test_gripper_marker_tracking():
     det_closed, _, _, _, _, _, corners_closed = tracker.detect_marker_pnp(frame_closed, camera_matrix, dist_coeffs, return_corners=True)
     grip_closed = tracker.last_gripper_state
     assert grip_closed["detected"], "Both Tag 2 & 3 should be detected"
-    assert grip_closed["gripper_val"] <= 15.0, f"Narrow distance should be ~0% closed, got {grip_closed['gripper_val']}% ({grip_closed['dist_mm']}mm)"
+    assert grip_closed["opening_mm"] == pytest.approx(grip_closed["dist_mm"] - 22.0, abs=0.1)
+    expected_closed_pct = round(grip_closed["opening_mm"] / grip_open["opening_mm"] * 100.0, 1)
+    assert grip_closed["gripper_val"] == expected_closed_pct
+    assert grip_closed["gripper_val"] < grip_open["gripper_val"]
     print(f"[PASS] Gripper CLOSED state detected: {grip_closed['gripper_val']}% ({grip_closed['dist_mm']}mm)")
 
     # Unknown IDs also cannot enter table PnP.

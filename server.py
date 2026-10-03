@@ -31,7 +31,7 @@ from fastapi import FastAPI, Request, File, UploadFile, Form, Response, Body, HT
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from visual_tracker import ArucoFeatureMapTracker, VisualInertialTracker
+from visual_tracker import ArucoFeatureMapTracker, VisualInertialTracker, resolve_gripper_opening
 from lerobot_exporter import LeRobotExporter, find_feasible_window
 from robot_kinematics import (
     WorkspaceCalibrator,
@@ -524,6 +524,56 @@ def _versioned_episode_video_url(ep_uid: str, filename: str, revision: str) -> s
     return f"/recordings/{ep_uid}/{filename}?v={VSLAM_PROCESSING_VERSION}-{revision}"
 
 
+def _migrate_episode_gripper_opening(ep):
+    """Refresh stored percentages from saved marker distances without rerunning V-SLAM."""
+    telemetry = ep.get("dev_telemetry") or []
+    frame_count = int(ep.get("num_frames") or len(telemetry))
+    if not telemetry or len(telemetry) != frame_count:
+        return False
+
+    states = [item.get("gripper") or {} for item in telemetry]
+    gripper_config = ROBOT_CONFIG.get("gripper_marker_tracking", {})
+    marker_size_mm = float(gripper_config.get("marker_size_mm", 22))
+    values, calibration = resolve_gripper_opening(
+        states,
+        marker_size_mm=marker_size_mm,
+    )
+    if calibration is None:
+        return False
+
+    opening_distances = [
+        round(max(float(state["dist_mm"]) - marker_size_mm, 0.0), 1)
+        if state.get("detected") and state.get("dist_mm") is not None
+        else None
+        for state in states
+    ]
+    last_opening = next(distance for distance in opening_distances if distance is not None)
+    for index, distance in enumerate(opening_distances):
+        if distance is not None:
+            last_opening = distance
+        else:
+            opening_distances[index] = last_opening
+
+    changed = (
+        ep.get("gripper_states") != values
+        or ep.get("gripper_calibration") != calibration
+        or ep.get("gripper_state_units") != "percent"
+    )
+    ep["gripper_states"] = values
+    ep["gripper_state_units"] = "percent"
+    ep["gripper_calibration"] = calibration
+    for item, value, opening_distance in zip(telemetry, values, opening_distances):
+        gripper = item.setdefault("gripper", {})
+        if gripper.get("opening_mm") != opening_distance:
+            changed = True
+        gripper["opening_mm"] = opening_distance
+        if gripper.get("value") != value or gripper.get("open_pct") != value:
+            changed = True
+        gripper["value"] = value
+        gripper["open_pct"] = value
+    return changed
+
+
 def _reprocess_episode_from_video(
     ep: dict,
     *,
@@ -591,6 +641,8 @@ def _reprocess_episode_from_video(
         "poses": poses.tolist(),
         "raw_poses": raw_poses,
         "gripper_states": gripper_states,
+        "gripper_state_units": "percent",
+        "gripper_calibration": getattr(tracker, "last_gripper_calibration", None) or ep.get("gripper_calibration"),
         "dev_telemetry": telemetry,
         "num_frames": frame_count,
         "fps": fps,
@@ -647,6 +699,7 @@ def load_episodes_from_disk():
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     ep_data = json.load(f)
+                    _migrate_episode_gripper_opening(ep_data)
                     if "manifest" not in ep_data:
                         # Never silently bless data produced before integrity checks.
                         ep_data["manifest"] = legacy_manifest()
@@ -962,6 +1015,8 @@ def _sync_execute_processing_job(job):
         'raw_poses': safe_to_list(getattr(job_tracker, 'last_raw_trajectory', None), anchored_poses),
         'ee_poses': ee_poses.tolist(),
         'gripper_states': gripper_states,
+        'gripper_state_units': 'percent',
+        'gripper_calibration': getattr(job_tracker, 'last_gripper_calibration', None),
         'actions': actions.tolist(),
         'timestamps': timestamps,
         'imu_data': parsed_imu,
@@ -2307,6 +2362,7 @@ async def generate_sample_recording(task: str = "draw 3d circle", shape: str = "
         'raw_poses': anchored_poses.tolist(),
         'ee_poses': anchored_poses.tolist(),
         'gripper_states': gripper_states,
+        'gripper_state_units': 'percent',
         'actions': actions.tolist(),
         'timestamps': timestamps.tolist(),
         'imu_data': [],

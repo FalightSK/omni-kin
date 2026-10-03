@@ -102,6 +102,78 @@ def test_lerobot_export(tmp_path):
     print(f"[OK] meta/info.json validated. Robot: {info_json['robot_type']}, Total Episodes: {info_json['total_episodes']}")
 
 
+def test_lerobot_export_uses_current_gripper_channel_over_cached_joint_state(tmp_path):
+    video_path = tmp_path / "gripper.mp4"
+    _write_test_video(video_path, 3)
+    exporter = LeRobotExporter(output_dir=str(tmp_path / "exports"), fps=30)
+    cached_states = np.zeros((3, 6), dtype=np.float32)
+    cached_states[:, -1] = [1.0, 0.0, 1.0]  # stale binary gripper values
+    episode = {
+        "episode_index": 0,
+        "task": "vary gripper opening",
+        "video_path": str(video_path),
+        "num_frames": 3,
+        "robot_ee_poses": [[0.2, 0.0, 0.2, 0.0, 0.0, 0.0]] * 3,
+        "joint_states": cached_states.tolist(),
+        "gripper_states": [100.0, 54.2, 0.0],
+        "gripper_state_units": "percent",
+    }
+
+    output = exporter.export_dataset(
+        [episode], dataset_name="gripper_channel", auto_trim=False, use_timestamp=False
+    )
+    data = pd.read_parquet(os.path.join(output, "data", "chunk-000", "file-000.parquet"))
+    states = np.asarray(data["observation.state"].tolist())
+    actions = np.asarray(data["action"].tolist())
+    with open(os.path.join(output, "meta", "info.json"), encoding="utf-8") as stream:
+        info = json.load(stream)
+
+    assert np.allclose(states[:, -1], [1.0, 0.542, 0.0], atol=1e-5)
+    assert np.allclose(actions[:-1, -1], states[1:, -1], atol=1e-5)
+    assert actions[-1, -1] == states[-1, -1]
+    assert info["features"]["observation.state"]["names"][-1] == "gripper"
+    assert info["features"]["action"]["names"][-1] == "gripper"
+    assert info["gripper_semantics"] == {
+        "feature_name": "gripper",
+        "units": "normalized_aperture",
+        "closed": 0.0,
+        "open": 1.0,
+        "source": "episode.gripper_states; cached joint-state fallback when absent",
+    }
+
+
+def test_initial_aware_approach_converts_gripper_percentage_once(monkeypatch):
+    import lerobot_exporter
+
+    def fake_approach(self, **kwargs):
+        assert kwargs["home_gripper"] == 100.0
+        assert np.isclose(kwargs["start_gripper"], 54.2)
+        approach_joints = np.zeros((2, 6), dtype=np.float32)
+        approach_joints[:, -1] = [100.0, 54.2]
+        return {
+            "robot_ee_poses": np.tile([0.2, 0.0, 0.2, 0.0, 0.0, 0.0], (2, 1)),
+            "joint_states": approach_joints,
+        }
+
+    monkeypatch.setattr(lerobot_exporter.TrajectoryPlanner, "plan_approach_path", fake_approach)
+    exporter = LeRobotExporter(fps=30)
+    episode = {
+        "num_frames": 2,
+        "robot_ee_poses": [[0.2, 0.0, 0.2, 0.0, 0.0, 0.0]] * 2,
+        "joint_states": np.zeros((2, 6), dtype=np.float32).tolist(),
+        "gripper_states": [54.2, 0.0],
+        "gripper_state_units": "percent",
+    }
+
+    states, _, actions, _, frame_count, _, prepend = exporter._ensure_joint_states_and_poses(
+        episode, trajectory_mode="initial_aware", auto_trim=False
+    )
+
+    assert frame_count == 4 and prepend == 2
+    assert np.allclose(states[:, -1], [1.0, 0.542, 0.542, 0.0], atol=1e-5)
+    assert np.allclose(actions[:, -1], [0.542, 0.542, 0.0, 0.0], atol=1e-5)
+
+
 def test_export_recalculates_on_base_position_change(tmp_path):
     print("\n=== Testing Export Recalculates on Base Position Change ===")
     video_path = tmp_path / "ep.mp4"

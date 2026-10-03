@@ -32,6 +32,24 @@ from robot_kinematics import (
 )
 
 
+def normalize_gripper_values(values, units=None):
+    """Convert aperture percentages or fractions to LeRobot's [closed, open] [0, 1]."""
+    grippers = np.asarray(values, dtype=np.float32)
+    if grippers.ndim != 1 or not np.isfinite(grippers).all():
+        raise ValueError("Gripper states must be a finite one-dimensional sequence")
+
+    units = str(units or "").lower()
+    if units in {"percent", "%"} or (not units and grippers.size and np.max(grippers) > 1.0 + 1e-3):
+        if np.any((grippers < 0.0) | (grippers > 100.0)):
+            raise ValueError("Gripper percentage must be within [0, 100]")
+        return grippers / 100.0
+    if units in {"", "normalized", "fraction", "unit_interval"}:
+        if np.any((grippers < 0.0) | (grippers > 1.0)):
+            raise ValueError("Normalized gripper states must be within [0, 1]")
+        return grippers
+    raise ValueError(f"Unsupported gripper state units: {units}")
+
+
 def find_feasible_window(ee_poses_robot, solver, max_err_cm=1.5):
     """
     Evaluates inverse kinematics across Cartesian EE waypoints (in Robot Base Frame)
@@ -62,17 +80,44 @@ def find_feasible_window(ee_poses_robot, solver, max_err_cm=1.5):
     return int(starts[best_idx]), int(ends[best_idx])
 
 
-def validate_export_dataset(export_path, expected_episode_lengths):
+def validate_export_dataset(export_path, expected_episode_lengths, expected_gripper_sequences=None):
     """Fail closed unless table, actions, metadata, and videos agree exactly."""
     data_path = os.path.join(export_path, "data", "chunk-000", "file-000.parquet")
     frame_table = pd.read_parquet(data_path)
     errors = []
+    gripper_index = None
+    state_width = action_width = None
+    info_path = os.path.join(export_path, "meta", "info.json")
+    if os.path.isfile(info_path):
+        with open(info_path, "r", encoding="utf-8") as stream:
+            features = json.load(stream).get("features", {})
+        state_names = features.get("observation.state", {}).get("names") or []
+        action_names = features.get("action", {}).get("names") or []
+        state_shape = features.get("observation.state", {}).get("shape") or []
+        action_shape = features.get("action", {}).get("shape") or []
+        state_width = state_shape[0] if state_shape else None
+        action_width = action_shape[0] if action_shape else None
+        if state_names.count("gripper") != 1 or action_names.count("gripper") != 1:
+            errors.append("State and action metadata must each name exactly one gripper feature")
+        else:
+            gripper_index = state_names.index("gripper")
+            if action_names.index("gripper") != gripper_index:
+                errors.append("Gripper feature has different state and action indices")
+        if state_shape and state_names and state_shape[0] != len(state_names):
+            errors.append("observation.state shape does not match its feature names")
+        if action_shape and action_names and action_shape[0] != len(action_names):
+            errors.append("action shape does not match its feature names")
+        if expected_gripper_sequences is not None and gripper_index is None:
+            errors.append("Cannot verify gripper values because feature metadata is invalid")
+
     required = {"index", "episode_index", "frame_index", "timestamp", "next.done", "observation.state", "action"}
     missing = required - set(frame_table.columns)
     if missing:
         errors.append(f"Missing parquet columns: {sorted(missing)}")
     if len(frame_table) != sum(expected_episode_lengths):
         errors.append("Parquet row count does not equal expected frame count")
+    if expected_gripper_sequences is not None and len(expected_gripper_sequences) != len(expected_episode_lengths):
+        errors.append("Expected gripper sequences do not match episode count")
     if not frame_table.empty:
         if frame_table["index"].tolist() != list(range(len(frame_table))):
             errors.append("Global frame index is not contiguous")
@@ -84,12 +129,38 @@ def validate_export_dataset(export_path, expected_episode_lengths):
             if group["next.done"].tolist() != [False] * (expected_length - 1) + [True]:
                 errors.append(f"Episode {ep_index} has invalid terminal flags")
             states, actions = group["observation.state"].tolist(), group["action"].tolist()
-            for idx in range(expected_length - 1):
-                if not np.allclose(actions[idx], states[idx + 1], atol=1e-5):
-                    errors.append(f"Episode {ep_index} action alignment failed at frame {idx}")
-                    break
-            if not np.allclose(actions[-1], states[-1], atol=1e-5):
-                errors.append(f"Episode {ep_index} terminal action alignment failed")
+            state_array = action_array = None
+            try:
+                state_array = np.asarray(states, dtype=np.float64)
+                action_array = np.asarray(actions, dtype=np.float64)
+                if state_array.ndim != 2 or action_array.shape != state_array.shape:
+                    errors.append(f"Episode {ep_index} state/action vector shapes do not match")
+                elif (
+                    (state_width is not None and state_array.shape[1] != state_width)
+                    or (action_width is not None and action_array.shape[1] != action_width)
+                ):
+                    errors.append(f"Episode {ep_index} state/action vector width differs from metadata")
+                elif not np.isfinite(state_array).all() or not np.isfinite(action_array).all():
+                    errors.append(f"Episode {ep_index} contains non-finite state/action values")
+                elif gripper_index is not None:
+                    if gripper_index >= state_array.shape[1]:
+                        errors.append(f"Episode {ep_index} gripper feature index exceeds vector width")
+                    else:
+                        state_gripper = state_array[:, gripper_index]
+                        if np.any((state_gripper < 0.0) | (state_gripper > 1.0)):
+                            errors.append(f"Episode {ep_index} gripper state is outside [0, 1]")
+                        if expected_gripper_sequences is not None and ep_index < len(expected_gripper_sequences):
+                            expected = np.asarray(expected_gripper_sequences[ep_index], dtype=np.float64)
+                            if expected.shape != (expected_length,) or not np.allclose(state_gripper, expected, atol=1e-5):
+                                errors.append(f"Episode {ep_index} exported gripper state differs from its source")
+            except (TypeError, ValueError) as exc:
+                errors.append(f"Episode {ep_index} has malformed state/action vectors: {exc}")
+            if state_array is not None and action_array is not None and state_array.ndim == 2 and action_array.shape == state_array.shape:
+                mismatch = np.flatnonzero(np.any(~np.isclose(action_array[:-1], state_array[1:], atol=1e-5), axis=1))
+                if len(mismatch):
+                    errors.append(f"Episode {ep_index} action alignment failed at frame {int(mismatch[0])}")
+                if expected_length and not np.allclose(action_array[-1], state_array[-1], atol=1e-5):
+                    errors.append(f"Episode {ep_index} terminal action alignment failed")
             video_path = os.path.join(export_path, "videos", "observation.images.phone", "chunk-000", f"episode_{ep_index:06d}.mp4")
             cap = cv2.VideoCapture(video_path)
             count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) if cap.isOpened() else 0
@@ -237,16 +308,26 @@ class LeRobotExporter:
             ee_poses[:, 0] = 0.24
             ee_poses[:, 2] = 0.20
 
-        # 2. Resolve Gripper States (Strictly normalized [0.0, 1.0] for LeRobot standard)
-        if gripper_states is not None and len(gripper_states) == num_frames:
-            grippers = np.asarray(gripper_states, dtype=np.float32)
+        # 2. Resolve the separate gripper channel to normalized aperture [0, 1].
+        if gripper_states is not None:
+            if len(gripper_states) != num_frames:
+                raise ValueError(f"Gripper state count {len(gripper_states)} does not match trajectory frame count {num_frames}")
+            grippers = normalize_gripper_values(gripper_states, ep.get("gripper_state_units"))
+        elif raw_joints is not None and len(raw_joints) == num_frames:
+            cached = np.asarray(raw_joints, dtype=np.float32)
+            expected_width = self.ik_solver.num_joints + 1
+            if cached.ndim != 2 or cached.shape != (num_frames, expected_width):
+                raise ValueError(f"Cached joint state shape must be ({num_frames}, {expected_width})")
+            joint_units = ep.get("joint_units") or []
+            cached_gripper_units = joint_units[-1] if joint_units else None
+            if cached_gripper_units:
+                grippers = normalize_gripper_values(cached[:, -1], cached_gripper_units)
+            else:
+                # Preserve legacy exports that had only a cached gripper column.
+                cached_gripper = cached[:, -1]
+                grippers = np.clip(cached_gripper / 100.0 if np.max(cached_gripper) > 1.0 + 1e-3 else cached_gripper, 0.0, 1.0)
         else:
-            grippers = np.full((num_frames,), 1.0, dtype=np.float32)
-
-        if np.max(grippers) > 1.0 + 1e-3:
-            grippers = np.clip(grippers / 100.0, 0.0, 1.0)
-        else:
-            grippers = np.clip(grippers, 0.0, 1.0)
+            grippers = np.ones((num_frames,), dtype=np.float32)
 
         # 3. Automatic Feasible Workspace Trimming
         trim_info = {"f_start": 0, "f_end": orig_num_frames, "orig_frames": orig_num_frames, "is_trimmed": False}
@@ -269,9 +350,13 @@ class LeRobotExporter:
         # 4. Resolve Joint States
         if raw_joints is not None and len(raw_joints) == num_frames:
             joint_states = np.asarray(raw_joints, dtype=np.float32)
-            # Ensure last column (gripper) is normalized [0, 1]
-            if joint_states.shape[1] > 0 and np.max(joint_states[:, -1]) > 1.0 + 1e-3:
-                joint_states[:, -1] = np.clip(joint_states[:, -1] / 100.0, 0.0, 1.0)
+            expected_width = self.ik_solver.num_joints + 1
+            if joint_states.ndim != 2 or joint_states.shape != (num_frames, expected_width):
+                raise ValueError(f"Cached joint state shape must be ({num_frames}, {expected_width})")
+            if not np.isfinite(joint_states).all():
+                raise ValueError("Cached joint states contain non-finite values")
+            # The episode gripper channel is authoritative; cached joint states may be stale.
+            joint_states[:, -1] = grippers
         else:
             # Compute Inverse Kinematics for arm from Cartesian EE Poses
             computed_joints = []
@@ -475,6 +560,7 @@ class LeRobotExporter:
         all_ee_poses = []
         all_actions = []
         expected_episode_lengths = []
+        expected_gripper_sequences = []
 
         for ep_idx, ep in enumerate(episodes_data):
             task = ep.get('task', 'reach to object')
@@ -492,6 +578,7 @@ class LeRobotExporter:
             all_ee_poses.append(ee_poses)
             all_actions.append(actions)
             expected_episode_lengths.append(num_frames)
+            expected_gripper_sequences.append(joint_states[:, -1].astype(np.float32).tolist())
 
             # Transcode / copy video with synchronous trimming and approach frame padding
             src_video = ep.get('video_path', '')
@@ -633,6 +720,13 @@ class LeRobotExporter:
                 "task": {"dtype": "string", "shape": [1]}
             }
         }
+        info["gripper_semantics"] = {
+            "feature_name": "gripper",
+            "units": "normalized_aperture",
+            "closed": 0.0,
+            "open": 1.0,
+            "source": "episode.gripper_states; cached joint-state fallback when absent",
+        }
         if trajectory_smoothing is not None:
             info["trajectory_smoothing"] = trajectory_smoothing
         if is_urdf_chain:
@@ -649,7 +743,7 @@ class LeRobotExporter:
         with open(os.path.join(meta_dir, "info.json"), "w") as f:
             json.dump(info, f, indent=2)
 
-        validate_export_dataset(export_path, expected_episode_lengths)
+        validate_export_dataset(export_path, expected_episode_lengths, expected_gripper_sequences)
         print(f"[OK] Successfully exported LeRobot dataset ({len(episodes_data)} episodes, {global_frame_idx} frames) to: {export_path}")
         return export_path
 

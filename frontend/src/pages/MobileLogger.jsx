@@ -13,7 +13,6 @@ import {
   Maximize2,
   Minimize2,
   RotateCw,
-  Hand,
   UploadCloud,
   Scan
 } from 'lucide-react';
@@ -72,8 +71,8 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     });
   };
 
-  // 1-Hand Gripper State & Telemetry Logging
-  const [gripperOpen, setGripperOpen] = useState(true); // true = 100% open, false = 0% closed
+  // Manual fallback telemetry; measured ArUco jaw distance supersedes it when available.
+  const [gripperPercent, setGripperPercent] = useState(100);
   const gripperValRef = useRef(1.0);
   const gripperDataRef = useRef([]);
 
@@ -367,16 +366,11 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     return () => clearInterval(interval);
   };
 
-  const toggleGripper = () => {
-    const nextVal = !gripperOpen;
-    setGripperOpen(nextVal);
-    const numVal = nextVal ? 1.0 : 0.0;
+  const handleGripperChange = (event) => {
+    const percent = Number(event.target.value);
+    const numVal = percent / 100.0;
+    setGripperPercent(percent);
     gripperValRef.current = numVal;
-
-    // Haptic feedback if available on mobile
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
-      try { navigator.vibrate(35); } catch (_) {}
-    }
 
     if (isRecording) {
       const nowEpoch = performance.timeOrigin + performance.now();
@@ -839,26 +833,24 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
 
           {/* RIGHT EDGE: THUMB ERGONOMIC STRIP (GRIPPER + CIRCULAR SHUTTER) */}
           <div className="w-28 h-full flex flex-col justify-center items-center gap-4 py-2 pointer-events-auto select-none">
-            {/* Thumb Gripper Toggle Button (1-Handed Manipulation) */}
-            <button
-              onClick={toggleGripper}
-              className={`w-22 py-1.5 px-2 rounded-xl border flex flex-col items-center justify-center transition-all active:scale-95 shadow-lg ${
-                gripperOpen
-                  ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 shadow-emerald-500/15'
-                  : 'bg-amber-500/20 border-amber-400 text-amber-300 shadow-amber-500/15'
-              }`}
-              title="Toggle Gripper Open / Closed"
-            >
-              <div className="flex items-center gap-1.5">
-                <Hand className={`w-3.5 h-3.5 ${gripperOpen ? 'text-emerald-400' : 'text-amber-400'}`} />
-                <span className="text-[10px] font-extrabold tracking-wider">
-                  {gripperOpen ? 'OPEN' : 'CLOSED'}
-                </span>
-              </div>
-              <span className="text-[8px] font-mono opacity-80">
-                {gripperOpen ? '100% GRIP' : '0% GRIP'}
-              </span>
-            </button>
+            <div className="w-24 rounded-xl border border-neutral-700 bg-black/70 px-2 py-2 text-center">
+              <label htmlFor="landscape-gripper-range" className="block text-[9px] font-bold tracking-wider text-neutral-200">
+                GRIPPER · {gripperPercent}%
+              </label>
+              <input
+                id="landscape-gripper-range"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={gripperPercent}
+                onChange={handleGripperChange}
+                aria-label="Manual gripper opening percentage"
+                aria-valuetext={`${gripperPercent}% open`}
+                className="w-full accent-emerald-400 touch-pan-x"
+              />
+              <span className="block text-[7px] font-mono text-neutral-400">ArUco distance preferred</span>
+            </div>
 
             {/* Large 76px Circular Shutter Button Under Right Thumb */}
             <button
@@ -995,23 +987,27 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
 
           {/* Bottom Portrait Shutter Bar */}
           <div className="pb-6 flex flex-col items-center gap-3 pointer-events-auto">
-            {/* Controls: Gripper Toggle + Circular Shutter */}
+            {/* Controls: Continuous gripper fallback + circular shutter */}
             <div className="flex items-center gap-4">
-              <button
-                onClick={toggleGripper}
-                className={`px-3 py-2 rounded-xl border flex items-center gap-1.5 transition-all active:scale-95 shadow-lg ${
-                  gripperOpen
-                    ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 shadow-emerald-500/20'
-                    : 'bg-amber-500/20 border-amber-400 text-amber-300 shadow-amber-500/20'
-                }`}
-                title="Toggle Gripper"
-              >
-                <Hand className={`w-4 h-4 ${gripperOpen ? 'text-emerald-400' : 'text-amber-400'}`} />
-                <div className="flex flex-col text-left leading-tight">
-                  <span className="text-[10px] font-extrabold">{gripperOpen ? 'OPEN' : 'CLOSED'}</span>
-                  <span className="text-[8px] font-mono opacity-80">{gripperOpen ? '100%' : '0%'}</span>
-                </div>
-              </button>
+              <div className="w-44 rounded-xl border border-neutral-700 bg-black/70 px-3 py-2">
+                <label htmlFor="portrait-gripper-range" className="mb-1 flex justify-between text-[9px] font-bold tracking-wider text-neutral-200">
+                  <span>GRIPPER</span>
+                  <span>{gripperPercent}% OPEN</span>
+                </label>
+                <input
+                  id="portrait-gripper-range"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={gripperPercent}
+                  onChange={handleGripperChange}
+                  aria-label="Manual gripper opening percentage"
+                  aria-valuetext={`${gripperPercent}% open`}
+                  className="w-full accent-emerald-400 touch-pan-x"
+                />
+                <span className="block text-[8px] font-mono text-neutral-400">ArUco jaw distance is used when detected</span>
+              </div>
 
               {/* Circular Shutter Button */}
               <button

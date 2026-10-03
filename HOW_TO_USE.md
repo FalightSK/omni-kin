@@ -52,7 +52,7 @@ flowchart TB
 
 ### Optional: Print & Attach Gripper Jaw Markers (Tags 2 & 3 · 22 mm)
 
-To automatically record physical gripper open/close state without touching your phone screen:
+To automatically record continuous gripper opening percentage from the physical jaw spacing:
 1. Open **`http://localhost:8000/api/marker/print_gripper`** in your browser (or click **"Print 22mm Markers"** in the Dev Vision Monitor).
 2. Print at **Scale: 100% (Actual Size)** on standard A4 paper.
 3. Verify that each black square is exactly **22.0 mm (2.2 cm)** using a physical ruler or caliper.
@@ -210,7 +210,7 @@ flowchart TD
 4. When ready to perform the manipulation task:
    - Tap the red **"START RECORDING"** button.
    - Move your hand smoothly through the motion path (e.g. reaching down, picking up a pen or cup, moving it across the table, and placing it down).
-   - If using gripper states, toggle the gripper button to record open/close events.
+   - Tag 2 and Tag 3 record the gripper opening percentage from their measured distance. Use the phone's percentage slider only when the jaw markers are unavailable.
 5. Tap **"STOP RECORDING"**.
 6. The phone automatically uploads the video and IMU telemetry to the server. The server processes the 8-point PnP and 12-state EKF fusion, and the new episode appears on your desktop dashboard in under 3 seconds!
 

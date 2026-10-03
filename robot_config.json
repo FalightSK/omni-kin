@@ -34,11 +34,9 @@
     "enabled": true,
     "tag_id_a": 2,
     "tag_id_b": 3,
-    "marker_size_mm": 22,
-    "open_distance_mm": 60,
-    "close_distance_mm": 28
+    "marker_size_mm": 22
   },
-  "reach_angle_deg": -90.27130147116033,
+  "reach_angle_deg": -90.25017892955425,
   "reach_angle_rad": -1.5751627728347333,
   "custom_urdf_enabled": false
 }
