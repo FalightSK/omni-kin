@@ -60,7 +60,7 @@ To automatically record continuous gripper opening percentage from the physical 
    - Tape **Tag 2** to the left gripper jaw (Jaw A).
    - Tape **Tag 3** to the right gripper jaw (Jaw B).
    - Face them forward towards the phone camera.
-5. **Zero-Failure Guarantee**: If these markers are missing, out of view, or occluded, recording will **never fail** and will safely default the gripper to **Open (100%)**.
+5. **Marker loss:** after processing, missing jaw detections hold the last detected opening; frames before the first detection use that first opening. If no pair is detected in the entire recording, the recorded manual percentage is used when available, otherwise 100% open. The largest detected clear jaw gap in each recording defines its 100% opening. See the [export data guide](docs/LEROBOT_EXPORT.md) for the calculation and limitations.
 
 ---
 
@@ -197,7 +197,7 @@ flowchart TD
         subgraph BottomBar["Control Actions"]
             direction LR
             Rec["🔴 START / STOP RECORDING"]
-            Grip["🤏 Toggle Gripper State"]
+            Grip["🤏 Manual Gripper Opening Slider"]
         end
 
         TopBar --> View --> BottomBar
@@ -279,56 +279,20 @@ Before exporting, choose how demonstrations should be structured:
 
 ## 📦 Step 8: Export LeRobot Dataset
 
-1. In the episode list on the right, check the boxes for the episodes you want to include in your dataset.
-2. Enter your dataset name (e.g., `drawer_opening_v1`).
-3. Select your **Trajectory Mode** (`free_form` or `initial_aware`).
-4. Click **"📦 Export LeRobot Dataset"**.
+1. Adjust trajectory smoothing in the dashboard, then open **"📦 Export LeRobot"** in the top bar.
+2. Select **Trajectory Mode** (`free_form` or `initial_aware`) and the auto-trim option.
+3. Click **"Export LeRobot Dataset"**. The export includes all processed episodes currently loaded by the server.
+4. Open the new `lerobot_exports/mobile_aruco_3d_trajectories_<timestamp>/` folder and read its `README.md` and `validation_report.json`.
 
-The exporter generates the official dataset folder at:
-```
-lerobot_exports/drawer_opening_v1/
-```
+The gripper is included in both `observation.state` and `action` in the Parquet file. Locate it by the `"gripper"` entry in `meta/info.json` feature names: **0.0 = closed, 1.0 = open**. There is no separate gripper column. Actions target the next frame, with the terminal action copying the terminal state. Existing exports are snapshots; create a fresh one after recalculation.
 
-You can verify the exported dataset directly using Python:
-
-```python
-import pyarrow.parquet as pq
-import json
-
-# 1. Inspect tabular data
-table = pq.read_table("lerobot_exports/drawer_opening_v1/data/chunk-000/file-000.parquet")
-print(f"Total Frames: {len(table)}")
-print(f"Columns: {table.column_names}")
-
-# 2. Inspect metadata
-with open("lerobot_exports/drawer_opening_v1/meta/info.json") as f:
-    info = json.load(f)
-print(f"Robot Name: {info['robot_name']}")
-print(f"FPS: {info['fps']}")
-print(f"Joint Names: {info['features']['observation.state']['names']}")
-```
+The [export data guide](docs/LEROBOT_EXPORT.md) describes every column, joint units, marker opening and loss behavior, frame/video alignment, and provides runnable Python examples for reading opening percentages and images.
 
 ---
 
 ## 🚀 Step 9: Train Policies with Hugging Face LeRobot
 
-Install the official LeRobot repository and train an Action Chunking Transformer (ACT) or Diffusion Policy directly on your exported dataset:
-
-```bash
-# Clone official LeRobot library
-git clone https://github.com/huggingface/lerobot.git
-cd lerobot
-pip install -e .
-
-# Train an ACT policy on your dataset
-python lerobot/scripts/train.py \
-    --dataset_path ../mobile_dataset_collector/lerobot_exports/drawer_opening_v1 \
-    --policy act \
-    --env so100 \
-    --batch_size 16 \
-    --num_workers 4 \
-    --training_steps 100000
-```
+OmniKin uses LeRobot feature names with its own Parquet/MP4 layout. Import these frames using the target LeRobot release's dataset writer before official training; do not rely on the export's legacy version label for loader compatibility. Follow the [import workflow in the data guide](docs/LEROBOT_EXPORT.md#using-the-official-lerobot-library), then validate with the installed release and use its training instructions.
 
 ---
 

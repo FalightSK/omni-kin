@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
-import { X, QrCode, Copy, Check, ExternalLink, ShieldCheck, Smartphone, AlertTriangle, RefreshCw } from 'lucide-react';
+import { X, Copy, Check, ExternalLink, ShieldCheck, Smartphone, AlertTriangle, RefreshCw } from 'lucide-react';
 
 export default function ConnectPhoneModal({ isOpen, onClose }) {
   const [serverInfo, setServerInfo] = useState(null);

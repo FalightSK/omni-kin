@@ -129,18 +129,18 @@ def test_five_axis_ik_tracks_tcp_position_with_an_unreachable_orientation_and_ra
     assert np.max(max_step_deg) <= 4.01  # 120 deg/s at 30 FPS
 
 
-def test_omni_fingertip_length_and_roll_are_urdf_rigid_transforms():
+def test_omni_body_tcp_and_roll_are_urdf_rigid_transforms():
     solver = get_robot_solver("so_arm101_omni_kin", q3_safe_max_deg=45.0)
-    assert solver.tcp_link == "gripper_tcp"
+    assert solver.tcp_link == "gripper_frame_link"
     assert solver.chain_joints[-1]["type"] == "fixed"
     assert len(solver.forward_kinematics_chain(np.zeros(5))) == 7
 
-    arm = solver.state_to_joint_values([20, -80, 100, -30, 0])
+    arm = solver.state_to_joint_values([20, -80, 80, -30, 0])
     rolled = arm.copy()
     rolled[-1] = np.radians(20)
     before = solver.forward_kinematics_chain(arm)
     after = solver.forward_kinematics_chain(rolled)
-    assert np.isclose(np.linalg.norm(before[-1] - before[-3]), 0.110, atol=1e-6)
+    assert np.isclose(np.linalg.norm(before[-1] - before[-2]), 0.049882, atol=1e-6)
     assert np.allclose(before[-1], after[-1], atol=1e-7)
 
     target = solver.forward_kinematics(rolled)
@@ -214,6 +214,8 @@ def test_smoothing_obeys_urdf_velocity_limits_in_native_joint_units():
     solver = SerialURDFKinematics(xml, "base", "slider")
     states = np.tile([90.0, 0.1, 0.5], (8, 1))
     smoothed = solver.smooth_joint_trajectory(states, fps=100)
+    assert smoothed.shape == states.shape
+    assert np.allclose(smoothed[:, -1], states[:, -1])
     assert np.max(np.abs(np.diff(smoothed[:, 0]))) <= np.degrees(0.5 / 100) + 1e-5
     assert np.max(np.abs(np.diff(smoothed[:, 1]))) <= 0.02 / 100 + 1e-7
     assert np.all(smoothed[:, 0] <= np.degrees(1.0) + 1e-6)

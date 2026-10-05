@@ -1,8 +1,8 @@
 """
 lerobot_exporter.py
-Exports processed mobile robot trajectories & videos into the official Hugging Face LeRobot format.
-Supports both SO-100 joint states and Cartesian end-effector 6-DoF poses, automatic video transcoding
-to standard MP4, and generates all required LeRobot v2.0/v2.1 metadata (info.json, stats.json, tasks.jsonl).
+Exports processed robot trajectories and videos with LeRobot feature names.
+Writes a project-specific Parquet/MP4 layout with joint, gripper, pose and task metadata.
+See docs/LEROBOT_EXPORT.md for semantics and official-library import requirements.
 """
 
 import os
@@ -177,8 +177,7 @@ def validate_export_dataset(export_path, expected_episode_lengths, expected_grip
 
 class LeRobotExporter:
     """
-    Exports captured 3D multimodal trajectories into official Hugging Face LeRobot format.
-    Ensures standard structure:
+    Exports captured trajectories using this project's documented structure:
       data/chunk-000/file-000.parquet
       videos/observation.images.phone/chunk-000/episode_000000.mp4
       meta/info.json
@@ -521,7 +520,7 @@ class LeRobotExporter:
         use_timestamp=True
     ):
         """
-        Exports episodes_data into the official Hugging Face LeRobot dataset schema.
+        Exports episodes_data into the documented OmniKin Parquet/MP4 layout.
         Supports both 'free_form' (pretraining) and 'initial_aware' (fine-tuning) modes,
         with optional auto_trim of out-of-reach boundary frames.
         Creates a timestamped versioned folder when use_timestamp=True to support versioning.
@@ -621,7 +620,19 @@ class LeRobotExporter:
         # 1. Save Tabular Dataset (data/chunk-000/file-000.parquet)
         df_data = pd.DataFrame(all_rows)
         parquet_file = os.path.join(data_dir, "file-000.parquet")
-        df_data.to_parquet(parquet_file, index=False)
+        frame_schema = pa.schema([
+            ("index", pa.int64()),
+            ("episode_index", pa.int64()),
+            ("frame_index", pa.int64()),
+            ("timestamp", pa.float32()),
+            ("next.done", pa.bool_()),
+            ("task_index", pa.int64()),
+            ("task", pa.string()),
+            ("observation.state", pa.list_(pa.float32())),
+            ("observation.ee_pose", pa.list_(pa.float32())),
+            ("action", pa.list_(pa.float32())),
+        ])
+        pq.write_table(pa.Table.from_pandas(df_data, schema=frame_schema, preserve_index=False), parquet_file)
 
         # 2. Save Episode Metadata (meta/episodes/file-000.parquet & meta/episodes.jsonl)
         df_episodes = pd.DataFrame(episode_meta_rows)
@@ -743,19 +754,10 @@ class LeRobotExporter:
         with open(os.path.join(meta_dir, "info.json"), "w") as f:
             json.dump(info, f, indent=2)
 
+        shutil.copyfile(
+            os.path.join(os.path.dirname(__file__), "docs", "LEROBOT_EXPORT.md"),
+            os.path.join(export_path, "README.md"),
+        )
         validate_export_dataset(export_path, expected_episode_lengths, expected_gripper_sequences)
         print(f"[OK] Successfully exported LeRobot dataset ({len(episodes_data)} episodes, {global_frame_idx} frames) to: {export_path}")
         return export_path
-
-
-if __name__ == "__main__":
-    exporter = LeRobotExporter(output_dir="sample_export")
-    dummy_ep = [{
-        'episode_index': 0,
-        'task': 'reach to apple',
-        'video_path': 'non_existent.mp4',
-        'poses': [[0.15, 0.05, 0.20, 0, 0, 0]] * 30,
-        'gripper_states': [100.0] * 30,
-        'timestamps': np.linspace(0, 1, 30).tolist()
-    }]
-    exporter.export_dataset(dummy_ep)

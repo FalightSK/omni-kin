@@ -522,11 +522,6 @@ class SerialURDFKinematics:
         data[:, :self.num_joints] = np.vstack([self.joint_values_to_state(row) for row in arm])
         return data.astype(np.asarray(joint_trajectory).dtype, copy=False)
 
-    def update_camera_extrinsics(self, **kwargs):
-        # The URDF already defines TCP geometry; phone/camera calibration is a
-        # separate transform and must never extend or alter this kinematic chain.
-        return None
-
 
 # Subclass specializations backed by URDF descriptions
 class SO101OmniKinKinematics(SerialURDFKinematics):
@@ -811,22 +806,6 @@ class WorkspaceCalibrator:
         )
         return self.get_config()
 
-    def get_recommended_layout(self):
-        """
-        Returns and applies standard recommended tabletop workspace layout:
-        - ArUco Tag A (10cm) at Origin (0,0,0)
-        - ArUco Tag B (5cm) at (+15cm, 0, 0)
-        - Robot Base at (X=+0.038m, Y=-0.406m, Z=0.0m, Yaw=90.0 deg)
-          facing forward toward the tags, placed just beyond reach radius (40.8cm > 38.5cm max reach).
-        """
-        self.update_config(
-            offset_x=0.038,
-            offset_y=-0.406,
-            offset_z=0.00,
-            yaw_deg=90.0
-        )
-        return self.get_config()
-
 
 class CameraGripperCalibrator:
     """
@@ -842,35 +821,6 @@ class CameraGripperCalibrator:
       yaw_deg    : Yaw alignment angle (default: 0.0 deg)
       enabled    : If False, passes poses through unchanged (default: True)
     """
-
-    @staticmethod
-    def compute_tilted_angle(forward_cm, height_cm):
-        """
-        Computes the angle (in degrees) of the line from Gripper TCP to Camera relative to horizontal X-axis:
-        theta = arctan2(height_cm, forward_cm)
-        """
-        if abs(forward_cm) <= 1e-6:
-            return 90.0 if height_cm > 0 else 0.0
-        return float(np.degrees(np.arctan2(height_cm, forward_cm)))
-
-    @staticmethod
-    def compute_height_from_angle(forward_cm, angle_deg):
-        """
-        Computes the vertical height distance from forward distance and tilt angle:
-        height_cm = forward_cm * tan(angle_deg)
-        """
-        return float(forward_cm * np.tan(np.radians(angle_deg)))
-
-    @staticmethod
-    def compute_forward_from_angle(height_cm, angle_deg):
-        """
-        Computes the forward distance from vertical height and tilt angle:
-        forward_cm = height_cm / tan(angle_deg)
-        """
-        tan_val = np.tan(np.radians(angle_deg))
-        if abs(tan_val) < 1e-6:
-            return 0.0
-        return float(height_cm / tan_val)
 
     def __init__(
         self,
@@ -1052,12 +1002,6 @@ class TrajectoryPlanner:
         """
         tau = np.clip(tau, 0.0, 1.0)
         return 10.0 * (tau**3) - 15.0 * (tau**4) + 6.0 * (tau**5)
-
-    @staticmethod
-    def shortest_angle_diff(th_target, th_source):
-        """Computes shortest angular difference wrapped to [-pi, pi]."""
-        diff = th_target - th_source
-        return (diff + np.pi) % (2 * np.pi) - np.pi
 
     def __init__(self, solver=None, workspace_calibrator=None, camera_gripper_calibrator=None):
         self.solver = solver or get_robot_solver()

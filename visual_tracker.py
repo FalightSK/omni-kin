@@ -14,9 +14,10 @@ import cv2
 import numpy as np
 import scipy.signal
 from scipy.spatial.transform import Rotation as R
-
-
-R_CAM_TO_PHONE = np.diag([1.0, -1.0, -1.0])
+from robot_kinematics import (
+    rotation_matrix_to_trajectory_euler,
+    trajectory_euler_to_rotation_matrix,
+)
 
 
 def gripper_opening_percent(open_distance_mm, max_open_distance_mm):
@@ -59,38 +60,6 @@ def resolve_gripper_opening(states, marker_size_mm=22.0):
         "max_open_distance_mm": round(max_open_mm, 1),
         "formula": "clamp(opening_distance_mm / max_open_distance_mm * 100, 0, 100)",
     }
-
-
-def rotation_matrix_to_trajectory_euler(R_c_to_w):
-    """
-    Computes [roll, pitch, yaw] in radians from camera-to-world rotation matrix:
-      - 0° pitch = phone held level over workspace table (camera looking down at table)
-      - positive pitch = tilted forward
-      - negative pitch = tilted backward
-      - roll = lateral tilt left/right
-      - yaw = azimuthal heading around table normal (Z)
-    At nominal recording orientation (looking straight down at table), euler is [0, 0, 0].
-    """
-    R_p2w = R_c_to_w @ R_CAM_TO_PHONE
-    r = R.from_matrix(R_p2w)
-    ax, ay, az = r.as_euler('xyz', degrees=False)
-    # ax: tilt forward/backward (pitch)
-    # ay: tilt left/right (roll)
-    # az: rotation around normal (yaw)
-    pitch = float(ax)
-    roll = float(ay)
-    yaw = float(az)
-    return np.array([roll, pitch, yaw], dtype=np.float64)
-
-
-def trajectory_euler_to_rotation_matrix(euler):
-    """
-    Reconstructs camera-to-world rotation matrix R_c_to_w from [roll, pitch, yaw].
-    """
-    roll, pitch, yaw = euler
-    r = R.from_euler('xyz', [pitch, roll, yaw])
-    R_p2w = r.as_matrix()
-    return R_p2w @ R_CAM_TO_PHONE
 
 
 def phone_euler_to_rotation_matrix(euler):
@@ -150,12 +119,6 @@ class VisualInertialEKF:
         self.Q[3:6, 3:6] = np.eye(3) * self.q_vel
         self.Q[6:9, 6:9] = np.eye(3) * self.q_gyro
         self.Q[9:12, 9:12] = np.eye(3) * self.q_bias
-
-    def set_params(self, **kwargs):
-        for k, v in kwargs.items():
-            if hasattr(self, k):
-                setattr(self, k, float(v))
-        self._rebuild_q()
 
     def reset(self, initial_position=None, initial_euler=None):
         self.x = np.zeros(self.state_dim, dtype=np.float64)
@@ -2644,33 +2607,6 @@ class VisualInertialTracker:
 
         return final_poses
 
-    def reprocess_episode_trajectory(
-        self,
-        video_path,
-        imu_samples,
-        fps=30.0,
-        output_dev_video_path=None,
-        output_canny_video_path=None,
-        return_dev_info=False,
-        smooth=True,
-        smooth_method="savgol",
-        smooth_window_ms=250
-    ):
-        """
-        Re-filters an existing video and IMU recording using the latest EKF parameters.
-        """
-        return self.process_video_and_imu(
-            video_path,
-            imu_samples,
-            fps=fps,
-            output_dev_video_path=output_dev_video_path,
-            output_canny_video_path=output_canny_video_path,
-            return_dev_info=return_dev_info,
-            smooth=smooth,
-            smooth_method=smooth_method,
-            smooth_window_ms=smooth_window_ms
-        )
-
     def generate_synthetic_anchored_trajectory(self, num_frames=90, shape="circle"):
         """
         Generates a pristine 3D geometric shape (e.g. 3D circle / arch)
@@ -2695,11 +2631,3 @@ class VisualInertialTracker:
         yaw = 0.08 * np.sin(t)
 
         return np.column_stack([x, y, z, roll, pitch, yaw])
-
-
-if __name__ == "__main__":
-    tracker = VisualInertialTracker()
-    print("Dual-ArUco Rigid Board Tracker initialized:")
-    print("Tag A 3D Corners:\n", tracker.tag_a_3d)
-    print("Tag B 3D Corners:\n", tracker.tag_b_3d)
-    print("Board 8-point 3D Points:\n", tracker.board_8p_3d)

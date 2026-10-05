@@ -3,14 +3,11 @@ test_robot_kinematics.py
 Unit tests for URDF-chain kinematics and WorkspaceCalibrator
 """
 
-import sys
 import numpy as np
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
+import pytest
 
 from robot_kinematics import (
     SO101OmniKinKinematics,
-    SO100Kinematics,
     SO101Kinematics,
     WorkspaceCalibrator,
     CameraGripperCalibrator,
@@ -29,8 +26,8 @@ def test_urdf_chain_specs():
     default_solver = get_robot_solver()
     assert isinstance(default_solver, SO101OmniKinKinematics)
     assert isinstance(default_solver, SerialURDFKinematics)
-    assert default_solver.base_link == 'base'
-    assert default_solver.tcp_link == 'gripper_tcp'
+    assert default_solver.base_link == 'base_link'
+    assert default_solver.tcp_link == 'gripper_frame_link'
     assert len(default_solver.joint_names) == 5
     assert all(kind == 'revolute' for kind in default_solver.joint_types)
     assert 'dh_table' not in ROBOT_PRESETS['so_arm101_omni_kin']
@@ -52,23 +49,9 @@ def test_urdf_chain_specs():
     assert default_specs['reach_meters'] >= 0.38
     print('[PASS] URDF preset chains and robot specs validated!')
 
-def test_omnikin_forward_inverse_consistency():
-    print('\n=== Test 2: SO-ARM101-OMNI-KIN (Default) FK/IK Consistency ===')
-    _assert_preset_roundtrip(get_robot_solver())
-    print("[PASS] SO-ARM101-OMNI-KIN FK/IK consistency verified!")
-
-def test_so101_forward_inverse_consistency():
-    print('\n=== Test 2: SO-101 FK/IK Consistency ===')
-    _assert_preset_roundtrip(SO101Kinematics())
-    print("[PASS] SO-101 FK/IK consistency verified!")
-
-def test_so100_forward_inverse_consistency():
-    print('\n=== Test 3: SO-100 FK/IK Consistency ===')
-    _assert_preset_roundtrip(SO100Kinematics())
-    print('[PASS] SO-100 FK/IK consistency verified!')
-
-
-def _assert_preset_roundtrip(solver):
+@pytest.mark.parametrize("robot_type", ["so_arm101_omni_kin", "so101", "so100"])
+def test_preset_forward_inverse_consistency(robot_type):
+    solver = get_robot_solver(robot_type)
     state = np.array([10.0, -35.0, 45.0, -15.0, 10.0])
     target = solver.forward_kinematics(solver.state_to_joint_values(state))
     result = solver.solve_feasible_ik(target, gripper_state=60.0, prev_joints=np.r_[state, 60.0])
@@ -144,12 +127,6 @@ def test_feasible_ik_and_auto_align():
 
 def test_camera_gripper_calibrator():
     print('\n=== Test 6: 6-DoF Camera-to-Gripper (TCP) Extrinsic Calibrator ===')
-    # CAD parameters from user drawing (128.084mm forward, 109.075mm height -> 40.4°):
-    theta_calc = CameraGripperCalibrator.compute_tilted_angle(12.8, 10.9)
-    assert np.isclose(theta_calc, 40.42, atol=0.05), f"Expected ~40.4 deg, got {theta_calc}"
-    h_calc = CameraGripperCalibrator.compute_height_from_angle(12.8, 40.4)
-    assert np.isclose(h_calc, 10.89, atol=0.05), f"Expected ~10.9 cm, got {h_calc}"
-    print(f"  CAD Tilted Angle Calculation: (12.8cm, 10.9cm) -> {theta_calc:.2f}° vs X-axis [OK]")
 
     calib = CameraGripperCalibrator(
         forward_cm=12.8,
@@ -226,22 +203,6 @@ def test_multi_robot_smoothing():
     assert np.max(np.abs(np.diff(bounded_q[:, :5], axis=0))) <= 4.0 + 1e-5, 'Final trajectory must obey 120 deg/s slew cap'
     print(f'  OMNI-KIN Joint Smoothing Passed: Jerk std reduced from {np.std(raw_wrist_jerk):.3f} to {np.std(smooth_wrist_jerk):.3f} [OK]')
 
-    # 3. Six-joint chains retain their width and obey URDF velocity limits.
-    links = ''.join(f'<link name="link{i}"/>' for i in range(7))
-    joints = ''.join(
-        f'<joint name="joint{i}" type="revolute"><parent link="link{i}"/><child link="link{i + 1}"/>'
-        '<origin xyz="0.1 0 0"/><axis xyz="0 0 1"/><limit lower="-1.5" upper="1.5" velocity="0.4"/></joint>'
-        for i in range(6)
-    )
-    solver_6dof = SerialURDFKinematics(f'<robot name="six_dof">{links}{joints}</robot>', 'link0', 'link6')
-    traj_6dof = np.zeros((T, 7))
-    traj_6dof[T // 2:, 4] = 60.0
-    traj_6dof[:, -1] = 0.5
-    smoothed_6dof = solver_6dof.smooth_joint_trajectory(traj_6dof, fps=30.0)
-    assert smoothed_6dof.shape == traj_6dof.shape
-    assert np.allclose(smoothed_6dof[:, -1], 0.5)
-    assert np.max(np.abs(np.diff(smoothed_6dof[:, 4]))) <= np.degrees(0.4 / 30.0) + 1e-5
-    print('  Six-joint URDF trajectory shape and velocity limits passed [OK]')
     print('[PASS] Universal Soft-Barrier & Multi-Robot Joint Smoothing verified!')
 
 
@@ -263,12 +224,6 @@ def test_wrist_roll_regularization_and_gripper_extrinsics():
     assert abs(roll_q4_low) <= 35.5, f'Wrist roll exceeded 35 deg: got {roll_q4_low:.2f} deg'
     print(f'  Target roll=-75.0° -> Solved q4={roll_q4_low:.2f}° (within preset bound) [OK]')
 
-    # Camera calibration remains separate and cannot alter the URDF-defined TCP.
-    before = solver.forward_kinematics(np.zeros(solver.num_joints))
-    solver.update_camera_extrinsics(forward_cm=15.0)
-    after = solver.forward_kinematics(np.zeros(solver.num_joints))
-    assert np.allclose(after, before)
-    print('  Camera calibration does not alter the URDF-defined TCP [OK]')
 
     # 5. Trajectory smoother bounds wild roll jumps
     wild_traj = np.zeros((30, 6))

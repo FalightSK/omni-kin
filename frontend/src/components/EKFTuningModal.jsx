@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Sliders, X, RefreshCw, CheckCircle2, Zap, Target, Scale } from 'lucide-react';
+import { Sliders, X, RefreshCw, Zap, Target, Scale } from 'lucide-react';
 
 export default function EKFTuningModal({ isOpen, onClose, activeEpisodeIndex, onReprocessComplete }) {
   const [params, setParams] = useState({

@@ -9,13 +9,11 @@ import {
   RefreshCw,
   Layers,
   Compass,
-  MoveUpRight,
   Bot,
   Columns,
   Rows,
   AppWindow,
   Maximize2,
-  Minimize2,
   Minus,
   Video,
   PanelRightClose,
@@ -23,19 +21,14 @@ import {
   GripHorizontal,
   GripVertical,
   Terminal,
-  Activity,
   Anchor,
   Sparkles,
   Zap,
-  ShieldCheck,
   CheckCircle2,
   HelpCircle,
-  ArrowRight,
   Eye,
   Info,
-  ChevronDown,
   ChevronUp,
-  UploadCloud,
   Edit3,
   Check,
   X,
@@ -92,8 +85,6 @@ export default function Dashboard({
   onRefreshEpisodes,
   onDeleteEpisode,
   onClearAllEpisodes,
-  onReprocessActive,
-  onUpdateEpisodePoses,
   onUpdateEpisodeTask,
   robotConfig,
   onUpdateRobotConfig,
@@ -131,7 +122,6 @@ export default function Dashboard({
 
   // Auto-calculated Approach Trajectory for Initial-Position Aware Mode
   const [approachData, setApproachData] = useState(null);
-  const [isApproachLoading, setIsApproachLoading] = useState(false);
 
   // A capture is fetched asynchronously.  Advance this once after its points
   // are committed so the imperative WebGL layer performs its initial draw.
@@ -155,12 +145,6 @@ export default function Dashboard({
   const devPanelRef = useRef(null);
   const scrollContainerRef = useRef(null);
 
-  const [overridePoses, setOverridePoses] = useState(null);
-  const [overrideEePoses, setOverrideEePoses] = useState(null);
-  const [overrideJointStates, setOverrideJointStates] = useState(null);
-  const [overrideRobotEePoses, setOverrideRobotEePoses] = useState(null);
-  const [overrideFkTablePoses, setOverrideFkTablePoses] = useState(null);
-  const [overrideFkCameraPoses, setOverrideFkCameraPoses] = useState(null);
   const [isRecalculatingTrajectory, setIsRecalculatingTrajectory] = useState(false);
   const [recalcSuccess, setRecalcSuccess] = useState(false);
 
@@ -265,14 +249,12 @@ export default function Dashboard({
   }, [onRefreshEpisodes]);
 
   const activeEp = episodes.find((e) => e.episode_index === selectedEpIdx) || episodes[0] || null;
-  const processedPoses = (overridePoses?.length ? overridePoses : null) || activeEp?.poses || [];
+  const processedPoses = activeEp?.poses || [];
   const rawPoses = activeEp?.raw_poses || [];
   const sourcePoses = smoothingMethod === 'raw' && isRenderablePoseArray(rawPoses)
     ? rawPoses
     : (isRenderablePoseArray(processedPoses) ? processedPoses : rawPoses);
-  const candidateEePoses = (overrideEePoses?.length ? overrideEePoses : null)
-    || activeEp?.ee_poses
-    || [];
+  const candidateEePoses = activeEp?.ee_poses || [];
   const sourceEePoses = isRenderablePoseArray(candidateEePoses) ? candidateEePoses : [];
   const poses = useMemo(
     () => filterPreviewPoses(sourcePoses, smoothingMethod, smoothingWindowMs, activeEp?.fps || 30),
@@ -288,10 +270,8 @@ export default function Dashboard({
     const frameId = requestAnimationFrame(() => setPreviewRevision((revision) => revision + 1));
     return () => cancelAnimationFrame(frameId);
   }, [previewSourceKey]);
-  const jointStates = overrideJointStates || activeEp?.joint_states || [];
-  const robotEePoses = overrideRobotEePoses || activeEp?.robot_ee_poses || [];
-  const fkTablePoses = overrideFkTablePoses || activeEp?.fk_table_poses || [];
-  const fkCameraPoses = overrideFkCameraPoses || activeEp?.fk_camera_poses || [];
+  const jointStates = activeEp?.joint_states || [];
+  const robotEePoses = activeEp?.robot_ee_poses || [];
   const totalFrames = activeEp?.num_frames || 0;
 
   // Dual Trajectory System Phase & Timeline Index Resolution
@@ -330,7 +310,6 @@ export default function Dashboard({
     }
 
     let isMounted = true;
-    setIsApproachLoading(true);
 
     fetch('/api/trajectory/approach_path', {
       method: 'POST',
@@ -348,15 +327,12 @@ export default function Dashboard({
       })
       .catch((err) => {
         console.error('Failed to fetch approach path:', err);
-      })
-      .finally(() => {
-        if (isMounted) setIsApproachLoading(false);
       });
 
     return () => {
       isMounted = false;
     };
-  }, [trajectoryMode, activeEp?.episode_id, robotConfig?.initial_position, overridePoses]);
+  }, [trajectoryMode, activeEp?.episode_id, robotConfig?.initial_position]);
 
   // Sync selectedEpIdx if activeEp resolved to a different episode
   useEffect(() => {
@@ -364,16 +340,6 @@ export default function Dashboard({
       setSelectedEpIdx(activeEp.episode_index);
     }
   }, [activeEp, selectedEpIdx, setSelectedEpIdx]);
-
-  // Reset override poses when switching active episode
-  useEffect(() => {
-    setOverridePoses(null);
-    setOverrideEePoses(null);
-    setOverrideJointStates(null);
-    setOverrideRobotEePoses(null);
-    setOverrideFkTablePoses(null);
-    setOverrideFkCameraPoses(null);
-  }, [activeEp?.episode_index]);
 
   // Ensure dev_video_url and canny_video_url are generated for the active episode only if Dev Mode is ON
   useEffect(() => {
@@ -475,7 +441,6 @@ export default function Dashboard({
   const currentCamZ = isApproachPhase
     ? (approachData?.aruco_cam_poses?.[approachFrameIndex]?.[2] || 0)
     : (currentPose[2] || 0);
-  const distCamToOrigin = Math.hypot(currentCamX, currentCamY, currentCamZ);
 
   // 🎯 True Gripper End-Effector / Tool Center Point (TCP) Coordinates
   const currentTcpX = currentEePose[0] || 0;
@@ -802,8 +767,6 @@ export default function Dashboard({
                 approachFrameIndex={approachFrameIndex}
                 jointStates={jointStates}
                 robotEePoses={robotEePoses}
-                fkTablePoses={fkTablePoses}
-                fkCameraPoses={fkCameraPoses}
                 linkPositions={activeEp?.link_positions || []}
                 reachAngleDeg={activeEp?.reach_angle_deg ?? activeRobotConfig?.reach_angle_deg}
               />
@@ -922,8 +885,6 @@ export default function Dashboard({
                 approachFrameIndex={approachFrameIndex}
                 jointStates={jointStates}
                 robotEePoses={robotEePoses}
-                fkTablePoses={fkTablePoses}
-                fkCameraPoses={fkCameraPoses}
                 linkPositions={activeEp?.link_positions || []}
                 reachAngleDeg={activeEp?.reach_angle_deg ?? activeRobotConfig?.reach_angle_deg}
               />
@@ -1276,11 +1237,6 @@ export default function Dashboard({
               isPlaying={isPlaying}
               isApproachPhase={isApproachPhase}
               onTogglePlay={() => setIsPlaying(!isPlaying)}
-              onSeekFrame={(idx) => {
-                setIsPlaying(false);
-                const frameOffset = isInitialAware ? approachFramesCount : 0;
-                setCombinedSliderIndex(frameOffset + idx);
-              }}
               onEnded={() => setIsPlaying(false)}
               onOpenEkfModal={onOpenEkfModal}
             />

@@ -9,17 +9,14 @@ import time
 import json
 import socket
 import shutil
-import io
 import uuid
 import secrets
 import hashlib
 import copy
 import numpy as np
 import cv2
-import asyncio
 import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
 # Set stdout/stderr to UTF-8
 if hasattr(sys.stdout, 'reconfigure'):
@@ -379,13 +376,6 @@ def sync_episode_kinematics(ep, calib=None, persist=True):
             q3_safe_max_deg=ROBOT_CONFIG.get("q3_safe_max_deg", 0.0),
             custom_urdf=ROBOT_CONFIG.get("custom_urdf") if use_custom else None, custom_urdf_base_link=ROBOT_CONFIG.get("custom_urdf_base_link") if use_custom else None, custom_urdf_tcp_link=ROBOT_CONFIG.get("custom_urdf_tcp_link") if use_custom else None,
         )
-        gripper_cfg = ROBOT_CONFIG.get("gripper_offset", {})
-        if hasattr(r_solver, "update_camera_extrinsics"):
-            r_solver.update_camera_extrinsics(
-                forward_cm=gripper_cfg.get("forward_cm"),
-                height_cm=gripper_cfg.get("height_cm"),
-                lateral_cm=gripper_cfg.get("lateral_cm")
-            )
         reach_rad = getattr(r_solver, "reach_angle_rad", 0.0)
         workspace_calibrator.reach_angle_rad = reach_rad
 
@@ -600,7 +590,7 @@ def _reprocess_episode_from_video(
     dev_path = os.path.join(ep_dir, "dev_visualization.mp4")
     canny_path = os.path.join(ep_dir, "canny_visualization.mp4")
 
-    poses, telemetry = tracker.reprocess_episode_trajectory(
+    poses, telemetry = tracker.process_video_and_imu(
         video_path,
         ep.get("imu_data", []),
         fps=fps,
@@ -3608,10 +3598,7 @@ async def get_mobile_qr(request: Request, host: str = None):
 
 if __name__ == "__main__":
     import uvicorn
-    import sys
-    import threading
     import logging
-    import copy
 
     class EndpointLogFilter(logging.Filter):
         """Filter out noisy polling endpoints (e.g. /api/processing/status) from uvicorn access logs."""

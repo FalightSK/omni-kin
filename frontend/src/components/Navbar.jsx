@@ -1,10 +1,9 @@
 import React from 'react';
-import { Sliders, Printer, ChevronDown, Zap, Package, Smartphone, LayoutDashboard, Bot, QrCode } from 'lucide-react';
+import { Printer, ChevronDown, Zap, Package, Smartphone, LayoutDashboard, Bot, QrCode } from 'lucide-react';
 
 export default function Navbar({
   currentView,
   setCurrentView,
-  onOpenEkfModal,
   onOpenRobotModal,
   onOpenConnectModal,
   onAddSample,

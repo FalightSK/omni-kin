@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d, Crosshair, Sparkles, CheckCircle2, AlertTriangle, Layers, Bot, Camera, Bookmark } from 'lucide-react';
+import { RotateCcw, Compass, ZoomIn, ZoomOut, Move3d, Sparkles, CheckCircle2, AlertTriangle, Layers, Camera, Bookmark } from 'lucide-react';
 
 const _up = new THREE.Vector3(0, 1, 0);
 const _dir = new THREE.Vector3();
@@ -154,8 +154,6 @@ export default function Viewport3D({
   isApproachPhase = false,
   approachFrameIndex = 0,
   robotEePoses = [],
-  fkTablePoses = [],
-  fkCameraPoses = [],
   linkPositions = [],
   reachAngleDeg = null
 }) {

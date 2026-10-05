@@ -6,16 +6,12 @@ import {
   RotateCcw,
   RotateCw,
   Crosshair,
-  Compass,
   Cpu,
   Move,
-  Info,
-  FileCode,
   Upload,
   Download,
   Copy,
   Sparkles,
-  AlertTriangle,
   ShieldCheck,
   ChevronDown,
   ChevronUp,
@@ -23,7 +19,7 @@ import {
   Save
 } from 'lucide-react';
 
-export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfigSaved, initialTab = 'offset' }) {
+export default function RobotSetupModal({ isOpen, onClose, onConfigSaved, initialTab = 'offset' }) {
   const [config, setConfig] = useState({
     robot_type: 'so_arm101_omni_kin',
     offset_x: 0.038,
@@ -978,7 +974,6 @@ export default function RobotSetupModal({ isOpen, onClose, robotConfig, onConfig
                   <div className="mt-2 bg-[#050505] rounded-xl border border-neutral-800 p-3 flex flex-col items-center">
                     {(() => {
                       const gCfg = config.gripper_offset || { forward_cm: 12.8, height_cm: 10.9, pitch_deg: 40.4 };
-                      const pitch = Number(gCfg.pitch_deg ?? 40.4);
                       const fwd = Number(gCfg.forward_cm ?? 12.8);
                       const hgt = Number(gCfg.height_cm ?? 10.9);
                       const mountX = 380;

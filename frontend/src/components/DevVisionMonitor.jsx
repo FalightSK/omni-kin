@@ -1,20 +1,12 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import {
   Video,
-  Layers,
   Activity,
-  Eye,
   Sparkles,
-  Maximize2,
-  Minimize2,
   Play,
-  Pause,
   Scan,
-  Cpu,
-  CheckCircle2,
   Box,
   Sliders,
-  RefreshCw,
   Printer
 } from 'lucide-react';
 
@@ -29,7 +21,6 @@ export default function DevVisionMonitor({
   isPlaying = false,
   isApproachPhase = false,
   onTogglePlay,
-  onSeekFrame,
   onEnded,
   onOpenEkfModal
 }) {
@@ -41,8 +32,8 @@ export default function DevVisionMonitor({
   // Vision view mode: 'dev' (ArUco + SLAM overlay), 'canny' (OpenCV Canny Edge View), 'raw' (Original Video)
   const [visionMode, setVisionMode] = useState('dev');
   const [useLiveOverlay, setUseLiveOverlay] = useState(false);
-  const [cannyThresholdLow, setCannyThresholdLow] = useState(50);
-  const [cannyThresholdHigh, setCannyThresholdHigh] = useState(150);
+  const cannyThresholdLow = 50;
+  const cannyThresholdHigh = 150;
   const [videoDims, setVideoDims] = useState(null);
   const [videoError, setVideoError] = useState(false);
 
@@ -114,7 +105,7 @@ export default function DevVisionMonitor({
   }, [currentFrameIndex, fps, totalFrames, isPlaying, isApproachPhase]);
 
   // Draw ArUco bounding boxes, corner points, tag name badges, and 3D coordinate frame axes
-  const drawBoundingBoxes = useCallback((ctx, width, height) => {
+  const drawBoundingBoxes = useCallback((ctx) => {
     const frameTelem = devTelemetry?.[currentFrameIndex] || devTelemetry?.[0] || null;
     if (!frameTelem) return;
 

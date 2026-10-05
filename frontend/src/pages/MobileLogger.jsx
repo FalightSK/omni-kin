@@ -2,13 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Camera,
   ChevronLeft,
-  RefreshCw,
-  FlipHorizontal,
   Activity,
-  CheckCircle2,
   AlertCircle,
   Sparkles,
-  Sliders,
   SwitchCamera,
   Maximize2,
   Minimize2,
@@ -80,7 +76,6 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const uploadQueueRef = useRef([]);
   const isUploadingRef = useRef(false);
   const [queueCount, setQueueCount] = useState(0);
-  const [uploadStatus, setUploadStatus] = useState('');
   const [serverProcessing, setServerProcessing] = useState(null);
 
   // Keep the phone informed after upload: ingestion is asynchronous and the
@@ -113,7 +108,6 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const [currentDeviceIdx, setCurrentDeviceIdx] = useState(0);
 
   const mediaRecorderRef = useRef(null);
-  const recordedChunksRef = useRef([]);
   const imuDataRef = useRef([]);
   const imuSampleCountRef = useRef(0);
   const startTimeRef = useRef(0);
@@ -390,7 +384,6 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     while (uploadQueueRef.current.length > 0) {
       const item = uploadQueueRef.current[0];
       setQueueCount(uploadQueueRef.current.length);
-      setUploadStatus(`Uploading: ${item.task}`);
 
       const formData = new FormData();
       formData.append('video', item.blob, `recording${item.ext}`);
@@ -426,14 +419,12 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         setQueueCount(uploadQueueRef.current.length);
       } else {
         console.error(`[OmniKin] Take ${item.id} failed after 3 attempts. Will retry later.`);
-        setUploadStatus('Upload paused, retrying soon...');
         await new Promise((r) => setTimeout(r, 3000));
         break;
       }
     }
 
     isUploadingRef.current = false;
-    setUploadStatus('');
   };
 
   const activeTakeChunksRef = useRef([]);

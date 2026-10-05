@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { Video, Terminal, Cpu, CheckCircle2, Layers, AlertCircle, RefreshCw } from 'lucide-react';
+import { Video, Terminal, AlertCircle, RefreshCw } from 'lucide-react';
 
 export default function VideoPlayer({
   videoUrl,

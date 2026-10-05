@@ -3,19 +3,10 @@ test_aruco_pipeline.py
 Unit tests for Dual-ArUco Rigid Board PnP & EKF Visual-Inertial Fusion Engine
 """
 
-import os
 import cv2
 import numpy as np
 import pytest
 from visual_tracker import ArucoFeatureMapTracker, VisualInertialTracker, VisualInertialEKF, resolve_gripper_opening
-
-def test_marker_generation():
-    tracker = VisualInertialTracker(tag_a_size=0.10, tag_b_size=0.05, tag_a_id=0, tag_b_id=1)
-    tag_a_img = tracker.generate_raw_marker(marker_id=0, side_pixels=400)
-    tag_b_img = tracker.generate_raw_marker(marker_id=1, side_pixels=200)
-    assert tag_a_img is not None and tag_a_img.shape == (400, 400)
-    assert tag_b_img is not None and tag_b_img.shape == (200, 200)
-    print("[PASS] test_marker_generation passed!")
 
 def test_gripper_opening_uses_record_max_and_holds_last_value():
     states = [
@@ -117,61 +108,6 @@ def test_ekf_params_customization():
     assert updated["r_pos_dual"] == 0.002
     print("[PASS] test_ekf_params_customization passed!")
 
-def test_trajectory_generation():
-    tracker = VisualInertialTracker()
-    traj = tracker.generate_synthetic_anchored_trajectory(num_frames=60, shape="circle")
-    assert traj.shape == (60, 6)
-    assert np.all(traj[:, 2] > 0), "Trajectory Z height above table must be positive"
-    print("[PASS] test_trajectory_generation passed!")
-
-def test_aruco_tag_loss_and_feature_recovery():
-    tracker = VisualInertialTracker(tag_a_size=0.10, tag_b_size=0.05, tag_a_id=0, tag_b_id=1)
-    camera_matrix, dist_coeffs = tracker.estimate_camera_matrix(1280, 720, hfov_degrees=78.0)
-    
-    from visual_tracker import ArucoFeatureMapTracker
-    feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
-
-    tag_a_img = tracker.generate_raw_marker(marker_id=0, side_pixels=120)
-    
-    # Generate background with dense texture points (simulating table grain & objects)
-    np.random.seed(42)
-    bg_texture = np.ones((720, 1280, 3), dtype=np.uint8) * 200
-    for _ in range(80):
-        x = np.random.randint(50, 1200)
-        y = np.random.randint(50, 680)
-        cv2.circle(bg_texture, (x, y), np.random.randint(3, 8), (30, 40, 50), -1)
-
-    # Frame 1: ArUco visible at known pose
-    f1 = bg_texture.copy()
-    f1[300:420, 500:620] = cv2.cvtColor(tag_a_img, cv2.COLOR_GRAY2BGR)
-    det1, p1, R1, _, _, _, corners1 = tracker.detect_marker_pnp(f1, camera_matrix, dist_coeffs, return_corners=True)
-    assert det1, "Frame 1: ArUco should be detected"
-    feature_tracker.add_aruco_ground_truth(cv2.cvtColor(f1, cv2.COLOR_BGR2GRAY), p1, R1, corners1)
-
-    # Frame 2: Small camera motion (simulated shift) with ArUco still visible to triangulate
-    f2 = np.roll(bg_texture, shift=5, axis=1) # shift 5px horizontally
-    f2[300:420, 505:625] = cv2.cvtColor(tag_a_img, cv2.COLOR_GRAY2BGR)
-    det2, p2, R2, _, _, _, corners2 = tracker.detect_marker_pnp(f2, camera_matrix, dist_coeffs, return_corners=True)
-    feature_tracker.add_aruco_ground_truth(cv2.cvtColor(f2, cv2.COLOR_BGR2GRAY), p2, R2, corners2)
-
-    # Frame 3: Tag Loss! ArUco marker is completely covered/blocked by hand (only background texture remains)
-    f3_lost = np.roll(bg_texture, shift=10, axis=1) # further shift
-    # Paint hand/cover over ArUco location
-    cv2.rectangle(f3_lost, (480, 280), (640, 440), (160, 140, 130), -1)
-
-    # Verify ArUco detector sees NOTHING
-    det3, _, _, _, _, _ = tracker.detect_marker_pnp(f3_lost, camera_matrix, dist_coeffs)
-    assert not det3, "Frame 3: ArUco must NOT be detected (occluded)"
-
-    # Now verify Feature Tracker takes over and provides valid 3D pose in ArUco space!
-    gray3 = cv2.cvtColor(f3_lost, cv2.COLOR_BGR2GRAY)
-    f_success, p_feat, R_feat, f_source = feature_tracker.track_without_aruco(gray3)
-    assert f_success, "Feature tracker should recover 3D pose in ArUco space during tag loss"
-    assert p_feat is not None and len(p_feat) == 3
-    assert p_feat[2] > 0, "Recovered camera Z height must be positive"
-    print(f"[PASS] test_aruco_tag_loss_and_feature_recovery passed! Source: {f_source}, Camera Z={p_feat[2]:.3f}m")
-
-
 def test_pitch_accuracy():
     from visual_tracker import rotation_matrix_to_trajectory_euler
 
@@ -237,6 +173,7 @@ def test_virtual_slam_landmark_expansion():
     success3, p3, R3, src3 = feature_tracker.track_without_aruco(cv2.cvtColor(f3_lost, cv2.COLOR_BGR2GRAY))
     assert success3, "Virtual SLAM must track pose during tag loss"
     assert p3 is not None and len(p3) == 3
+    assert p3[2] > 0, "Recovered camera Z height must be positive"
 
     # Frame 4: Further motion without tag -> Virtual SLAM continues tracking and expanding map
     f4_lost = np.roll(bg_texture, shift=90, axis=1)

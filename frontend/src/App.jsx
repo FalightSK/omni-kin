@@ -272,7 +272,6 @@ export default function App() {
           <Navbar
             currentView={currentView}
             setCurrentView={setCurrentView}
-            onOpenEkfModal={() => setIsEkfModalOpen(true)}
             onOpenRobotModal={() => handleOpenRobotModal('offset')}
             onOpenConnectModal={() => setIsConnectModalOpen(true)}
             onAddSample={handleAddSample}
@@ -289,7 +288,6 @@ export default function App() {
               onRefreshEpisodes={fetchEpisodes}
               onDeleteEpisode={handleDeleteEpisode}
               onClearAllEpisodes={handleClearAllEpisodes}
-              onUpdateEpisodePoses={handleReprocessComplete}
               onUpdateEpisodeTask={handleUpdateEpisodeTask}
               robotConfig={robotConfig}
               onUpdateRobotConfig={(newCfg) => {
@@ -317,7 +315,6 @@ export default function App() {
           <RobotSetupModal
             isOpen={isRobotModalOpen}
             onClose={() => setIsRobotModalOpen(false)}
-            robotConfig={robotConfig}
             initialTab={robotModalTab}
             onConfigSaved={(newConfig) => {
               setRobotConfig(newConfig);

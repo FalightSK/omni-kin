@@ -1,6 +1,6 @@
 # OmniKin Mobile Dataset Collector 🦾📱
 
-**A high-precision, low-cost robot demonstration collection framework powered by an everyday smartphone.** Capture 3D manipulation demonstrations using Dual-ArUco optical anchoring and IMU sensor fusion, visualize real-time robot arm kinematics, and export directly into [Hugging Face LeRobot](https://github.com/huggingface/lerobot) format for imitation learning (ACT, Diffusion Policy).
+**A high-precision, low-cost robot demonstration collection framework powered by an everyday smartphone.** Capture 3D manipulation demonstrations using Dual-ArUco optical anchoring and IMU sensor fusion, visualize real-time robot arm kinematics, and export documented Parquet/MP4 datasets with [LeRobot](https://github.com/huggingface/lerobot) feature names for imitation learning. See the [export data guide](docs/LEROBOT_EXPORT.md) for loading and official-library import requirements.
 
 ```mermaid
 flowchart TD
@@ -23,11 +23,11 @@ flowchart TD
         Smooth["Real-Time Trajectory Smoothing"]
     end
 
-    subgraph Dataset["📦 Hugging Face LeRobot v2.0 Dataset"]
+    subgraph Dataset["📦 OmniKin Trajectory Dataset"]
         Parquet["data/chunk-000/file-000.parquet"]
         Meta["meta/info.json & stats.json"]
         Videos["videos/observation.images.phone/"]
-        Train["Direct Training (ACT / Diffusion)"]
+        Train["Import for Training (ACT / Diffusion)"]
     end
 
     Phone -- "Video + IMU Telemetry (Wi-Fi HTTPS :8443)" --> Server
@@ -96,7 +96,7 @@ Collecting real-world robot manipulation demonstrations typically requires:
   - Synchronized video playback with Picture-in-Picture (PiP), horizontal, and vertical split layouts.
   - Interactive Savitzky-Golay and Moving Average trajectory smoothing slider.
   - Diagnostic Dev View with ArUco 3D axes, OpenCV Canny edge monitor, and live telemetry.
-- 📦 **Official LeRobot v2.1 Dataset Exporter**: Exports Parquet tables, MP4 video chunks, and JSON metadata (`info.json`, `stats.json`, `tasks.jsonl`, `episodes.jsonl`) fully compatible with Hugging Face `lerobot`. Presets retain their existing feature layout; custom exports record selected-chain joint names, types, units, and links.
+- 📦 **Documented Trajectory Export**: Exports Parquet states/actions including normalized gripper opening, MP4 videos, JSON metadata, and a usage README. Presets retain their existing feature layout; custom exports record selected-chain joint names, types, units, and links. Official LeRobot training requires importing this project's layout through the target release's dataset writer; see the [data guide](docs/LEROBOT_EXPORT.md).
 
 ---
 
@@ -382,14 +382,16 @@ flowchart TD
 1. Click **"📦 Export LeRobot"** in the top navigation bar to open the **Export LeRobot Modal**.
 2. Select your desired **Trajectory Alignment Mode** (`Free-Form` or `Initial-Aware`).
 3. **Auto-Trim Out-of-Reach Boundary Frames** *(Checked by default)*:
-   - Evaluates inverse kinematics across the demonstration and slices off leading and trailing frames where the operator held the phone against their chest ($r < 17.6\,\text{cm}$) before or after the task.
+   - Evaluates inverse kinematics and retains the longest contiguous reachable interval, slicing the arm, gripper, and video together.
    - Automatically maintains strict 1:1 frame count parity between exported Parquet rows and transcoded MP4 video chunks.
 4. Click **"Export LeRobot Dataset"**.
-5. The dataset is exported under `lerobot_exports/<dataset_name>/`.
+5. All processed episodes are exported under `lerobot_exports/<dataset_name>_<timestamp>/` (the website defaults to `mobile_aruco_3d_trajectories`). Each new folder includes a usage `README.md` and `validation_report.json`.
 
 #### Exported Directory Structure
 ```
-lerobot_exports/pick_apple_omnikin_v1/
+lerobot_exports/mobile_aruco_3d_trajectories_<timestamp>/
+├── README.md                             <-- Data description and runnable loading examples
+├── validation_report.json                <-- Export consistency checks
 ├── data/
 │   └── chunk-000/
 │       └── file-000.parquet               <-- Full tabular data (states, poses, actions)
@@ -419,40 +421,20 @@ lerobot_exports/pick_apple_omnikin_v1/
 | `task_index` | `int64` | Numerical task identifier corresponding to `meta/tasks.jsonl` |
 | `task` | `string` | Natural language task description (e.g. `"reach to object"`) |
 | `observation.state` | `float32[N]` | Selected joint values followed by normalized gripper `[0, 1]`; preset joints use degrees, custom prismatic joints use meters |
-| `observation.ee_pose` | `float32[6]` | 6-DOF Cartesian pose `[x, y, z, roll, pitch, yaw]` in robot base frame |
-| `action` | `float32[N]` | Next-frame target joint angles ($\mathbf{a}_t = \mathbf{q}_{t+1}$, last frame copies $\mathbf{q}_T$) |
+| `observation.ee_pose` | `float32[6]` | Cartesian pose `[x, y, z, roll, pitch, yaw]` in robot base frame; meters and tracker-convention Euler radians |
+| `action` | `float32[N]` | Next-frame target joint values and opening fraction ($\mathbf{a}_t = \mathbf{q}_{t+1}$, last frame copies $\mathbf{q}_T$) |
 
 *Note: $N$ is the number of selected movable joints plus 1 for gripper. Custom exports record joint names, types, units, base/TCP links, and ordered chain transforms in `meta/info.json`.*
+
+**Gripper:** find `"gripper"` in each feature's `names` list. It is an element of `observation.state` and `action`, not a standalone column. `0.0` means closed and `1.0` means open; dashboard 54.2% exports as `0.542`. See the [data guide](docs/LEROBOT_EXPORT.md) for marker loss, per-record scaling, timing, orientation conventions, and runnable Parquet/video examples. Old exports remain snapshots; export again after recalculation.
 
 ---
 
 ### Step 9: Train Imitation Learning Policies
 
-You can directly pass the exported dataset into the official [Hugging Face LeRobot](https://github.com/huggingface/lerobot) training pipeline.
+First inspect the exported Parquet and video using the [data guide](docs/LEROBOT_EXPORT.md). OmniKin's combined frame table and per-episode videos use a project-specific layout; its legacy version label does not establish official loader compatibility.
 
-```bash
-# Clone official LeRobot repository
-git clone https://github.com/huggingface/lerobot.git
-cd lerobot
-pip install -e .
-
-# Train an Action Chunking Transformer (ACT) policy
-python lerobot/scripts/train.py \
-    --dataset_path ../mobile_dataset_collector/lerobot_exports/pick_apple_omnikin_v1 \
-    --policy act \
-    --env so100 \
-    --batch_size 16 \
-    --num_workers 4 \
-    --training_steps 100000
-```
-
-To train a Diffusion Policy:
-```bash
-python lerobot/scripts/train.py \
-    --dataset_path ../mobile_dataset_collector/lerobot_exports/pick_apple_omnikin_v1 \
-    --policy diffusion \
-    --env so100
-```
+For official LeRobot training, import frames through the installed release's dataset writer, retaining the existing next-frame actions and episode boundaries. The guide describes this workflow and links the [official writer API](https://huggingface.co/docs/lerobot/main/api/datasets). Validate the resulting dataset with that release before training ACT or Diffusion Policy. The collector environment does not install LeRobot.
 
 ---
 
@@ -584,7 +566,7 @@ The FastAPI backend exposes the following REST endpoints:
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `POST` | `/api/trajectory/plan_approach` | Generates a quintic minimum-jerk approach path connecting home to start waypoint |
-| `POST` | `/api/export_lerobot` | Exports selected episodes into Hugging Face LeRobot format |
+| `POST` | `/api/export_lerobot` | Exports all processed episodes as documented Parquet/MP4 data with LeRobot feature names |
 
 ### Diagnostic Utilities
 | Method | Endpoint | Description |
@@ -606,11 +588,13 @@ pytest
 
 Or run focused subsystem test suites individually:
 
+The suite retains regression checks for tracking, masking, URDF math, calibration, gripper export, and data integrity. Duplicate smoke tests and the old live-server verification script have been removed; test exports use temporary folders.
+
 ```bash
 # Test 1: ArUco 8-point PnP, 12-state EKF fusion, and virtual SLAM recovery
 pytest tests/test_aruco_pipeline.py
 
-# Test 2: Multi-embodiment robot kinematics and 3D Euclidean clearance barrier
+# Test 2: Preset kinematics, workspace/camera calibration, and joint limits
 pytest tests/test_robot_kinematics.py
 
 # Test 3: Selected-chain URDF parsing, FK/IK, and export dimensions
@@ -621,6 +605,9 @@ pytest tests/test_pipeline.py
 
 # Test 5: Dataset security, frame timestamps, and LeRobot action-shifting invariants
 pytest tests/test_integrity.py
+
+# Test 6: Gripper print-sheet IDs and physical dimensions
+pytest tests/test_marker_print.py
 ```
 
 ---
