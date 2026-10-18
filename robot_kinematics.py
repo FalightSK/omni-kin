@@ -6,6 +6,7 @@ Includes WorkspaceCalibrator for ArUco Table-Plane-to-Robot-Base Coordinate Tran
 
 import os
 import numpy as np
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 from scipy.spatial.transform import Rotation as R
 from scipy.optimize import least_squares
@@ -57,6 +58,74 @@ def trajectory_euler_to_rotation_matrix(euler):
     r = R.from_euler('xyz', [pitch, roll, yaw])
     R_p2w = r.as_matrix()
     return R_p2w @ R_CAM_TO_PHONE
+
+
+def camera_tcp_transform_for_pose(pose_camera, transform_camera_tcp):
+    """Return a table/world-frame TCP pose from a camera pose and camera→TCP SE(3)."""
+    pose = np.asarray(pose_camera, dtype=np.float64)
+    transform = np.asarray(transform_camera_tcp, dtype=np.float64)
+    if pose.shape[0] < 6 or not np.isfinite(pose[:6]).all():
+        raise ValueError("Camera pose must contain six finite values")
+    if transform.shape != (4, 4) or not np.isfinite(transform).all():
+        raise ValueError("Camera-to-TCP transform must be a finite 4x4 matrix")
+
+    rotation_world_camera = trajectory_euler_to_rotation_matrix(pose[3:6])
+    position_world_tcp = pose[:3] + rotation_world_camera @ transform[:3, 3]
+    rotation_world_tcp = rotation_world_camera @ transform[:3, :3]
+    return np.concatenate((
+        position_world_tcp,
+        rotation_matrix_to_trajectory_euler(rotation_world_tcp),
+    ))
+
+
+def transform_camera_trajectory_to_tcp(trajectory_camera, transform_camera_tcp):
+    """Apply one camera→TCP transform to a trajectory in the app's pose convention."""
+    poses = np.asarray(trajectory_camera, dtype=np.float64)
+    if poses.ndim != 2 or poses.shape[1] < 6:
+        raise ValueError("Camera trajectory must have shape (N, 6)")
+    return np.asarray([
+        camera_tcp_transform_for_pose(pose, transform_camera_tcp)
+        for pose in poses
+    ], dtype=np.float64)
+
+
+def transform_tcp_trajectory_to_camera(trajectory_tcp, transform_camera_tcp):
+    """Apply the inverse camera→TCP transform to a trajectory of TCP poses."""
+    transform = np.asarray(transform_camera_tcp, dtype=np.float64)
+    if transform.shape != (4, 4) or not np.isfinite(transform).all():
+        raise ValueError("Camera-to-TCP transform must be a finite 4x4 matrix")
+    return transform_camera_trajectory_to_tcp(trajectory_tcp, np.linalg.inv(transform))
+
+
+def tcp_marker_object_points(marker_poses_tcp, marker_size_mm=22.0):
+    """Build the eight ArUco corners in TCP coordinates from two CAD marker poses.
+
+    Each marker pose uses ``xyz_mm`` and ``rpy_deg`` and describes the marker
+    frame expressed in the TCP frame. The corner order matches OpenCV's
+    SOLVEPNP_IPPE_SQUARE convention.
+    """
+    size_m = float(marker_size_mm) / 1000.0
+    if not np.isfinite(size_m) or size_m <= 0:
+        raise ValueError("ArUco marker size must be positive")
+    half = size_m / 2.0
+    local_corners = np.array([
+        [-half, half, 0.0],
+        [half, half, 0.0],
+        [half, -half, 0.0],
+        [-half, -half, 0.0],
+    ], dtype=np.float64)
+    points = []
+    for marker_id in (2, 3):
+        entry = marker_poses_tcp.get(str(marker_id), marker_poses_tcp.get(marker_id))
+        if not isinstance(entry, dict):
+            raise ValueError(f"Missing TCP pose for ArUco marker {marker_id}")
+        xyz = np.asarray(entry.get("xyz_mm"), dtype=np.float64)
+        rpy = np.asarray(entry.get("rpy_deg"), dtype=np.float64)
+        if xyz.shape != (3,) or rpy.shape != (3,) or not np.isfinite(xyz).all() or not np.isfinite(rpy).all():
+            raise ValueError(f"Marker {marker_id} requires finite xyz_mm and rpy_deg vectors")
+        rotation = R.from_euler("xyz", rpy, degrees=True).as_matrix()
+        points.append(local_corners @ rotation.T + xyz / 1000.0)
+    return np.vstack(points)
 
 def normalize_robot_type(robot_type):
     """Normalizes robot type string and resolves aliases."""
@@ -421,10 +490,21 @@ class SerialURDFKinematics:
                 lower[i] = max(lower[i], prev[i] - step)
                 upper[i] = min(upper[i], prev[i] + step)
                 if lower[i] > upper[i]:
-                    lower[i] = upper[i] = float(np.clip(prev[i], self.joint_limits[i][0], self.joint_limits[i][1]))
+                    joint_lo, joint_hi = self.joint_limits[i]
+                    if prev[i] < joint_lo:
+                        # Recover an already out-of-limit state at the configured
+                        # velocity instead of snapping through the limit.
+                        lower[i], upper[i] = prev[i], prev[i] + step
+                    elif prev[i] > joint_hi:
+                        lower[i], upper[i] = prev[i] - step, prev[i]
+                    else:
+                        lower[i] = upper[i] = float(np.clip(prev[i], joint_lo, joint_hi))
                 seed[i] = np.clip(seed[i], lower[i] + 1e-10, upper[i] - 1e-10) if upper[i] - lower[i] > 2e-10 else lower[i]
-        # scipy requires a strictly interior initial point and finite optimization bounds.
-        seed = np.minimum(np.maximum(seed, lower + 1e-9), upper - 1e-9)
+        # Keep joints pinned at a physical/rate boundary fixed instead of
+        # passing equal bounds to scipy, which requires strict inequalities.
+        movable = upper - lower > 1e-12
+        seed[movable] = np.minimum(np.maximum(seed[movable], lower[movable] + 1e-9), upper[movable] - 1e-9)
+        seed[~movable] = lower[~movable]
 
         # A five-axis arm cannot independently realize an arbitrary 6-DoF pose.
         # The tracked TCP position is the primary task; trying to fit an
@@ -446,7 +526,23 @@ class SerialURDFKinematics:
                 result = np.concatenate([result, continuity_weight * (q - prev) / scales])
             return result
 
-        result = least_squares(residual, seed, bounds=(lower, upper), max_nfev=250, ftol=1e-9, xtol=1e-9, gtol=1e-9)
+        if np.any(movable):
+            def movable_residual(values):
+                candidate = seed.copy()
+                candidate[movable] = values
+                return residual(candidate)
+
+            optimized = least_squares(
+                movable_residual,
+                seed[movable],
+                bounds=(lower[movable], upper[movable]),
+                max_nfev=250, ftol=1e-9, xtol=1e-9, gtol=1e-9,
+            )
+            solved = seed.copy()
+            solved[movable] = optimized.x
+            result = SimpleNamespace(x=solved, success=optimized.success)
+        else:
+            result = SimpleNamespace(x=seed.copy(), success=True)
         if self.tool_roll_tracking:
             # This preset's TCP lies on its final wrist-roll axis. Match the
             # measured gripper dorsal direction with that free joint while
@@ -809,17 +905,11 @@ class WorkspaceCalibrator:
 
 class CameraGripperCalibrator:
     """
-    6-DoF Camera-to-Gripper (Tool Center Point / TCP) Extrinsic Calibrator.
-    Transforms 6-DoF trajectory poses between the Camera Optical Center and the physical Gripper Fingertip TCP.
+    Read-only transform for episodes recorded before ArUco camera-to-TCP calibration.
+    New episodes use the marker-calibration transform saved with each take.
 
-    Parameters (matching physical CAD teleoperation assembly):
-      forward_cm : Longitudinal distance forward along gripper axis from mount to fingertips (default: 12.8 cm)
-      height_cm  : Vertical height distance from gripper grasp centerline up to camera lens (default: 10.9 cm)
-      lateral_cm : Lateral offset across gripper (default: 0.0 cm)
-      pitch_deg  : Camera tilt angle downward towards gripper fingertips (default: 40.4 deg)
-      roll_deg   : Roll alignment angle (default: 0.0 deg)
-      yaw_deg    : Yaw alignment angle (default: 0.0 deg)
-      enabled    : If False, passes poses through unchanged (default: True)
+    Its serialized values are used only when an old episode has no per-episode
+    offset snapshot. New recordings use their saved ArUco camera-to-TCP transform.
     """
 
     def __init__(
@@ -839,32 +929,6 @@ class CameraGripperCalibrator:
         self.roll_deg = float(roll_deg)
         self.yaw_deg = float(yaw_deg)
         self.enabled = bool(enabled)
-        self._recompute_relative_transform()
-
-    def update_config(
-        self,
-        forward_cm=None,
-        height_cm=None,
-        lateral_cm=None,
-        pitch_deg=None,
-        roll_deg=None,
-        yaw_deg=None,
-        enabled=None
-    ):
-        if forward_cm is not None:
-            self.forward_cm = float(forward_cm)
-        if height_cm is not None:
-            self.height_cm = float(height_cm)
-        if lateral_cm is not None:
-            self.lateral_cm = float(lateral_cm)
-        if pitch_deg is not None:
-            self.pitch_deg = float(pitch_deg)
-        if roll_deg is not None:
-            self.roll_deg = float(roll_deg)
-        if yaw_deg is not None:
-            self.yaw_deg = float(yaw_deg)
-        if enabled is not None:
-            self.enabled = bool(enabled)
         self._recompute_relative_transform()
 
     def get_config(self):
@@ -1019,7 +1083,8 @@ class TrajectoryPlanner:
         lift_clearance_m=0.06,
         home_gripper=100.0,
         start_gripper=100.0,
-        start_in_robot_frame=False
+        start_in_robot_frame=False,
+        camera_tcp_transform=None
     ):
         """
         Calculates a collision-safe, smooth approach trajectory from the robot's Initial Position
@@ -1035,6 +1100,7 @@ class TrajectoryPlanner:
           home_gripper : Gripper opening at home (0-100%, default: 100% open)
           start_gripper: Gripper opening at demo start (0-100%, default: 100%)
           start_in_robot_frame : True if p_start is already in Robot Frame, False if in ArUco table frame.
+          camera_tcp_transform : Per-episode camera→TCP transform; omitted only for legacy episodes.
 
         Returns dict containing:
           - 'robot_ee_poses': (N, 6) in Robot Base Frame
@@ -1126,7 +1192,10 @@ class TrajectoryPlanner:
 
         # Transform to ArUco frame
         aruco_ee = self.workspace_calibrator.transform_trajectory(robot_ee, to_robot=False)
-        aruco_cam = self.camera_gripper_calibrator.transform_trajectory(aruco_ee, to_gripper=False)
+        if camera_tcp_transform is None:
+            aruco_cam = self.camera_gripper_calibrator.transform_trajectory(aruco_ee, to_gripper=False)
+        else:
+            aruco_cam = transform_tcp_trajectory_to_camera(aruco_ee, camera_tcp_transform)
 
         actions = np.roll(joint_states, -1, axis=0)
         actions[-1] = joint_states[-1]

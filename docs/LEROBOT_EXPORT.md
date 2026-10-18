@@ -63,7 +63,7 @@ they are not separate features in the exported Parquet table.
   meta/info.json                         feature names, shapes, FPS, robot setup
   meta/stats.json                        vector statistics
   meta/tasks.jsonl                       task text and task_index mapping
-  meta/episodes.jsonl                    length, FPS, task, episode_index
+  meta/episodes.jsonl                    episode summary and calibration provenance
   meta/episodes/file-000.parquet          the same episode summary as a table
   videos/observation.images.phone/chunk-000/
     episode_000000.mp4                    frames for episode_index 0
@@ -73,6 +73,16 @@ they are not separate features in the exported Parquet table.
 Export folder names include a timestamp by default. Existing exported folders
 are snapshots: changing a recording or recalculating its gripper does not rewrite
 an old export. Create a fresh export to obtain updated values.
+
+## Camera-to-TCP calibration provenance
+
+Each calibrated episode stores its calibration snapshot as JSON in
+`meta/episodes.jsonl` and the `camera_tcp_calibration_json` column in
+`meta/episodes/file-000.parquet`. It includes the jaw-marker CAD poses, camera
+intrinsics, saved marker-corner observations, estimated camera-to-TCP transform,
+and quality metrics. Legacy episodes instead record their manual phone offset
+in `legacy_gripper_offset_json`. Exported pose and joint arrays use the
+calibration snapshot stored with that source episode.
 
 ## Frame table schema
 

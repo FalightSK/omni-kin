@@ -6,7 +6,10 @@ Unit tests for Dual-ArUco Rigid Board PnP & EKF Visual-Inertial Fusion Engine
 import cv2
 import numpy as np
 import pytest
-from visual_tracker import ArucoFeatureMapTracker, VisualInertialTracker, VisualInertialEKF, resolve_gripper_opening
+from visual_tracker import (
+    ArucoFeatureMapTracker, VisualInertialTracker, VisualInertialEKF,
+    resolve_gripper_opening, resolve_anchored_pose_validity,
+)
 
 def test_gripper_opening_uses_record_max_and_holds_last_value():
     states = [
@@ -22,6 +25,22 @@ def test_gripper_opening_uses_record_max_and_holds_last_value():
     assert values == [100.0, 100.0, 55.8, 55.8]
     repeated_values, _ = resolve_gripper_opening(states, marker_size_mm=22.0)
     assert repeated_values == values
+
+
+def test_pose_validity_accepts_table_anchors_and_bounded_interpolation_only():
+    poses = np.zeros((5, 6), dtype=np.float64)
+    poses[:, 0] = [0.0, 20.0, 100.0, 0.8, 0.9]
+    poses[:, 4] = [0.0, 0.8, 1.8, 0.5, 0.4]
+    sources = ["dual_aruco", "feature_vo", "feature_pnp", "imu", "feature_vo"]
+
+    resolved, validity = resolve_anchored_pose_validity(poses, sources)
+
+    assert [frame["valid"] for frame in validity] == [True, True, True, False, False]
+    assert validity[1]["reason"] == "interpolated_between_anchors"
+    assert validity[3]["reason"] == "no_table_anchor"
+    assert validity[4]["reason"] == "no_table_anchor"
+    assert np.isclose(resolved[1, 0], 50.0)
+    assert np.allclose(poses[1], [20.0, 0, 0, 0, 0.8, 0])  # input remains unmodified
 
 
 def test_dual_board_pnp_scenarios():

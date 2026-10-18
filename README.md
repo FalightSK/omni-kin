@@ -299,16 +299,15 @@ Calibrates where the physical robot base sits relative to the ArUco marker origi
   - Click **"Recommended"** to center the workspace based on the arm's reach envelope.
   - Click **"Optimal"** to perform least-squares fitting against previously recorded trajectories.
 
-#### 3. Camera / Gripper Offset Tab
-Defines the translation and rotation from the robot gripper Tool Center Point (TCP) to the phone camera lens:
-- `Forward (cm)`: `12.8`
-- `Height (cm)`: `10.9`
-- `Lateral (cm)`: `0.0`
-- `Pitch (deg)`: `40.4°`
+#### 3. Camera-to-TCP Calibration
+- On first entry to MobileLogger in each session, complete the guided camera-to-TCP calibration before recording.
+- Keep the gripper at its fully-open stop and all table and jaw ArUco markers visible during capture.
+- Set jaw marker poses relative to TCP in **Robot Setup → Gripper / Tool**. Positions use millimeters and orientations use XYZ Euler degrees.
+- In the viewer, geometry edits recalculate that episode using its saved calibration observations.
 
 #### 4. Wrist Safety ($q_3$ Crash Prevention) Tab
 - `q3_safe_max_deg`: Max upward pitch limit (default: `5.0°`).
-- Prevents the camera bracket from rotating backwards into the robot forearm link during manipulation.
+- Limits wrist pitch to reduce the chance of the tool colliding with the robot forearm.
 - Downward flexion for picking up objects from the floor ($-20^\circ \dots -60^\circ$) remains completely unconstrained.
 
 #### 5. Initial Position Tab
@@ -504,7 +503,7 @@ Toggle the **"Dev View"** button to access computer vision diagnostics:
 
 ## ⚙️ Configuration File Reference
 
-All calibration parameters are saved in `robot_config.json`:
+Robot placement, jaw marker geometry, and safety settings are saved in `robot_config.json`. Camera-to-TCP calibration itself is captured once per mobile session and stored with each take.
 
 ```json
 {
@@ -514,14 +513,9 @@ All calibration parameters are saved in `robot_config.json`:
   "offset_z": 0.000,
   "yaw_deg": 90.0,
   "q3_safe_max_deg": 5.0,
-  "gripper_offset": {
-    "forward_cm": 12.8,
-    "height_cm": 10.9,
-    "lateral_cm": 0.0,
-    "pitch_deg": 40.4,
-    "roll_deg": 0.0,
-    "yaw_deg": 0.0,
-    "enabled": true
+  "aruco_tcp_geometry": {
+    "2": { "xyz_mm": [-71.522, 56.205, 21.0], "rpy_deg": [0.0, 0.0, 0.0] },
+    "3": { "xyz_mm": [-71.522, -56.205, 21.0], "rpy_deg": [0.0, 0.0, 0.0] }
   },
   "initial_position": {
     "x": 0.15,
@@ -549,7 +543,9 @@ The FastAPI backend exposes the following REST endpoints:
 | `POST` | `/api/robot/config` | Updates robot type, workspace offsets ($X, Y, Z, \text{Yaw}$), and safety limits |
 | `GET` | `/api/robot/initial_position` | Returns the canonical standby/home pose configuration |
 | `POST` | `/api/robot/initial_position` | Updates the standby/home pose for `initial_aware` mode |
-| `POST` | `/api/robot/gripper_offset` | Updates camera-to-gripper extrinsic translation and rotation |
+| `POST` | `/api/calibration/preview` | Reports visibility of the table and jaw ArUco markers |
+| `POST` | `/api/calibration/camera-tcp` | Estimates camera-to-TCP from the session's fully-open calibration clip |
+| `PATCH` | `/api/episodes/{episode_index}/camera-tcp-geometry` | Recalculates a calibrated episode after editing jaw marker geometry |
 | `POST` | `/api/upload_urdf` | Uploads and parses a custom robot URDF XML |
 | `POST` | `/api/robot/solve_ik` | Solves inverse kinematics for arbitrary 6-DOF Cartesian poses |
 

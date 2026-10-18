@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import Viewport3D from '../components/Viewport3D';
 import VideoPlayer from '../components/VideoPlayer';
 import DevVisionMonitor from '../components/DevVisionMonitor';
+import MarkerGeometryEditor from '../components/MarkerGeometryEditor';
 import {
   Play,
   Pause,
@@ -86,6 +87,8 @@ export default function Dashboard({
   onDeleteEpisode,
   onClearAllEpisodes,
   onUpdateEpisodeTask,
+  onUpdateEpisodeCameraTcpGeometry,
+  onRecalibrateEpisodeCameraTcp,
   robotConfig,
   onUpdateRobotConfig,
   onOpenRobotModal,
@@ -99,6 +102,12 @@ export default function Dashboard({
 }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [combinedSliderIndex, setCombinedSliderIndex] = useState(0);
+  const [cameraGeometryDraft, setCameraGeometryDraft] = useState(null);
+  const [cameraGeometryStatus, setCameraGeometryStatus] = useState('');
+  const [recalibrationStartS, setRecalibrationStartS] = useState('0');
+  const [recalibrationEndS, setRecalibrationEndS] = useState('6');
+  const [recalibrationStatus, setRecalibrationStatus] = useState('');
+  const geometryDebounceRef = useRef(null);
 
   // In-place Episode Task Prompt Editing State
   const [editingEpIdx, setEditingEpIdx] = useState(null);
@@ -249,6 +258,45 @@ export default function Dashboard({
   }, [onRefreshEpisodes]);
 
   const activeEp = episodes.find((e) => e.episode_index === selectedEpIdx) || episodes[0] || null;
+  useEffect(() => {
+    setCameraGeometryDraft(activeEp?.camera_tcp_calibration?.marker_poses_tcp || null);
+    setCameraGeometryStatus('');
+    setRecalibrationStartS('0');
+    setRecalibrationEndS(String(Math.min(6, Number(activeEp?.duration) || 6)));
+    setRecalibrationStatus('');
+    return () => { if (geometryDebounceRef.current) clearTimeout(geometryDebounceRef.current); };
+  }, [activeEp?.episode_id, activeEp?.camera_tcp_calibration?.marker_poses_tcp]);
+
+  const handleCameraGeometryChange = (geometry) => {
+    if (!geometry) return;
+    setCameraGeometryDraft(geometry);
+    setCameraGeometryStatus('Waiting for edits…');
+    if (geometryDebounceRef.current) clearTimeout(geometryDebounceRef.current);
+    geometryDebounceRef.current = setTimeout(async () => {
+      if (!activeEp?.camera_tcp_calibration) return;
+      setCameraGeometryStatus('Recalculating selected episode…');
+      try {
+        await onUpdateEpisodeCameraTcpGeometry?.(activeEp.episode_index, geometry);
+        setCameraGeometryStatus('Trajectory recalculated and CAD geometry saved for future sessions.');
+      } catch (error) {
+        setCameraGeometryStatus(error.message || 'Geometry update failed; previous trajectory retained.');
+      }
+    }, 650);
+  };
+
+  const recalibrateLegacyEpisode = async () => {
+    setRecalibrationStatus('Validating the selected interval…');
+    try {
+      await onRecalibrateEpisodeCameraTcp?.(
+        activeEp.episode_index,
+        Number(recalibrationStartS),
+        Number(recalibrationEndS),
+      );
+      setRecalibrationStatus('Calibration passed; this episode now uses its saved camera-to-TCP snapshot.');
+    } catch (error) {
+      setRecalibrationStatus(error.message || 'Recalibration failed; previous trajectory retained.');
+    }
+  };
   const processedPoses = activeEp?.poses || [];
   const rawPoses = activeEp?.raw_poses || [];
   const sourcePoses = smoothingMethod === 'raw' && isRenderablePoseArray(rawPoses)
@@ -735,6 +783,57 @@ export default function Dashboard({
           </div>
         </div>
 
+        {activeEp && (
+          <details className="rounded-xl border border-neutral-800 bg-neutral-950/90 px-4 py-3">
+            <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-neutral-300">
+              Camera-to-TCP geometry
+              <span className="ml-2 font-normal normal-case text-neutral-500">
+                {activeEp.camera_tcp_calibration ? 'calibrated · live adjustment' : 'legacy episode'}
+              </span>
+            </summary>
+            <div className="mt-3 flex flex-col gap-3">
+              {activeEp.camera_tcp_calibration ? (
+                <>
+                  <p className="text-xs text-neutral-400">
+                    Edit the full CAD pose of each jaw marker relative to TCP. The saved calibration corner observations are reused and this episode is recalculated after a short pause.
+                  </p>
+                  <MarkerGeometryEditor
+                    value={cameraGeometryDraft || activeEp.camera_tcp_calibration.marker_poses_tcp}
+                    onChange={handleCameraGeometryChange}
+                  />
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] font-mono text-neutral-500">
+                    <span>Valid views: {activeEp.camera_tcp_calibration.quality?.valid_frames ?? '—'}</span>
+                    <span>Reprojection RMS: {Number(activeEp.camera_tcp_calibration.quality?.reprojection_rms_px ?? 0).toFixed(2)} px</span>
+                    <span>{cameraGeometryStatus}</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs leading-relaxed text-neutral-400">
+                    This episode keeps its original phone offset. To migrate only this episode, select a 3–20 second interval where the gripper was at its fully-open stop and all four tags were visible. Calibration checks the CAD gap and marker pose consistency before replacing the legacy offset.
+                  </p>
+                  <div className="grid grid-cols-2 gap-2 max-w-sm">
+                    <label className="text-[10px] text-neutral-500">
+                      Start time (s)
+                      <input type="number" min="0" max={activeEp.duration || 86400} step="0.1" value={recalibrationStartS} onChange={(event) => setRecalibrationStartS(event.target.value)} className="mt-1 w-full rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1.5 text-xs font-mono text-white" />
+                    </label>
+                    <label className="text-[10px] text-neutral-500">
+                      End time (s)
+                      <input type="number" min="0" max={activeEp.duration || 86400} step="0.1" value={recalibrationEndS} onChange={(event) => setRecalibrationEndS(event.target.value)} className="mt-1 w-full rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1.5 text-xs font-mono text-white" />
+                    </label>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button type="button" onClick={recalibrateLegacyEpisode} disabled={!activeEp.video_url || !activeEp.raw_poses?.length} className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-black disabled:opacity-40">
+                      Recalibrate this episode
+                    </button>
+                    <span className="text-xs text-neutral-400" role="status">{recalibrationStatus}</span>
+                  </div>
+                </>
+              )}
+            </div>
+          </details>
+        )}
+
         {/* Viewport Area */}
         {layoutMode === 'pip' ? (
           /* ========================================================================= */
@@ -1084,20 +1183,9 @@ export default function Dashboard({
           <div className="grid grid-cols-2 md:grid-cols-6 gap-2 bg-[#0a0a0a] p-2.5 rounded-lg border border-neutral-800 text-left font-mono">
             {/* ArUco Table Origin: Camera & Gripper TCP */}
             <div className="border-r border-neutral-800 pr-2 col-span-2 flex flex-col justify-center">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-neutral-400 uppercase font-sans font-semibold">
-                  ArUco Origin (0,0,0)
-                </span>
-                {robotConfig?.gripper_offset?.enabled && (
-                  <button
-                    onClick={() => onOpenRobotModal?.('gripper')}
-                    className="text-[9px] px-1.5 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 font-sans font-medium transition-all"
-                    title="Click to adjust 6-DoF Camera-to-Gripper Offset"
-                  >
-                    🎯 {robotConfig.gripper_offset.pitch_deg || 40.4}° / {robotConfig.gripper_offset.forward_cm || 12.8}cm
-                  </button>
-                )}
-              </div>
+              <span className="text-[10px] text-neutral-400 uppercase font-sans font-semibold">
+                ArUco Origin (0,0,0)
+              </span>
               <div className="flex flex-col gap-0.5 mt-1">
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-neutral-500 text-[10px] font-sans">TCP:</span>

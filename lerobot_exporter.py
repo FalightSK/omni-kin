@@ -614,7 +614,11 @@ class LeRobotExporter:
                 'task': str(task),
                 'task_index': task_idx,
                 'length': num_frames,
-                'fps': self.fps
+                'fps': self.fps,
+                'camera_tcp_calibration_json': json.dumps(ep.get('camera_tcp_calibration'))
+                if ep.get('camera_tcp_calibration') else None,
+                'legacy_gripper_offset_json': json.dumps(ep.get('gripper_offset_applied'))
+                if not ep.get('camera_tcp_calibration') and ep.get('gripper_offset_applied') else None,
             })
 
         # 1. Save Tabular Dataset (data/chunk-000/file-000.parquet)

@@ -174,13 +174,6 @@ export default function Viewport3D({
   const robotGroupRef = useRef(null);
   const zonesGroupRef = useRef(null);
 
-  // Rigidly Mounted Camera Subsystem (Attached to Robot Embodiment)
-  const mountedCamGroupRef = useRef(null);
-  const mountedCamMeshRef = useRef(null);
-  const mountedBracketRef = useRef(null);
-  const mountedClampRef = useRef(null);
-  const mountedToolRodRef = useRef(null);
-
   // Dynamic Articulated Robot Arm & End-Effector Meshes
   const pillarMeshRef = useRef(null);
   const shoulderSphereRef = useRef(null);
@@ -758,7 +751,7 @@ export default function Viewport3D({
       scene.add(homeLabel);
     }
 
-    // 3. Render Secondary Camera Path (Dashed Cyan Line) when offset is active
+    // Render the recorded camera trajectory alongside the calibrated TCP path.
     if (showCameraPath && trajectoryPoses.length > 1 && eePoses && eePoses.length > 0) {
       const camPoints = trajectoryPoses.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
       const camCurve = new THREE.CatmullRomCurve3(camPoints);
@@ -921,87 +914,7 @@ export default function Viewport3D({
     robotGroup.add(reachLine);
 
     // =========================================================================
-    // 📷 Rigidly Mounted Camera Subsystem (URDF End-Effector Bracket Mount)
-    // Fixed directly to the robot embodiment per gripper_offset extrinsic parameters
-    // =========================================================================
-    const mountedCamGroup = new THREE.Group();
-    mountedCamGroupRef.current = mountedCamGroup;
-    robotGroup.add(mountedCamGroup);
-
-    // 1. Camera Mounting Bracket Link (connects wrist assembly to camera cradle)
-    const bracketMesh = new THREE.Mesh(unitCylGeo, armJointMat);
-    mountedBracketRef.current = bracketMesh;
-    mountedCamGroup.add(bracketMesh);
-
-    // Wrist mount clamp collar
-    const clampMesh = new THREE.Mesh(unitCylGeo, armJointMat);
-    mountedClampRef.current = clampMesh;
-    mountedCamGroup.add(clampMesh);
-
-    // 2. Camera Optical Focal Node & Sleek Phone/Camera Assembly
-    const camBodyGroup = new THREE.Group();
-    mountedCamMeshRef.current = camBodyGroup;
-    mountedCamGroup.add(camBodyGroup);
-
-    // 2a. Sleek camera body housing (compact smartphone / sensor head)
-    const camBodyGeo = new THREE.BoxGeometry(0.060, 0.032, 0.008);
-    const camBodyMat = new THREE.MeshStandardMaterial({
-      color: 0x1e293b,
-      metalness: 0.7,
-      roughness: 0.3
-    });
-    const camBody = new THREE.Mesh(camBodyGeo, camBodyMat);
-    camBody.position.set(0, 0, -0.004);
-    camBodyGroup.add(camBody);
-
-    // 2b. Camera lens barrel ring
-    const lensBezelGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.004, 16);
-    lensBezelGeo.rotateX(Math.PI / 2);
-    const lensBezelMat = new THREE.MeshStandardMaterial({
-      color: 0x0f172a,
-      metalness: 0.9,
-      roughness: 0.2
-    });
-    const lensBezel = new THREE.Mesh(lensBezelGeo, lensBezelMat);
-    lensBezel.position.set(0, 0, 0.002);
-    camBodyGroup.add(lensBezel);
-
-    // 2c. Glowing cyan focal lens optic
-    const camFocalSphereGeo = new THREE.SphereGeometry(0.005, 16, 16);
-    const camFocalMat = new THREE.MeshStandardMaterial({
-      color: 0x06b6d4,
-      emissive: 0x0891b2,
-      emissiveIntensity: 0.9,
-      roughness: 0.2,
-      metalness: 0.8
-    });
-    const camFocalMesh = new THREE.Mesh(camFocalSphereGeo, camFocalMat);
-    camFocalMesh.position.set(0, 0, 0.004);
-    camBodyGroup.add(camFocalMesh);
-
-    // 2d. Mount hinge collar connecting to bracket
-    const hingeGeo = new THREE.CylinderGeometry(0.005, 0.005, 0.010, 12);
-    const hinge = new THREE.Mesh(hingeGeo, armJointMat);
-    hinge.position.set(0, -0.016, -0.004);
-    camBodyGroup.add(hinge);
-
-    // 3. Rigid Tool Center Point (TCP) Connecting Rod / Sightline
-    const toolRodGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-    const toolRodMat = new THREE.LineDashedMaterial({
-      color: 0x06b6d4,
-      dashSize: 0.012,
-      gapSize: 0.008,
-      transparent: true,
-      opacity: 0.85
-    });
-    const mountedToolRod = new THREE.Line(toolRodGeo, toolRodMat);
-    mountedToolRod.computeLineDistances();
-    mountedToolRodRef.current = mountedToolRod;
-    mountedCamGroup.add(mountedToolRod);
-
-    // =========================================================================
     // Robot Physical Reach Boundary Envelopes on Table Floor
-    // =========================================================================
     // 1. Inner / Nominal Reach Ring (R = 0.22m, Emerald) - optimal dexterity envelope
     const nominalRing = createCircleRing(0.22, 0x10b981, true);
     nominalRing.name = 'nominalRing';
@@ -1307,69 +1220,6 @@ export default function Viewport3D({
       }
     }
 
-    // 📷 Update Mounted Robot Camera Rig (Fixed rigidly to robot embodiment per gripper_offset)
-    const gripperCfg = robotConfig?.gripper_offset || {};
-    const fwdM = (gripperCfg.forward_cm !== undefined ? Number(gripperCfg.forward_cm) : 12.8) / 100.0;
-    const hgtM = (gripperCfg.height_cm !== undefined ? Number(gripperCfg.height_cm) : 10.9) / 100.0;
-    const latM = (gripperCfg.lateral_cm !== undefined ? Number(gripperCfg.lateral_cm) : 0.0) / 100.0;
-    const isOffsetEnabled = gripperCfg.enabled !== false;
-
-    // Rigid camera mount position in robot local coordinates (fixed to end-effector):
-    const pCamRobot = new THREE.Vector3()
-      .copy(pTip)
-      .addScaledVector(tipDir, -fwdM)
-      .addScaledVector(upDir, hgtM)
-      .addScaledVector(lateralDir, -latM);
-
-    // 1. Update Mounting Bracket from wrist joint to camera mount base
-    if (mountedBracketRef.current) {
-      orientCylinder(mountedBracketRef.current, pWrist, pCamRobot, 0.004);
-      mountedBracketRef.current.visible = isOffsetEnabled;
-    }
-
-    if (mountedClampRef.current) {
-      const clampEnd = pWrist.clone().addScaledVector(tipDir, 0.016);
-      orientCylinder(mountedClampRef.current, pWrist, clampEnd, 0.011);
-      mountedClampRef.current.visible = isOffsetEnabled;
-    }
-
-    // 2. Update Camera Device Body Position & Tilted Orientation
-    if (mountedCamMeshRef.current) {
-      mountedCamMeshRef.current.position.copy(pCamRobot);
-      mountedCamMeshRef.current.visible = isOffsetEnabled;
-
-      if (isOffsetEnabled) {
-        // Line-of-sight pointing from camera lens toward gripper TCP pTip:
-        const camLookDir = new THREE.Vector3().subVectors(pTip, pCamRobot).normalize();
-        const camRightDir = lateralDir.clone();
-        const camUpDir = new THREE.Vector3().crossVectors(camLookDir, camRightDir).normalize();
-
-        const camRotMatrix = new THREE.Matrix4().makeBasis(camRightDir, camUpDir, camLookDir);
-        mountedCamMeshRef.current.quaternion.setFromRotationMatrix(camRotMatrix);
-      }
-    }
-
-    // 3. Update Rigid Tool Rod / Optical Sightline (Camera -> TCP)
-    if (mountedToolRodRef.current) {
-      if (showCameraPath && isOffsetEnabled) {
-        mountedToolRodRef.current.visible = true;
-        mountedToolRodRef.current.geometry.setFromPoints([pCamRobot, pTip]);
-        mountedToolRodRef.current.computeLineDistances();
-      } else {
-        mountedToolRodRef.current.visible = false;
-      }
-    }
-
-    // 4. Update Recorded Camera Trajectory Waypoint Marker (on table cyan dashed line)
-    if (camWaypointRef.current) {
-      if (showCameraPath && targetCam && isOffsetEnabled) {
-        camWaypointRef.current.visible = true;
-        camWaypointRef.current.position.set(targetCam[0], targetCam[1], targetCam[2]);
-      } else {
-        camWaypointRef.current.visible = false;
-      }
-    }
-
     const qDeg = ikRes
       ? ikRes.q.map((rad) => Math.round(THREE.MathUtils.radToDeg(rad)))
       : [];
@@ -1593,7 +1443,7 @@ export default function Viewport3D({
           </button>
         </div>
 
-        {/* Row 2: Viewport Visibility Toggles (Zones, Cam Path, Components) */}
+        {/* Row 2: Viewport Visibility Toggles (Zones, Camera Path, Components) */}
         <div className="flex items-center gap-1 bg-[#0a0a0a]/90 backdrop-blur-md border border-neutral-800 p-1 rounded-xl text-[11px] shadow-xl">
           <button
             onClick={() => setShowZones(!showZones)}
@@ -1615,10 +1465,10 @@ export default function Viewport3D({
                 ? 'bg-neutral-800 text-white border-neutral-700 shadow-sm'
                 : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:bg-neutral-800 hover:text-neutral-200'
             }`}
-            title={showCameraPath ? 'Hide Camera Trajectory & Tool Rod' : 'Show Camera Trajectory & Tool Rod'}
+            title={showCameraPath ? 'Hide Camera Trajectory' : 'Show Camera Trajectory'}
           >
             <Camera className="w-3 h-3 text-neutral-400" />
-            <span>Cam Path</span>
+            <span>Camera Path</span>
           </button>
 
           <button
@@ -1708,36 +1558,6 @@ export default function Viewport3D({
             </div>
           </div>
 
-          {/* Mounted Camera Rig Section */}
-          <div className="bg-[#050505] rounded-xl p-2.5 border border-neutral-800/80 flex flex-col gap-1 text-[11px] font-mono">
-            <div className="flex items-center justify-between font-bold text-neutral-200">
-              <span className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-neutral-400" />
-                📷 Mounted Camera Rig
-              </span>
-              <span className="text-[10px] bg-neutral-900 border border-neutral-800 px-1.5 py-0.5 rounded text-neutral-300">
-                θ: {(robotConfig?.gripper_offset?.pitch_deg ?? 40.4).toFixed(1)}°
-              </span>
-            </div>
-            <div className="text-[10px] text-neutral-400 flex flex-col gap-0.5 mt-0.5">
-              <div className="flex justify-between">
-                <span className="text-neutral-500">Forward offset:</span>
-                <span className="text-neutral-200 font-semibold">{(robotConfig?.gripper_offset?.forward_cm ?? 12.8).toFixed(1)} cm</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-500">Vertical offset:</span>
-                <span className="text-neutral-200 font-semibold">{(robotConfig?.gripper_offset?.height_cm ?? 10.9).toFixed(1)} cm</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-neutral-500">Bracket Base:</span>
-                <span className="text-neutral-200 font-semibold">Fixed to Wrist / Gripper</span>
-              </div>
-              <div className="flex justify-between pt-1 border-t border-neutral-800 text-[9.5px]">
-                <span className="text-neutral-400 font-bold">Rigid Attachment:</span>
-                <span className="text-neutral-200">Synchronized with Base & IK</span>
-              </div>
-            </div>
-          </div>
         </div>
       )}
 
@@ -1777,7 +1597,7 @@ export default function Viewport3D({
               <div className="flex items-center gap-1">
                 <span className="w-2.5 h-0.5 bg-cyan-400" />
                 <span className="font-semibold text-neutral-200">Cyan:</span>
-                <span className="text-neutral-400">Cam Path</span>
+                <span className="text-neutral-400">Camera Path</span>
               </div>
             </>
           )}

@@ -98,15 +98,6 @@ export default function App() {
     offset_y: -0.406,
     offset_z: 0.00,
     yaw_deg: 90.0,
-    gripper_offset: {
-      forward_cm: 12.8,
-      height_cm: 10.9,
-      lateral_cm: 0.0,
-      pitch_deg: 40.4,
-      roll_deg: 0.0,
-      yaw_deg: 0.0,
-      enabled: true
-    },
     initial_position: {
       x: 0.24,
       y: 0.00,
@@ -258,6 +249,34 @@ export default function App() {
     }
   };
 
+  const handleUpdateEpisodeCameraTcpGeometry = async (episodeIndex, markerPosesTcp) => {
+    const response = await fetch(`/api/episodes/${episodeIndex}/camera-tcp-geometry`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ marker_poses_tcp: markerPosesTcp }),
+    });
+    const data = await response.json();
+    if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not update camera-to-TCP geometry');
+    setEpisodes((previous) => previous.map((episode) =>
+      episode.episode_index === episodeIndex ? data.episode : episode
+    ));
+    return data.episode;
+  };
+
+  const handleRecalibrateEpisodeCameraTcp = async (episodeIndex, startTimeS, endTimeS) => {
+    const response = await fetch(`/api/episodes/${episodeIndex}/recalibrate-camera-tcp`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ start_time_s: startTimeS, end_time_s: endTimeS }),
+    });
+    const data = await response.json();
+    if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Episode recalibration failed');
+    setEpisodes((previous) => previous.map((episode) =>
+      episode.episode_index === episodeIndex ? data.episode : episode
+    ));
+    return data.episode;
+  };
+
   return (
     <ErrorBoundary>
       {currentView === 'mobile' ? (
@@ -289,6 +308,8 @@ export default function App() {
               onDeleteEpisode={handleDeleteEpisode}
               onClearAllEpisodes={handleClearAllEpisodes}
               onUpdateEpisodeTask={handleUpdateEpisodeTask}
+              onUpdateEpisodeCameraTcpGeometry={handleUpdateEpisodeCameraTcpGeometry}
+              onRecalibrateEpisodeCameraTcp={handleRecalibrateEpisodeCameraTcp}
               robotConfig={robotConfig}
               onUpdateRobotConfig={(newCfg) => {
                 setRobotConfig(newCfg);

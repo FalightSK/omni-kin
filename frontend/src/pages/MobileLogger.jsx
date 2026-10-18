@@ -27,6 +27,11 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const containerRef = useRef(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [calibrationSessionId, setCalibrationSessionId] = useState(null);
+  const [calibrationPreview, setCalibrationPreview] = useState(null);
+  const [isCalibrating, setIsCalibrating] = useState(false);
+  const [calibrationMessage, setCalibrationMessage] = useState('');
+  const [fullyOpenConfirmed, setFullyOpenConfirmed] = useState(false);
   const [taskPrompt, setTaskPrompt] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('omnikin_task_prompt') || 'pick cup';
@@ -98,6 +103,38 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     return () => { stopped = true; if (timer) clearTimeout(timer); };
   }, []);
 
+  useEffect(() => {
+    if (!isCameraActive || calibrationSessionId || isCalibrating) return undefined;
+    let stopped = false;
+    let timer;
+    const pollPreview = async () => {
+      const video = videoRef.current;
+      if (!video || video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+        timer = setTimeout(pollPreview, 700);
+        return;
+      }
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.78));
+        if (!blob) throw new Error('Could not capture preview frame');
+        const form = new FormData();
+        form.append('frame', blob, 'calibration-preview.jpg');
+        const response = await fetch('/api/calibration/preview', { method: 'POST', body: form });
+        const data = await response.json();
+        if (!stopped && response.ok && data.status === 'success') setCalibrationPreview(data);
+        else if (!stopped && data.message) setCalibrationMessage(data.message);
+      } catch (error) {
+        if (!stopped) setCalibrationMessage(error.message || 'Waiting for marker detection…');
+      }
+      if (!stopped) timer = setTimeout(pollPreview, 700);
+    };
+    pollPreview();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [isCameraActive, calibrationSessionId, isCalibrating]);
+
   // Orientation State: Checks window aspect ratio and Accelerometer Ax (|Ax| >= 6.0 m/s^2)
   const [isLandscape, setIsLandscape] = useState(
     typeof window !== 'undefined' ? window.innerWidth >= window.innerHeight : true
@@ -108,6 +145,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const [currentDeviceIdx, setCurrentDeviceIdx] = useState(0);
 
   const mediaRecorderRef = useRef(null);
+  const activeTakeCalibrationRef = useRef(null);
   const imuDataRef = useRef([]);
   const imuSampleCountRef = useRef(0);
   const startTimeRef = useRef(0);
@@ -300,6 +338,10 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const switchCamera = async () => {
     if (!devices || devices.length < 2) return;
     const nextIdx = (currentDeviceIdx + 1) % devices.length;
+    setCalibrationSessionId(null);
+    setCalibrationPreview(null);
+    setFullyOpenConfirmed(false);
+    setCalibrationMessage('Camera changed. Recalibrate this session before recording.');
     setCurrentDeviceIdx(nextIdx);
     setStatusMsg(`Switched to Camera ${nextIdx + 1}`);
     setTimeout(() => setStatusMsg(''), 1500);
@@ -376,6 +418,56 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
     }
   };
 
+  const captureCameraTcpCalibration = async () => {
+    if (!calibrationPreview?.ready) {
+      setCalibrationMessage('Show table tags 0 and 1 plus jaw tags 2 and 3; jaw tags must each be at least 50 px wide.');
+      return;
+    }
+    if (!fullyOpenConfirmed) {
+      setCalibrationMessage('Open the gripper fully to its physical stop and confirm before calibrating.');
+      return;
+    }
+    const stream = videoRef.current?.srcObject;
+    if (!stream || typeof MediaRecorder === 'undefined') {
+      setCalibrationMessage('This browser cannot record the calibration clip.');
+      return;
+    }
+
+    setIsCalibrating(true);
+    setCalibrationMessage('Recording calibration… keep the jaws fully open and make small rig movements while keeping all four tags visible.');
+    try {
+      const supported = ['video/webm;codecs=vp9', 'video/webm'].find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = supported ? new MediaRecorder(stream, { mimeType: supported }) : new MediaRecorder(stream);
+      const chunks = [];
+      recorder.ondataavailable = (event) => { if (event.data?.size) chunks.push(event.data); };
+      await new Promise((resolve, reject) => {
+        recorder.onerror = () => reject(new Error('Calibration video capture failed'));
+        recorder.onstop = resolve;
+        recorder.start(500);
+        window.setTimeout(() => {
+          if (recorder.state !== 'inactive') recorder.stop();
+        }, 6000);
+      });
+      const mimeType = chunks[0]?.type || recorder.mimeType || 'video/webm';
+      const blob = new Blob(chunks, { type: mimeType });
+      if (!blob.size) throw new Error('Calibration clip was empty');
+      const form = new FormData();
+      form.append('video', blob, 'camera-tcp-calibration.webm');
+      const response = await fetch('/api/calibration/camera-tcp', { method: 'POST', body: form });
+      const result = await response.json();
+      if (!response.ok || result.status !== 'success') throw new Error(result.message || 'Calibration failed');
+      setCalibrationSessionId(result.calibration_id);
+      setCalibrationPreview(null);
+      setCalibrationMessage(`Calibration passed · ${result.calibration.quality.valid_frames} frames · RMS ${result.calibration.quality.reprojection_rms_px.toFixed(2)} px`);
+      setStatusMsg('Camera-to-TCP calibrated for this session');
+      window.setTimeout(() => setStatusMsg(''), 2500);
+    } catch (error) {
+      setCalibrationMessage(error.message || 'Calibration failed; adjust the setup and retry.');
+    } finally {
+      setIsCalibrating(false);
+    }
+  };
+
   const processUploadQueue = async () => {
     if (isUploadingRef.current) return;
     if (uploadQueueRef.current.length === 0) return;
@@ -391,6 +483,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
       formData.append('gripper_data', JSON.stringify(item.gripperData));
       formData.append('task', item.task);
       formData.append('client_take_id', item.id);
+      formData.append('calibration_id', item.calibrationId || '');
 
       let success = false;
       for (let attempt = 0; attempt < 3; attempt++) {
@@ -430,8 +523,13 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
   const activeTakeChunksRef = useRef([]);
 
   const startRecording = () => {
+    if (!calibrationSessionId) {
+      setCalibrationMessage('Complete camera-to-TCP calibration before recording.');
+      return;
+    }
     if (!videoRef.current || !videoRef.current.srcObject) return;
     const sessionChunks = [];
+    activeTakeCalibrationRef.current = calibrationSessionId;
     activeTakeChunksRef.current = sessionChunks;
     imuDataRef.current = [];
     gripperDataRef.current = [{ t: 0.0, val: gripperValRef.current }];
@@ -506,6 +604,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         ext,
         imuData: currentImu,
         gripperData: currentGripper,
+        calibrationId: activeTakeCalibrationRef.current,
         task: currentTask,
         createdAt: new Date().toLocaleTimeString()
       };
@@ -685,6 +784,63 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
         </div>
       )}
 
+      {isCameraActive && !calibrationSessionId && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <section className="w-full max-w-lg rounded-2xl border border-neutral-700 bg-neutral-950/95 p-5 text-white shadow-2xl">
+            <div className="mb-3 flex items-center gap-2">
+              <Scan className="h-5 w-5 text-emerald-300" />
+              <h2 className="text-sm font-semibold uppercase tracking-wide">Calibrate camera to TCP</h2>
+            </div>
+            <p className="mb-4 text-xs leading-relaxed text-neutral-300">
+              Calibration is required once each time you enter recording. Set the gripper against its fully open physical stop, show the two table tags and both jaw tags, then move the rigid phone/gripper rig slightly during the 6-second capture.
+            </p>
+            <div className="mb-3 grid grid-cols-2 gap-2">
+              {[0, 1, 2, 3].map((id) => {
+                const marker = calibrationPreview?.markers?.[String(id)];
+                const ready = marker?.visible && marker?.large_enough;
+                return (
+                  <div key={id} className={`flex items-center justify-between rounded-lg border px-3 py-2 text-xs ${ready ? 'border-emerald-800 bg-emerald-950/40 text-emerald-200' : 'border-neutral-800 bg-black/40 text-neutral-400'}`}>
+                    <span className="flex items-center gap-2">
+                      <span className={`h-2 w-2 rounded-full ${ready ? 'bg-emerald-400' : 'bg-neutral-600'}`} />
+                      {id < 2 ? 'Table' : 'Jaw'} tag {id}
+                    </span>
+                    <span className="font-mono">{marker?.visible ? `${marker.width_px} px` : 'not visible'}</span>
+                  </div>
+                );
+              })}
+            </div>
+            {!calibrationPreview?.geometry_configured && (
+              <div className="mb-3 rounded-lg border border-amber-900 bg-amber-950/30 p-3 text-xs text-amber-200">
+                CAD geometry for jaw tags 2 and 3 is missing. Enter both marker poses in Robot Setup → Gripper before calibrating.
+              </div>
+            )}
+            <label className="mb-3 flex items-start gap-2 text-xs text-neutral-200">
+              <input
+                type="checkbox"
+                checked={fullyOpenConfirmed}
+                onChange={(event) => setFullyOpenConfirmed(event.target.checked)}
+                className="mt-0.5 accent-emerald-400"
+              />
+              The gripper jaws are held at the fully open physical stop.
+            </label>
+            <div className="mb-4 min-h-8 text-xs text-neutral-400" role="status" aria-live="polite">
+              {calibrationMessage || (calibrationPreview?.ready ? 'All required tags are visible and large enough.' : 'Waiting for all four required ArUco markers…')}
+            </div>
+            <button
+              type="button"
+              onClick={captureCameraTcpCalibration}
+              disabled={!calibrationPreview?.ready || !fullyOpenConfirmed || isCalibrating}
+              className="w-full rounded-xl bg-white px-4 py-3 text-xs font-bold uppercase tracking-wide text-black disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isCalibrating ? 'Capturing and validating…' : 'Capture calibration'}
+            </button>
+            <p className="mt-3 text-center text-[10px] text-neutral-500">
+              Calibration video is used only for camera geometry and is never added to the demonstration queue.
+            </p>
+          </section>
+        </div>
+      )}
+
       {/* ========================================================================= */}
       {/* LANDSCAPE LAYOUT (HORIZONTAL DUAL-EDGE ERGONOMICS)                          */}
       {/* ========================================================================= */}
@@ -846,7 +1002,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
             {/* Large 76px Circular Shutter Button Under Right Thumb */}
             <button
               onClick={isRecording ? stopRecording : startRecording}
-              disabled={!isCameraActive}
+              disabled={!isCameraActive || (!isRecording && !calibrationSessionId)}
               className="w-18 h-18 rounded-full border-4 border-white flex items-center justify-center p-1.5 active:scale-95 transition-transform disabled:opacity-40 shadow-2xl"
               title={isRecording ? 'Stop Recording' : 'Start Recording'}
             >
@@ -1003,7 +1159,7 @@ export default function MobileLogger({ onUploadSuccess, onExit }) {
               {/* Circular Shutter Button */}
               <button
                 onClick={isRecording ? stopRecording : startRecording}
-                disabled={!isCameraActive}
+                disabled={!isCameraActive || (!isRecording && !calibrationSessionId)}
                 className="w-18 h-18 rounded-full border-4 border-white flex items-center justify-center p-1.5 active:scale-95 transition-transform"
               >
                 <div

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import MarkerGeometryEditor from './MarkerGeometryEditor';
 import {
   Bot,
   X,
@@ -13,8 +14,6 @@ import {
   Copy,
   Sparkles,
   ShieldCheck,
-  ChevronDown,
-  ChevronUp,
   Bookmark,
   Save
 } from 'lucide-react';
@@ -27,15 +26,10 @@ export default function RobotSetupModal({ isOpen, onClose, onConfigSaved, initia
     offset_z: 0.00,
     yaw_deg: 90.0,
     q3_safe_max_deg: 0.0,
-    gripper_offset: {
-      forward_cm: 12.8,
-      height_cm: 10.9,
-      lateral_cm: 0.0,
-      pitch_deg: 40.4,
-      roll_deg: 0.0,
-      yaw_deg: 0.0,
-      enabled: true
-    }
+    aruco_tcp_geometry: {
+      '2': { xyz_mm: [-71.522, 56.205, 21], rpy_deg: [0, 0, 0] },
+      '3': { xyz_mm: [-71.522, -56.205, 21], rpy_deg: [0, 0, 0] },
+    },
   });
   const [presets, setPresets] = useState([]);
   const [activeTab, setActiveTab] = useState(initialTab || 'offset'); // 'offset' | 'gripper' | 'initial_pos' | 'kinematics' | 'urdf'
@@ -43,9 +37,7 @@ export default function RobotSetupModal({ isOpen, onClose, onConfigSaved, initia
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isRecalculating, setIsRecalculating] = useState(false);
   const [recalcSuccess, setRecalcSuccess] = useState(false);
-  const [gripperApplySuccess, setGripperApplySuccess] = useState(false);
-  const [autoSyncCadAngle, setAutoSyncCadAngle] = useState(true);
-  const [showCadSchematic, setShowCadSchematic] = useState(false);
+  const [geometrySaveStatus, setGeometrySaveStatus] = useState('');
 
   // URDF Editor State
   const [urdfText, setUrdfText] = useState('');
@@ -234,54 +226,6 @@ export default function RobotSetupModal({ isOpen, onClose, onConfigSaved, initia
     }));
   };
 
-  const handleGripperChange = (field, val) => {
-    setConfig((prev) => {
-      const current = { ...(prev.gripper_offset || {}) };
-      let newOffset = { ...current, [field]: val };
-
-      if (autoSyncCadAngle) {
-        const fwd = Number(field === 'forward_cm' ? val : (current.forward_cm ?? 12.8));
-        if (field === 'pitch_deg') {
-          const rad = (Number(val) * Math.PI) / 180;
-          const h = fwd * Math.tan(rad);
-          newOffset.height_cm = Math.round(h * 10) / 10;
-        } else if (field === 'height_cm') {
-          if (fwd > 0.01) {
-            const rad = Math.atan2(Number(val), fwd);
-            const deg = (rad * 180) / Math.PI;
-            newOffset.pitch_deg = Math.round(deg * 10) / 10;
-          }
-        } else if (field === 'forward_cm') {
-          const theta = Number(current.pitch_deg ?? 40.4);
-          const rad = (theta * Math.PI) / 180;
-          const h = Number(val) * Math.tan(rad);
-          newOffset.height_cm = Math.round(h * 10) / 10;
-        }
-      }
-
-      return {
-        ...prev,
-        gripper_offset: newOffset
-      };
-    });
-  };
-
-  const applyGripperPreset = (fwd, hgt, lat = 0.0, pitch = 40.4, roll = 0.0, yaw = 0.0) => {
-    setConfig((prev) => ({
-      ...prev,
-      gripper_offset: {
-        ...(prev.gripper_offset || {}),
-        forward_cm: fwd,
-        height_cm: hgt,
-        lateral_cm: lat,
-        pitch_deg: pitch,
-        roll_deg: roll,
-        yaw_deg: yaw,
-        enabled: true
-      }
-    }));
-  };
-
   const handleInitialPosChange = (field, val) => {
     setConfig((prev) => ({
       ...prev,
@@ -318,30 +262,26 @@ export default function RobotSetupModal({ isOpen, onClose, onConfigSaved, initia
     }));
   };
 
-  const handleSaveGripperOffset = async (applyToEpisodes = false) => {
-    setIsSaving(true);
-    setGripperApplySuccess(false);
+  const saveMarkerGeometry = async () => {
+    const geometry = config.aruco_tcp_geometry;
+    if (!geometry) {
+      setGeometrySaveStatus('Fill all XYZ and RPY fields for both tags.');
+      return;
+    }
+    setGeometrySaveStatus('Saving…');
     try {
-      const payload = {
-        ...(config.gripper_offset || {}),
-        q3_safe_max_deg: config.q3_safe_max_deg !== undefined ? Number(config.q3_safe_max_deg) : 0.0,
-        apply_to_episodes: applyToEpisodes
-      };
-      const res = await fetch('/api/robot/gripper_offset', {
+      const response = await fetch('/api/robot/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({ aruco_tcp_geometry: geometry }),
       });
-      const data = await res.json();
-      if (data.status === 'success') {
-        setGripperApplySuccess(true);
-        if (onConfigSaved) onConfigSaved(config);
-        setTimeout(() => setGripperApplySuccess(false), 2500);
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsSaving(false);
+      const data = await response.json();
+      if (!response.ok || data.status !== 'success') throw new Error(data.message || 'Could not save CAD marker geometry');
+      setConfig(data.config);
+      onConfigSaved?.(withoutLegacyCameraOffset(data.config));
+      setGeometrySaveStatus('CAD geometry saved for future mobile sessions.');
+    } catch (error) {
+      setGeometrySaveStatus(error.message);
     }
   };
 
@@ -744,130 +684,31 @@ export default function RobotSetupModal({ isOpen, onClose, onConfigSaved, initia
           {/* TAB 2: GRIPPER / TOOL */}
           {activeTab === 'gripper' && (
             <div className="flex flex-col gap-3">
-              {/* Top Row: Enable Toggle & Sync */}
-              <div className="flex items-center justify-between bg-[#050505] border border-neutral-800 p-2.5 rounded-xl text-xs">
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    id="gripperActive"
-                    checked={config.gripper_offset?.enabled ?? true}
-                    onChange={(e) => handleGripperChange('enabled', e.target.checked)}
-                    className="w-4 h-4 accent-white cursor-pointer rounded"
-                  />
-                  <label htmlFor="gripperActive" className="font-medium text-neutral-200 cursor-pointer">
-                    Enable 6-DoF TCP Calibration
-                  </label>
+              <section className="rounded-xl border border-neutral-800 bg-neutral-950 p-3 flex flex-col gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Jaw ArUco geometry relative to TCP</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-neutral-400">
+                    Enter the CAD pose of each 22 mm marker at the fully open stop. Positions use millimeters; orientations use XYZ Euler angles in degrees.
+                  </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setAutoSyncCadAngle(!autoSyncCadAngle)}
-                  className={`px-2 py-0.5 rounded text-[11px] font-mono transition-colors ${
-                    autoSyncCadAngle
-                      ? 'bg-neutral-900 border border-neutral-700 text-neutral-200'
-                      : 'bg-transparent text-neutral-500 hover:text-neutral-300'
-                  }`}
-                >
-                  {autoSyncCadAngle ? '🔗 Auto-Sync (h = d · tan θ)' : '🔓 Manual Offsets'}
-                </button>
-              </div>
-
-              {/* 3 Sliders: Forward, Height, Pitch */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {/* Forward Distance */}
-                <div className="bg-[#050505] p-3 rounded-xl border border-neutral-800 flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-neutral-300">Forward (d)</span>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={config.gripper_offset?.forward_cm ?? 12.8}
-                        onChange={(e) => handleGripperChange('forward_cm', parseFloat(e.target.value) || 0)}
-                        className="w-14 px-1.5 py-0.5 text-xs font-mono bg-neutral-900 border border-neutral-800 rounded text-right text-white font-medium focus:outline-none"
-                      />
-                      <span className="text-xs text-neutral-500 font-mono">cm</span>
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="30"
-                    step="0.1"
-                    value={config.gripper_offset?.forward_cm ?? 12.8}
-                    onChange={(e) => handleGripperChange('forward_cm', parseFloat(e.target.value))}
-                    className="w-full accent-white cursor-pointer h-1.5 bg-neutral-800 rounded-lg"
-                  />
-                  <div className="flex justify-between text-[10px] font-mono text-neutral-500">
-                    <span>0 cm</span>
-                    <span>12.8 (Rig)</span>
-                    <span>30 cm</span>
-                  </div>
+                <MarkerGeometryEditor
+                  value={config.aruco_tcp_geometry}
+                  onChange={(value) => setConfig((previous) => ({ ...previous, aruco_tcp_geometry: value }))}
+                />
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={saveMarkerGeometry}
+                    disabled={!config.aruco_tcp_geometry || isSaving}
+                    className="rounded-lg bg-white px-3 py-2 text-xs font-semibold text-black disabled:opacity-40"
+                  >
+                    Save CAD geometry
+                  </button>
+                  <span className="text-xs text-neutral-400" role="status">{geometrySaveStatus}</span>
                 </div>
+              </section>
 
-                {/* Pitch Angle */}
-                <div className="bg-[#050505] p-3 rounded-xl border border-neutral-800 flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-neutral-300">Tilt Angle (θ)</span>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        step="0.5"
-                        value={config.gripper_offset?.pitch_deg ?? 40.4}
-                        onChange={(e) => handleGripperChange('pitch_deg', parseFloat(e.target.value) || 0)}
-                        className="w-14 px-1.5 py-0.5 text-xs font-mono bg-neutral-900 border border-neutral-800 rounded text-right text-white font-medium focus:outline-none"
-                      />
-                      <span className="text-xs text-neutral-500 font-mono">°</span>
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="90"
-                    step="0.5"
-                    value={config.gripper_offset?.pitch_deg ?? 40.4}
-                    onChange={(e) => handleGripperChange('pitch_deg', parseFloat(e.target.value))}
-                    className="w-full accent-white cursor-pointer h-1.5 bg-neutral-800 rounded-lg"
-                  />
-                  <div className="flex justify-between text-[10px] font-mono text-neutral-500">
-                    <span>0° (Level)</span>
-                    <span>40.4°</span>
-                    <span>90°</span>
-                  </div>
-                </div>
-
-                {/* Height Offset */}
-                <div className="bg-[#050505] p-3 rounded-xl border border-neutral-800 flex flex-col gap-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-medium text-neutral-300">Height (h)</span>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={config.gripper_offset?.height_cm ?? 10.9}
-                        onChange={(e) => handleGripperChange('height_cm', parseFloat(e.target.value) || 0)}
-                        className="w-14 px-1.5 py-0.5 text-xs font-mono bg-neutral-900 border border-neutral-800 rounded text-right text-white font-medium focus:outline-none"
-                      />
-                      <span className="text-xs text-neutral-500 font-mono">cm</span>
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="25"
-                    step="0.1"
-                    value={config.gripper_offset?.height_cm ?? 10.9}
-                    onChange={(e) => handleGripperChange('height_cm', parseFloat(e.target.value))}
-                    className="w-full accent-white cursor-pointer h-1.5 bg-neutral-800 rounded-lg"
-                  />
-                  <div className="flex justify-between text-[10px] font-mono text-neutral-500">
-                    <span>0 cm</span>
-                    <span>10.9 (Rig)</span>
-                    <span>25 cm</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Wrist Camera Safety (q3 limit) */}
+              {/* Wrist pitch safety limit */}
               <div className="bg-[#050505] p-3 rounded-xl border border-neutral-800 flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-neutral-400" />
@@ -909,114 +750,6 @@ export default function RobotSetupModal({ isOpen, onClose, onConfigSaved, initia
                 </div>
               </div>
 
-              {/* Presets & Actions */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
-                <div className="flex items-center gap-1.5 font-mono text-xs">
-                  <span className="text-[11px] text-neutral-400 mr-1">Presets:</span>
-                  <button
-                    type="button"
-                    onClick={() => applyGripperPreset(12.8, 10.9, 0.0, 40.4)}
-                    className="px-2 py-0.5 rounded-lg bg-white hover:bg-neutral-200 text-black text-[11px] font-medium transition-colors shadow-sm"
-                  >
-                    ⭐ OMNI-KIN Rig (12.8cm, 40.4°)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applyGripperPreset(10.0, 5.8, 0.0, 30.0)}
-                    className="px-2 py-0.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-[11px] border border-neutral-800 transition-colors"
-                  >
-                    Direct Grasp (10cm, 30°)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => applyGripperPreset(0.0, 0.0, 0.0, 0.0)}
-                    className="px-2 py-0.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-[11px] border border-neutral-800 transition-colors"
-                  >
-                    Zero Offset
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={isSaving}
-                    onClick={() => handleSaveGripperOffset(false)}
-                    className="px-3 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 text-[11px] font-medium border border-neutral-800 transition-colors flex items-center gap-1.5"
-                    title="Updates the live 3D preview without modifying stored recordings"
-                  >
-                    <Sparkles className="w-3 h-3 text-neutral-400" />
-                    <span>{gripperApplySuccess ? '✓ Preview Updated!' : 'Update Live Preview'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={isSaving}
-                    onClick={() => handleSaveGripperOffset(true)}
-                    className="px-3 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-200 text-[11px] font-medium border border-neutral-800 transition-colors flex items-center gap-1.5"
-                    title="Explicitly recomputes stored gripper poses for recorded takes"
-                  >
-                    <span>Apply to Recorded Takes</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Collapsible CAD Schematic */}
-              <div className="pt-1">
-                <button
-                  type="button"
-                  onClick={() => setShowCadSchematic(!showCadSchematic)}
-                  className="text-[11px] font-medium text-neutral-400 hover:text-white flex items-center gap-1 transition-colors"
-                >
-                  {showCadSchematic ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                  <span>{showCadSchematic ? 'Hide CAD Schematic' : 'View CAD Schematic Blueprint'}</span>
-                </button>
-
-                {showCadSchematic && (
-                  <div className="mt-2 bg-[#050505] rounded-xl border border-neutral-800 p-3 flex flex-col items-center">
-                    {(() => {
-                      const gCfg = config.gripper_offset || { forward_cm: 12.8, height_cm: 10.9, pitch_deg: 40.4 };
-                      const fwd = Number(gCfg.forward_cm ?? 12.8);
-                      const hgt = Number(gCfg.height_cm ?? 10.9);
-                      const mountX = 380;
-                      const mountY = 170;
-                      const fwdPx = Math.max(60, Math.min(270, fwd * 18));
-                      const hgtPx = Math.max(30, Math.min(130, hgt * 11));
-                      const tipX = mountX - fwdPx;
-                      const camY = mountY - hgtPx;
-
-                      return (
-                        <svg viewBox="0 0 560 250" className="w-full max-w-[500px] h-[190px] select-none">
-                          <defs>
-                            <pattern id="cadGrid" width="20" height="20" patternUnits="userSpaceOnUse">
-                              <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#262626" strokeWidth="0.5" strokeOpacity="0.5" />
-                            </pattern>
-                          </defs>
-                          <rect width="560" height="250" fill="url(#cadGrid)" rx="10" />
-                          <line x1="30" y1={mountY} x2="520" y2={mountY} stroke="#737373" strokeWidth="1" strokeDasharray="6,4" />
-                          <polygon
-                            points={`${tipX},${mountY} ${mountX},${mountY} ${mountX},${camY}`}
-                            fill="#ffffff"
-                            fillOpacity="0.05"
-                            stroke="#737373"
-                            strokeWidth="1.2"
-                            strokeDasharray="4,2"
-                          />
-                          <line x1={tipX} y1={mountY} x2={mountX} y2={camY} stroke="#ffffff" strokeWidth="2" />
-                          <rect x={tipX + 16} y={mountY - 10} width={Math.max(40, mountX - tipX - 16)} height="20" rx="3" fill="#171717" stroke="#525252" strokeWidth="1" />
-                          <rect x={tipX - 10} y={mountY - 14} width="12" height="28" rx="2" fill="#0a0a0a" stroke="#737373" strokeWidth="1" />
-                          <circle cx={tipX} cy={mountY} r="4" fill="#ffffff" />
-                          <text x={tipX - 10} y={mountY - 10} fill="#ffffff" fontSize="9" fontFamily="monospace" textAnchor="end">
-                            TCP (0,0)
-                          </text>
-                          <circle cx={mountX} cy={camY} r="6" fill="#ffffff" />
-                          <text x={mountX + 10} y={camY + 4} fill="#ffffff" fontSize="9" fontFamily="monospace">
-                            Camera (d={fwd.toFixed(1)}cm, h={hgt.toFixed(1)}cm)
-                          </text>
-                        </svg>
-                      );
-                    })()}
-                  </div>
-                )}
-              </div>
             </div>
           )}
 

@@ -13,7 +13,7 @@ import os
 import cv2
 import numpy as np
 import scipy.signal
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as R, Slerp
 from robot_kinematics import (
     rotation_matrix_to_trajectory_euler,
     trajectory_euler_to_rotation_matrix,
@@ -60,6 +60,49 @@ def resolve_gripper_opening(states, marker_size_mm=22.0):
         "max_open_distance_mm": round(max_open_mm, 1),
         "formula": "clamp(opening_distance_mm / max_open_distance_mm * 100, 0, 100)",
     }
+
+
+def resolve_anchored_pose_validity(poses, sources):
+    """Mark table/map anchored poses and interpolate only bounded unanchored gaps."""
+    trajectory = np.asarray(poses, dtype=np.float64).copy()
+    if trajectory.ndim != 2 or trajectory.shape[1] < 6 or len(trajectory) != len(sources):
+        raise ValueError("Pose validity requires one source label per six-DoF pose")
+    validity = []
+    for source in sources:
+        anchored = source in {"dual_aruco", "single_aruco", "feature_pnp"}
+        validity.append({
+            "valid": anchored,
+            "source": source or "unknown",
+            "reason": "table_marker" if source in {"dual_aruco", "single_aruco"}
+            else "anchored_feature_map" if source == "feature_pnp"
+            else "no_table_anchor",
+        })
+
+    valid_indices = [index for index, item in enumerate(validity) if item["valid"]]
+    for left, right in zip(valid_indices, valid_indices[1:]):
+        if right - left <= 1:
+            continue
+        frames = np.arange(left + 1, right, dtype=np.float64)
+        fraction = (frames - left) / float(right - left)
+        trajectory[left + 1:right, :3] = (
+            trajectory[left, :3][None, :] * (1.0 - fraction[:, None])
+            + trajectory[right, :3][None, :] * fraction[:, None]
+        )
+        rotations = R.from_matrix(np.stack([
+            trajectory_euler_to_rotation_matrix(trajectory[left, 3:6]),
+            trajectory_euler_to_rotation_matrix(trajectory[right, 3:6]),
+        ]))
+        interpolated_rotations = Slerp([float(left), float(right)], rotations)(frames).as_matrix()
+        trajectory[left + 1:right, 3:6] = np.asarray([
+            rotation_matrix_to_trajectory_euler(matrix) for matrix in interpolated_rotations
+        ])
+        for index in range(left + 1, right):
+            validity[index] = {
+                "valid": True,
+                "source": "interpolated",
+                "reason": "interpolated_between_anchors",
+            }
+    return trajectory, validity
 
 
 def phone_euler_to_rotation_matrix(euler):
@@ -861,6 +904,8 @@ class VisualInertialTracker:
         self.last_gripper_states = []
         self.last_resolved_gripper_values = []
         self.last_gripper_calibration = None
+        self.last_camera_calibration = {"source": "unavailable", "rms_px": None}
+        self.last_pose_validity = []
 
         # Extended Kalman Filter Tuning Parameters
         self.ekf_params = {
@@ -1089,13 +1134,16 @@ class VisualInertialTracker:
         else:
             cap = cap_or_path
 
+        self.last_camera_calibration = {"source": "unavailable", "rms_px": None}
         if cap is None or not cap.isOpened():
+            self.last_camera_calibration = {"source": "generic_fov_prior", "rms_px": None}
             return self.estimate_camera_matrix(width, height, hfov_degrees=78.0)
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if total_frames <= 0:
             if is_own_cap:
                 cap.release()
+            self.last_camera_calibration = {"source": "generic_fov_prior", "rms_px": None}
             return self.estimate_camera_matrix(width, height, hfov_degrees=78.0)
 
         step = max(1, total_frames // max_scan_frames)
@@ -1183,6 +1231,7 @@ class VisualInertialTracker:
 
                 if ret_rms < 2.5 and 40.0 <= hfov_c <= 130.0 and 0.80 <= aspect_ratio <= 1.25:
                     print(f"[Adaptive Calibration Tier 1] Success! RMS={ret_rms:.2f}px, HFOV={hfov_c:.1f}deg, fx={fx_c:.1f}, dist={dist_calib.ravel()[:2]}")
+                    self.last_camera_calibration = {"source": "table_board_multiview", "rms_px": float(ret_rms)}
                     return K_calib.astype(np.float32), dist_calib.astype(np.float32)
             except Exception as e:
                 print(f"[Adaptive Calibration Tier 1] Fallback: {e}")
@@ -1199,10 +1248,12 @@ class VisualInertialTracker:
             ], dtype=np.float32)
             k1_prior = -0.04 if hfov_h > 90.0 else 0.0
             dist_hom = np.array([[k1_prior], [0.0], [0.0], [0.0]], dtype=np.float32)
+            self.last_camera_calibration = {"source": "table_board_homography", "rms_px": None}
             return K_hom, dist_hom
 
         # Tier 3: Adaptive smartphone prior
         print("[Adaptive Calibration Tier 3] Using general smartphone prior (HFOV=78.0deg)")
+        self.last_camera_calibration = {"source": "generic_fov_prior", "rms_px": None}
         return self.estimate_camera_matrix(width, height, hfov_degrees=78.0)
 
     @staticmethod
@@ -2139,7 +2190,8 @@ class VisualInertialTracker:
         return_dev_info=False,
         smooth=True,
         smooth_method="savgol",
-        smooth_window_ms=250
+        smooth_window_ms=250,
+        camera_intrinsics=None,
     ):
         """
         Sensory fusion: ArUco Ground Truth + OpenCV Virtual SLAM PnP + 100Hz IMU EKF.
@@ -2150,8 +2202,23 @@ class VisualInertialTracker:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-        # Generalized 3-Tier Adaptive Self-Calibration for ANY phone lens
-        camera_matrix, dist_coeffs = self.calibrate_camera_adaptive(cap, width, height)
+        if camera_intrinsics:
+            camera_matrix = np.asarray(camera_intrinsics["camera_matrix"], dtype=np.float64).copy()
+            dist_coeffs = np.asarray(camera_intrinsics.get("dist_coeffs", []), dtype=np.float64).reshape(-1, 1)
+            source_size = camera_intrinsics.get("image_size") or [width, height]
+            sx = width / max(1.0, float(source_size[0]))
+            sy = height / max(1.0, float(source_size[1]))
+            camera_matrix[0, :] *= sx
+            camera_matrix[1, :] *= sy
+            if dist_coeffs.size == 0:
+                dist_coeffs = np.zeros((5, 1), dtype=np.float64)
+            self.last_camera_calibration = {
+                "source": "session_camera_tcp_calibration",
+                "rms_px": camera_intrinsics.get("intrinsics_quality", {}).get("rms_px"),
+            }
+        else:
+            # Generalized 3-Tier Adaptive Self-Calibration for ANY phone lens
+            camera_matrix, dist_coeffs = self.calibrate_camera_adaptive(cap, width, height)
 
         # Initialize OpenCV Virtual SLAM Feature Map Tracker
         feature_tracker = ArucoFeatureMapTracker(camera_matrix, dist_coeffs)
@@ -2394,6 +2461,15 @@ class VisualInertialTracker:
 
         # Bridge manipulation occlusion gaps using UMI C1 Hermite Spline Engine
         final_trajectory = self._bridge_occlusion_intervals_umi(final_trajectory, video_detections, fps)
+
+        # VO/IMU-only estimates are accepted only when bracketed by table/map anchors.
+        final_trajectory, validity = resolve_anchored_pose_validity(
+            final_trajectory, [item.get("source") for item in dev_telemetry]
+        )
+        self.last_pose_validity = validity
+        for item, pose_state in zip(dev_telemetry, validity):
+            item["pose_valid"] = bool(pose_state["valid"])
+            item["pose_validity_reason"] = pose_state["reason"]
 
         self.last_raw_trajectory = final_trajectory.copy()
         if smooth and len(final_trajectory) >= 4:

@@ -40,8 +40,12 @@ from robot_kinematics import (
     get_robot_solver,
     get_robot_urdf,
     SerialURDFKinematics,
-    ROBOT_PRESETS
+    ROBOT_PRESETS,
+    transform_camera_trajectory_to_tcp,
+    transform_tcp_trajectory_to_camera,
+    tcp_marker_object_points,
 )
+from camera_tcp_calibration import DEFAULT_ARUCO_TCP_GEOMETRY, estimate_camera_tcp
 from integrity import (
     MAX_JSON_BYTES, MAX_UPLOAD_BYTES, dataset_slug, ensure_finite_number,
     VSLAM_PROCESSING_VERSION, episode_manifest, episode_needs_vslam_reprocess,
@@ -76,10 +80,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RECORDINGS_DIR = os.path.join(BASE_DIR, "recordings")
 EXPORT_DIR = os.path.join(BASE_DIR, "lerobot_exports")
 ROBOT_CONFIG_FILE = os.path.join(BASE_DIR, "robot_config.json")
+CALIBRATIONS_DIR = os.path.join(BASE_DIR, "camera_tcp_calibrations")
 
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 EXPORT_DIR = os.path.join(BASE_DIR, "lerobot_exports")
 os.makedirs(EXPORT_DIR, exist_ok=True)
+os.makedirs(CALIBRATIONS_DIR, exist_ok=True)
 
 def load_robot_config():
     default_cfg = {
@@ -89,6 +95,7 @@ def load_robot_config():
         "offset_z": 0.00,
         "yaw_deg": 90.0,
         "q3_safe_max_deg": 0.0,
+        # Retained only to read pre-calibration episodes; hidden from the active API/UI.
         "gripper_offset": {
             "forward_cm": 12.8,
             "height_cm": 10.9,
@@ -98,6 +105,7 @@ def load_robot_config():
             "yaw_deg": 0.0,
             "enabled": True
         },
+        "aruco_tcp_geometry": copy.deepcopy(DEFAULT_ARUCO_TCP_GEOMETRY),
         "initial_position": dict(DEFAULT_INITIAL_POSITION),
         "base_preset": {
             "offset_x": 0.038,
@@ -111,6 +119,10 @@ def load_robot_config():
             with open(ROBOT_CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
                 default_cfg.update(saved)
+                # Adopt the CAD geometry for old configs that predate this
+                # setting, or contain the previous unconfigured null default.
+                if not saved.get("aruco_tcp_geometry"):
+                    default_cfg["aruco_tcp_geometry"] = copy.deepcopy(DEFAULT_ARUCO_TCP_GEOMETRY)
                 # Ensure gripper_offset subkeys exist
                 if "gripper_offset" not in saved:
                     saved["gripper_offset"] = default_cfg["gripper_offset"]
@@ -141,6 +153,11 @@ def save_robot_config(cfg):
             json.dump(cfg, f, indent=2)
     except Exception as e:
         print(f"Error saving {ROBOT_CONFIG_FILE}: {e}")
+
+
+def _public_robot_config():
+    """Hide the read-only pre-calibration offset retained for old episodes."""
+    return {key: value for key, value in ROBOT_CONFIG.items() if key != "gripper_offset"}
 
 def validate_custom_urdf_config(config):
     """Fail before changing config if an active custom chain is not selectable."""
@@ -235,7 +252,9 @@ def safe_to_list(arr, fallback=None):
 
 def _config_snapshot():
     """Capture job inputs once so a concurrent calibration update cannot alter it."""
-    return copy.deepcopy(ROBOT_CONFIG)
+    snapshot = copy.deepcopy(ROBOT_CONFIG)
+    snapshot.pop("gripper_offset", None)
+    return snapshot
 
 
 def _new_tracker(config_snapshot):
@@ -355,6 +374,61 @@ def save_episode_meta(ep_data):
     except Exception as e:
         print(f"Error saving episode metadata: {e}")
 
+
+def _episode_camera_tcp_transform(ep):
+    calibration = ep.get("camera_tcp_calibration") or {}
+    transform = calibration.get("T_camera_tcp")
+    if transform is None:
+        return None
+    matrix = np.asarray(transform, dtype=np.float64)
+    if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+        raise ValueError("Episode camera-to-TCP calibration snapshot is invalid")
+    return matrix
+
+
+def _transform_camera_poses_for_episode(poses, ep, *, inverse=False):
+    """Use an episode's immutable marker calibration, falling back to its legacy offset."""
+    transform = _episode_camera_tcp_transform(ep)
+    if transform is not None:
+        fn = transform_tcp_trajectory_to_camera if inverse else transform_camera_trajectory_to_tcp
+        return fn(poses, transform)
+    saved_offset = ep.get("gripper_offset_applied")
+    if isinstance(saved_offset, dict):
+        calibrator = CameraGripperCalibrator(**saved_offset)
+    else:
+        calibrator = camera_gripper_calibrator
+    return calibrator.transform_trajectory(poses, to_gripper=not inverse)
+
+
+def _pose_validity_errors(ep):
+    states = ep.get("pose_validity")
+    poses = ep.get("poses") or ep.get("raw_poses") or []
+    if not states:
+        if ep.get("camera_tcp_calibration"):
+            return ["Pose validity diagnostics are missing for this calibrated episode"]
+        return []
+    if not isinstance(states, list) or len(states) != len(poses):
+        return [f"Pose validity has {len(states) if isinstance(states, list) else 0} entries for {len(poses)} poses"]
+    return [
+        f"Frame {index}: {state.get('reason', 'pose is unanchored')}"
+        for index, state in enumerate(states)
+        if not isinstance(state, dict) or not state.get("valid", False)
+    ]
+
+
+def _load_camera_tcp_calibration(calibration_id):
+    if not calibration_id or len(str(calibration_id)) != 32 or any(
+        char not in "0123456789abcdef" for char in str(calibration_id).lower()
+    ):
+        raise ValueError("A valid camera-to-TCP calibration session is required before recording")
+    path = os.path.join(CALIBRATIONS_DIR, f"{str(calibration_id).lower()}.json")
+    if not os.path.isfile(path):
+        raise ValueError("Camera-to-TCP calibration session was not found; calibrate this mobile session again")
+    with open(path, "r", encoding="utf-8") as stream:
+        snapshot = json.load(stream)
+    _episode_camera_tcp_transform({"camera_tcp_calibration": snapshot})
+    return snapshot
+
 def sync_episode_kinematics(ep, calib=None, persist=True):
     """
     Computes and stores server-side joint_states, robot_ee_poses, and actions for an episode.
@@ -386,10 +460,27 @@ def sync_episode_kinematics(ep, calib=None, persist=True):
 
         poses_arr = np.asarray(base_poses, dtype=np.float64)
 
+        invalid_pose_errors = _pose_validity_errors(ep)
+        if invalid_pose_errors:
+            ep["pose_tracking_valid"] = False
+            ep["kinematics_stale"] = True
+            ep["kinematics_stale_reason"] = "Unanchored camera poses; reprocess with table anchors visible"
+            ep["pose_validity_summary"] = {
+                "valid_frames": sum(bool(state.get("valid", False)) for state in ep.get("pose_validity", []) if isinstance(state, dict)),
+                "invalid_frames": len(invalid_pose_errors),
+                "errors": invalid_pose_errors[:20],
+            }
+            if persist:
+                save_episode_meta(ep)
+            return None
+
         # 1. Camera → Gripper TCP in table frame
-        ee_table = camera_gripper_calibrator.transform_trajectory(poses_arr, to_gripper=True)
+        ee_table = _transform_camera_poses_for_episode(poses_arr, ep)
         ep['ee_poses'] = ee_table.tolist()
-        ep['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
+        ep["pose_tracking_valid"] = True
+        ep.pop("pose_validity_summary", None)
+        if _episode_camera_tcp_transform(ep) is None:
+            ep['gripper_offset_applied'] = (ep.get('gripper_offset_applied') or camera_gripper_calibrator.get_config())
 
         # Resolve episode's independent base calibration
         if calib is not None:
@@ -486,7 +577,7 @@ def sync_episode_kinematics(ep, calib=None, persist=True):
         ep['fk_table_poses'] = np.array(fk_table, dtype=np.float32).tolist()
         # The mounted-camera preview must follow the same calibrated transform as
         # the processed TCP, including after joint smoothing changes the FK pose.
-        fk_camera = camera_gripper_calibrator.transform_trajectory(fk_table, to_gripper=False)
+        fk_camera = _transform_camera_poses_for_episode(fk_table, ep, inverse=True)
         ep['fk_camera_poses'] = np.array(fk_camera, dtype=np.float32).tolist()
         ep['ik_feasibility'] = {
             "feasible_percent": round(feasible_count / max(1, len(ee_robot)) * 100.0, 1),
@@ -600,6 +691,7 @@ def _reprocess_episode_from_video(
         smooth=smooth,
         smooth_method=smooth_method,
         smooth_window_ms=smooth_window_ms,
+        camera_intrinsics=(ep.get("camera_tcp_calibration") or {}).get("camera_intrinsics"),
     )
     for rendered_path in (dev_path, canny_path):
         rendered_frames, _ = _validate_video(rendered_path)
@@ -639,7 +731,7 @@ def _reprocess_episode_from_video(
         "duration": frame_count / fps,
         "timestamps": frame_timestamps(frame_count, fps),
         "imu_data": ep.get("imu_data", []),
-        "gripper_offset_applied": camera_gripper_calibrator.get_config(),
+        "pose_validity": safe_to_list(getattr(tracker, "last_pose_validity", None), []),
         "active_smoothing": {
             "method": smooth_method if smooth else "raw",
             "time_window_ms": int(smooth_window_ms),
@@ -656,11 +748,32 @@ def _reprocess_episode_from_video(
         status="processing",
         validation={"state": "pending", "errors": ["Kinematics synchronization pending"]},
     )
-    ee_poses = camera_gripper_calibrator.transform_trajectory(poses, to_gripper=True)
+    if _episode_camera_tcp_transform(ep) is None:
+        ep["gripper_offset_applied"] = ep.get("gripper_offset_applied") or camera_gripper_calibrator.get_config()
+    ee_poses = _transform_camera_poses_for_episode(poses, ep)
     ep["ee_poses"] = np.asarray(ee_poses, dtype=np.float64).tolist()
 
     if sync_episode_kinematics(ep, calib=calib) is None:
-        raise ValueError("Authoritative kinematics synchronization failed")
+        invalid_poses = _pose_validity_errors(ep)
+        if not invalid_poses:
+            raise ValueError("Authoritative kinematics synchronization failed")
+        ep["manifest"]["status"] = "processed"
+        ep["manifest"]["validation"] = {
+            "state": "failed",
+            "errors": ["Pose tracking contains unanchored frames", *invalid_poses[:20]],
+            "trajectory_frames": len(poses),
+        }
+        ep["vslam_migration_state"] = "current"
+        ep["vslam_processing_version"] = VSLAM_PROCESSING_VERSION
+        ep["dev_video_revision"] = uuid.uuid4().hex
+        ep["dev_video_url"] = _versioned_episode_video_url(
+            episode_id, "dev_visualization.mp4", ep["dev_video_revision"]
+        )
+        ep["canny_video_url"] = _versioned_episode_video_url(
+            episode_id, "canny_visualization.mp4", ep["dev_video_revision"]
+        )
+        save_episode_meta(ep)
+        return ep
 
     _validate_and_mark_reprocessed_episode(ep)
     revision = ep["dev_video_revision"]
@@ -716,12 +829,13 @@ def load_episodes_from_disk():
                         or not ep_data['ee_poses']
                         or 'gripper_offset_applied' not in ep_data
                     ) and 'poses' in ep_data:
-                        ee_p = camera_gripper_calibrator.transform_trajectory(ep_data['poses'], to_gripper=True)
+                        ee_p = _transform_camera_poses_for_episode(ep_data['poses'], ep_data)
                         ep_data['ee_poses'] = ee_p.tolist()
                         act = np.roll(ee_p, -1, axis=0)
                         act[-1] = ee_p[-1]
                         ep_data['actions'] = act.tolist()
-                        ep_data['gripper_offset_applied'] = camera_gripper_calibrator.get_config()
+                        if _episode_camera_tcp_transform(ep_data) is None:
+                            ep_data['gripper_offset_applied'] = ep_data.get('gripper_offset_applied') or camera_gripper_calibrator.get_config()
                     # Keep the standalone manifest aligned with the authoritative
                     # episode metadata, including after startup migration checks.
                     save_episode_meta(ep_data)
@@ -936,7 +1050,8 @@ def _sync_execute_processing_job(job):
         fps=fps,
         output_dev_video_path=dev_video_path,
         output_canny_video_path=canny_video_path,
-        return_dev_info=True
+        return_dev_info=True,
+        camera_intrinsics=(job.get("camera_tcp_calibration") or {}).get("camera_intrinsics"),
     )
 
     num_pts = len(anchored_poses)
@@ -976,9 +1091,15 @@ def _sync_execute_processing_job(job):
         # Default rule: If markers not detected, do not fail - default to Open (100.0%)
         gripper_states = [100.0] * num_pts
 
-    anchored_poses = np.array(anchored_poses)
-    # Apply 6-DoF Camera-to-Gripper Extrinsic Calibration
-    ee_poses = camera_gripper_calibrator.transform_trajectory(anchored_poses, to_gripper=True)
+    anchored_poses = np.asarray(anchored_poses, dtype=np.float64)
+    camera_tcp_calibration = copy.deepcopy(job.get("camera_tcp_calibration"))
+    calibration_context = {
+        "camera_tcp_calibration": camera_tcp_calibration,
+        "gripper_offset_applied": camera_gripper_calibrator.get_config(),
+    }
+    # Apply the immutable per-take camera→TCP snapshot, or the legacy offset
+    # for pre-calibration workflows which have no session snapshot.
+    ee_poses = _transform_camera_poses_for_episode(anchored_poses, calibration_context)
     actions = np.roll(ee_poses, -1, axis=0)
     actions[-1] = ee_poses[-1]
 
@@ -1003,6 +1124,10 @@ def _sync_execute_processing_job(job):
         'marker_size_cm': 10.0,
         'poses': anchored_poses.tolist(),
         'raw_poses': safe_to_list(getattr(job_tracker, 'last_raw_trajectory', None), anchored_poses),
+        'pose_validity': safe_to_list(getattr(job_tracker, 'last_pose_validity', None), []),
+        'pose_tracking_valid': all(
+            bool(state.get("valid", False)) for state in (getattr(job_tracker, 'last_pose_validity', None) or [])
+        ),
         'ee_poses': ee_poses.tolist(),
         'gripper_states': gripper_states,
         'gripper_state_units': 'percent',
@@ -1010,9 +1135,12 @@ def _sync_execute_processing_job(job):
         'actions': actions.tolist(),
         'timestamps': timestamps,
         'imu_data': parsed_imu,
-        'gripper_offset_applied': camera_gripper_calibrator.get_config(),
         'created_at': time.strftime("%Y-%m-%d %H:%M:%S")
     }
+    if camera_tcp_calibration:
+        episode_data["camera_tcp_calibration"] = camera_tcp_calibration
+    else:
+        episode_data["gripper_offset_applied"] = camera_gripper_calibrator.get_config()
     episode_data['manifest'] = episode_manifest(
         source_sha256=job['source_sha256'], frame_count=job['source_frame_count'],
         fps=job['source_fps'], imu_samples=len(parsed_imu),
@@ -1045,6 +1173,23 @@ def _sync_execute_processing_job(job):
 
     sync_episode_kinematics(episode_data)
     if not episode_data.get("joint_states") or not episode_data.get("robot_ee_poses"):
+        invalid_pose_errors = _pose_validity_errors(episode_data)
+        if invalid_pose_errors:
+            episode_data["manifest"]["validation"] = {
+                "state": "failed",
+                "errors": ["Pose tracking contains unanchored frames", *invalid_pose_errors[:20]],
+            }
+            episode_data["vslam_pose_validity_errors"] = invalid_pose_errors[:20]
+            episode_data["vslam_migration_state"] = "current"
+            episode_data["dev_video_url"] = _versioned_episode_video_url(
+                ep_uid, dev_video_filename, episode_data["dev_video_revision"]
+            )
+            episode_data["canny_video_url"] = _versioned_episode_video_url(
+                ep_uid, canny_video_filename, episode_data["dev_video_revision"]
+            )
+            save_episode_meta(episode_data)
+            _save_job_manifest(job, "processed", ["Pose tracking contains unanchored frames"])
+            return episode_data
         with EPISODE_LOCK:
             EPISODES_DB.remove(episode_data)
         episode_data["manifest"]["status"] = "failed"
@@ -1975,12 +2120,275 @@ async def clear_all_episodes():
     EPISODES_DB = []
     return JSONResponse({"status": "success", "message": "All episodes and recordings cleared"})
 
+def _detect_calibration_markers(frame, tracker):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    if tracker.detector is not None:
+        corners, ids, _ = tracker.detector.detectMarkers(gray)
+    else:
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, tracker.dictionary)
+    detected = {}
+    if ids is not None:
+        for marker_id, corner in zip(ids.flatten().tolist(), corners):
+            detected[int(marker_id)] = np.asarray(corner, dtype=np.float64).reshape(4, 2)
+    return detected
+
+
+@app.post("/api/calibration/preview")
+async def preview_camera_tcp_calibration(frame: UploadFile = File(...)):
+    """Return a live 0/1 table and 2/3 jaw marker checklist for the phone UI."""
+    image_bytes = await frame.read(8 * 1024 * 1024 + 1)
+    if len(image_bytes) > 8 * 1024 * 1024:
+        return JSONResponse({"status": "error", "message": "Preview frame is too large"}, status_code=413)
+    image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return JSONResponse({"status": "error", "message": "Could not decode camera preview frame"}, status_code=400)
+    tracker = _new_tracker(_config_snapshot())
+    markers = _detect_calibration_markers(image, tracker)
+    checklist = {}
+    for marker_id in (0, 1, 2, 3):
+        corners = markers.get(marker_id)
+        side_px = None
+        if corners is not None:
+            side_px = float(np.mean([
+                np.linalg.norm(corners[1] - corners[0]),
+                np.linalg.norm(corners[2] - corners[3]),
+            ]))
+        checklist[str(marker_id)] = {
+            "visible": corners is not None,
+            "width_px": round(side_px, 1) if side_px is not None else None,
+            "large_enough": bool(side_px is not None and (marker_id < 2 or side_px >= 50.0)),
+        }
+    geometry_ready = bool(ROBOT_CONFIG.get("aruco_tcp_geometry"))
+    ready = geometry_ready and all(item["visible"] and item["large_enough"] for item in checklist.values())
+    return JSONResponse({
+        "status": "success",
+        "markers": checklist,
+        "geometry_configured": geometry_ready,
+        "ready": ready,
+        "image_size": [int(image.shape[1]), int(image.shape[0])],
+    })
+
+
+@app.post("/api/calibration/camera-tcp")
+async def calibrate_camera_tcp(video: UploadFile = File(...)):
+    """Estimate and persist camera→TCP from a short fully-open, four-tag clip."""
+    geometry = ROBOT_CONFIG.get("aruco_tcp_geometry")
+    if not geometry:
+        return JSONResponse({
+            "status": "error",
+            "message": "Enter the CAD XYZ position and RPY orientation of jaw tags 2 and 3 in Robot Setup first.",
+        }, status_code=409)
+
+    temp_path = os.path.join(CALIBRATIONS_DIR, f"capture_{uuid.uuid4().hex}.upload")
+    cap = None
+    try:
+        await _stream_upload_to_file(video, temp_path)
+        frame_count, fps = _validate_video(temp_path)
+        duration = frame_count / fps
+        if duration < 3.0 or duration > 20.0:
+            raise ValueError("Calibration clip must be between 3 and 20 seconds")
+        cap = cv2.VideoCapture(temp_path)
+        if not cap.isOpened():
+            raise ValueError("Could not open the calibration video")
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        tracker = _new_tracker(_config_snapshot())
+        camera_matrix, dist_coeffs = tracker.calibrate_camera_adaptive(
+            cap, width, height, max_scan_frames=120
+        )
+        intrinsics_quality = copy.deepcopy(tracker.last_camera_calibration)
+        if intrinsics_quality.get("source") == "generic_fov_prior":
+            raise ValueError("Camera intrinsics fell back to a generic FOV estimate; show table tags 0 and 1 while moving the phone and retry")
+        if intrinsics_quality.get("rms_px") is not None and intrinsics_quality["rms_px"] > 2.0:
+            raise ValueError(f"Camera intrinsic reprojection RMS is {intrinsics_quality['rms_px']:.2f}px; maximum is 2px")
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        observations = []
+        table_centers = []
+        table_scales = []
+        table_angles = []
+        frame_index = 0
+        while True:
+            ok, image = cap.read()
+            if not ok:
+                break
+            markers = _detect_calibration_markers(image, tracker)
+            if all(marker_id in markers for marker_id in (0, 1, 2, 3)):
+                table_corners = markers[0]
+                table_centers.append(table_corners.mean(axis=0))
+                table_scales.append(float(np.mean([
+                    np.linalg.norm(table_corners[1] - table_corners[0]),
+                    np.linalg.norm(table_corners[2] - table_corners[3]),
+                ])))
+                table_angles.append(float(np.arctan2(
+                    table_corners[1, 1] - table_corners[0, 1],
+                    table_corners[1, 0] - table_corners[0, 0],
+                )))
+                jaw_sizes = [
+                    np.mean([np.linalg.norm(markers[mid][1] - markers[mid][0]),
+                             np.linalg.norm(markers[mid][2] - markers[mid][3])])
+                    for mid in (2, 3)
+                ]
+                if min(jaw_sizes) >= 50.0:
+                    observations.append({
+                        "frame_index": frame_index,
+                        "corners": {str(mid): markers[mid].tolist() for mid in (2, 3)},
+                    })
+            frame_index += 1
+        if len(observations) < 20:
+            raise ValueError(f"Only {len(observations)} frames show all four tags with jaw tags at least 50 px wide; need 20")
+        center_spread_px = float(np.max(np.linalg.norm(
+            np.asarray(table_centers) - np.median(table_centers, axis=0), axis=1
+        )))
+        scale_spread = float(np.ptp(table_scales) / max(1.0, np.median(table_scales)))
+        angle_spread = float(np.ptp(np.unwrap(table_angles)))
+        if center_spread_px < 12.0 and scale_spread < 0.08 and angle_spread < np.radians(5.0):
+            raise ValueError("Table-tag views did not vary enough for calibration; make small phone movements while keeping all four tags visible")
+
+        transform, quality = estimate_camera_tcp(
+            observations, geometry, camera_matrix, dist_coeffs, marker_size_mm=22.0
+        )
+        calibration_id = uuid.uuid4().hex
+        snapshot = {
+            "calibration_id": calibration_id,
+            "method": "paired_jaw_aruco_full_open",
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "image_size": [width, height],
+            "camera_matrix": np.asarray(camera_matrix, dtype=np.float64).tolist(),
+            "dist_coeffs": np.asarray(dist_coeffs, dtype=np.float64).reshape(-1).tolist(),
+            "intrinsics_quality": intrinsics_quality,
+            "camera_intrinsics": {
+                "image_size": [width, height],
+                "camera_matrix": np.asarray(camera_matrix, dtype=np.float64).tolist(),
+                "dist_coeffs": np.asarray(dist_coeffs, dtype=np.float64).reshape(-1).tolist(),
+                "intrinsics_quality": intrinsics_quality,
+            },
+            "marker_size_mm": 22.0,
+            "marker_poses_tcp": copy.deepcopy(geometry),
+            "observations": observations,
+            "T_camera_tcp": transform.tolist(),
+            "quality": quality,
+        }
+        with open(os.path.join(CALIBRATIONS_DIR, f"{calibration_id}.json"), "w", encoding="utf-8") as stream:
+            json.dump(snapshot, stream, indent=2)
+        return JSONResponse({
+            "status": "success",
+            "calibration_id": calibration_id,
+            "calibration": snapshot,
+            "message": "Camera-to-TCP calibration passed quality checks",
+        })
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+    finally:
+        if cap is not None:
+            cap.release()
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+
+
+@app.patch("/api/episodes/{episode_index}/recalibrate-camera-tcp")
+async def recalibrate_legacy_episode_camera_tcp(episode_index: int, payload: dict = Body(...)):
+    """Explicitly recalibrate a legacy episode from a user-selected open interval."""
+    try:
+        _ensure_idle("recalibrate an episode")
+        episode = next((ep for ep in EPISODES_DB if ep.get("episode_index") == episode_index), None)
+        if episode is None:
+            return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+        if episode.get("camera_tcp_calibration"):
+            return JSONResponse({"status": "error", "message": "This episode already has a camera-to-TCP calibration snapshot."}, status_code=409)
+        video_path = episode.get("video_path", "")
+        if not os.path.isfile(video_path):
+            raise ValueError("Episode source video is missing")
+        start_s = ensure_finite_number(payload.get("start_time_s"), "start_time_s", 0.0, 86400.0)
+        end_s = ensure_finite_number(payload.get("end_time_s"), "end_time_s", 0.0, 86400.0)
+        frame_count, fps = _validate_video(video_path)
+        start_frame = int(round(start_s * fps))
+        end_frame = int(round(end_s * fps))
+        if end_frame <= start_frame or (end_frame - start_frame) / fps < 3.0 or (end_frame - start_frame) / fps > 20.0:
+            raise ValueError("Select an interval between 3 and 20 seconds long")
+        if start_frame < 0 or end_frame > frame_count:
+            raise ValueError("Selected calibration interval lies outside the episode video")
+
+        clip_path = os.path.join(CALIBRATIONS_DIR, f"legacy_interval_{uuid.uuid4().hex}.mp4")
+        source = cv2.VideoCapture(video_path)
+        writer = None
+        try:
+            width = int(source.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(source.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            source.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            writer = cv2.VideoWriter(clip_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+            if not writer.isOpened():
+                raise ValueError("Could not create a temporary calibration clip")
+            written = 0
+            for _ in range(end_frame - start_frame):
+                ok, frame = source.read()
+                if not ok:
+                    break
+                writer.write(frame)
+                written += 1
+            if written != end_frame - start_frame:
+                raise ValueError("Could not read the complete selected interval")
+        finally:
+            source.release()
+            if writer is not None:
+                writer.release()
+
+        # Reuse the same quality gates used for a new mobile-session calibration.
+        with open(clip_path, "rb") as clip_file:
+            uploaded_clip = UploadFile(filename="selected-open-interval.mp4", file=clip_file)
+            calibration_response = await calibrate_camera_tcp(uploaded_clip)
+        result = json.loads(calibration_response.body.decode("utf-8"))
+        try:
+            os.remove(clip_path)
+        except OSError:
+            pass
+        if calibration_response.status_code >= 400 or result.get("status") != "success":
+            return JSONResponse(result, status_code=calibration_response.status_code)
+
+        snapshot = result["calibration"]
+        raw_poses = episode.get("raw_poses") or []
+        if not raw_poses:
+            raise ValueError("Episode is missing its raw camera trajectory")
+        candidate = copy.deepcopy(episode)
+        candidate["camera_tcp_calibration"] = snapshot
+        candidate.pop("gripper_offset_applied", None)
+        candidate["calibration_source"] = "user_selected_fully_open_interval"
+        camera_poses = np.asarray(raw_poses, dtype=np.float64)
+        method = (episode.get("active_smoothing") or {}).get("method", "raw")
+        window_ms = int((episode.get("active_smoothing") or {}).get("time_window_ms", 250))
+        if method != "raw":
+            camera_poses = visual_tracker.smooth_trajectory(
+                camera_poses, fps=episode.get("fps", fps), method=method, time_window_ms=window_ms
+            )
+        candidate["poses"] = camera_poses.tolist()
+        candidate["ee_poses"] = transform_camera_trajectory_to_tcp(
+            camera_poses, snapshot["T_camera_tcp"]
+        ).tolist()
+        if sync_episode_kinematics(candidate, persist=False) is None:
+            raise ValueError(candidate.get("kinematics_stale_reason") or "Could not recalculate this episode using the selected interval")
+        episode.clear()
+        episode.update(candidate)
+        save_episode_meta(episode)
+        return JSONResponse({"status": "success", "episode": episode, "message": "Selected episode recalibrated from its fully-open interval"})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+    finally:
+        if "clip_path" in locals():
+            try:
+                os.remove(clip_path)
+            except OSError:
+                pass
+
+
 @app.post("/api/recordings/save")
 async def save_recording(
     video: UploadFile = File(...),
     imu_data: str = Form("[]"),
     gripper_data: str = Form("[]"),
-    task: str = Form("demonstration")
+    task: str = Form("demonstration"),
+    calibration_id: str = Form(None),
 ):
     """
     Receives raw sensor recording (video stream + high-frequency IMU telemetry) from mobile phone,
@@ -1988,6 +2396,7 @@ async def save_recording(
     single background processing worker, matching the high-throughput upload endpoint.
     """
     try:
+        calibration_snapshot = _load_camera_tcp_calibration(calibration_id)
         ep_uid = f"rec_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
         ep_dir = os.path.join(RECORDINGS_DIR, ep_uid)
         os.makedirs(ep_dir, exist_ok=True)
@@ -2035,6 +2444,8 @@ async def save_recording(
             "source_frame_count": source_frame_count,
             "source_fps": source_fps,
             "config_snapshot": _config_snapshot(),
+            "calibration_id": calibration_id,
+            "camera_tcp_calibration": calibration_snapshot,
         }
         _save_job_manifest(job, "queued")
 
@@ -2048,6 +2459,8 @@ async def save_recording(
             "message": "Recording uploaded and queued for background processing"
         })
 
+    except ValueError as err:
+        return JSONResponse({"status": "error", "message": str(err)}, status_code=400)
     except Exception as err:
         import traceback
         traceback.print_exc()
@@ -2063,7 +2476,8 @@ async def upload_recording_async(
     imu_data: str = Form("[]"),
     gripper_data: str = Form("[]"),
     task: str = Form("demonstration"),
-    client_take_id: str = Form(None)
+    client_take_id: str = Form(None),
+    calibration_id: str = Form(None),
 ):
     """
     High-Throughput Non-Blocking Ingestion Endpoint:
@@ -2072,6 +2486,7 @@ async def upload_recording_async(
     mobile camera shutter can reset instantly for the next demonstration.
     """
     try:
+        calibration_snapshot = _load_camera_tcp_calibration(calibration_id)
         ep_uid = f"rec_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
         ep_dir = os.path.join(RECORDINGS_DIR, ep_uid)
         os.makedirs(ep_dir, exist_ok=True)
@@ -2113,6 +2528,8 @@ async def upload_recording_async(
             "source_frame_count": source_frame_count,
             "source_fps": source_fps,
             "config_snapshot": _config_snapshot(),
+            "calibration_id": calibration_id,
+            "camera_tcp_calibration": calibration_snapshot,
         }
         with open(os.path.join(ep_dir, "upload_manifest.json"), "w", encoding="utf-8") as f:
             json.dump(upload_manifest, f, indent=2)
@@ -2132,6 +2549,8 @@ async def upload_recording_async(
             "source_frame_count": source_frame_count,
             "source_fps": source_fps,
             "config_snapshot": _config_snapshot(),
+            "calibration_id": calibration_id,
+            "camera_tcp_calibration": calibration_snapshot,
         }
         _save_job_manifest(job, "queued")
 
@@ -2148,6 +2567,8 @@ async def upload_recording_async(
             "queue_position": queue_pos,
             "message": "Recording uploaded and enqueued for background processing"
         })
+    except ValueError as err:
+        return JSONResponse({"status": "error", "message": str(err)}, status_code=400)
     except Exception as err:
         import traceback
         traceback.print_exc()
@@ -2478,9 +2899,7 @@ def _apply_smoothing_to_episode(ep, method, time_window_ms, *, persist=True):
         raise ValueError("Smoothing produced invalid pose data")
 
     ep["poses"] = poses.tolist()
-    ep["ee_poses"] = camera_gripper_calibrator.transform_trajectory(
-        poses, to_gripper=True
-    ).tolist()
+    ep["ee_poses"] = _transform_camera_poses_for_episode(poses, ep).tolist()
     ep["active_smoothing"] = {
         "method": method,
         "time_window_ms": time_window_ms,
@@ -2585,6 +3004,80 @@ async def update_episode_task(episode_index: int, payload: dict = Body(...)):
         "task": new_task
     })
 
+
+@app.patch("/api/episodes/{episode_index}/camera-tcp-geometry")
+async def update_episode_camera_tcp_geometry(episode_index: int, payload: dict = Body(...)):
+    """Re-solve one calibrated episode from saved camera poses and calibration corners."""
+    global ROBOT_CONFIG
+    try:
+        _ensure_idle("update episode camera-to-TCP geometry")
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=409)
+    target = next((ep for ep in EPISODES_DB if ep.get("episode_index") == episode_index), None)
+    if target is None:
+        return JSONResponse({"status": "error", "message": "Episode not found"}, status_code=404)
+    old_snapshot = target.get("camera_tcp_calibration")
+    if not isinstance(old_snapshot, dict) or not old_snapshot.get("observations"):
+        return JSONResponse({"status": "error", "message": "This legacy episode has no saved calibration observations; recalibrate it from a fully-open interval first."}, status_code=409)
+
+    geometry = payload.get("marker_poses_tcp")
+    try:
+        tcp_marker_object_points(geometry, marker_size_mm=22.0)
+        canonical_geometry = {
+            str(marker_id): {
+                "xyz_mm": [float(value) for value in geometry.get(str(marker_id), geometry.get(marker_id))["xyz_mm"]],
+                "rpy_deg": [float(value) for value in geometry.get(str(marker_id), geometry.get(marker_id))["rpy_deg"]],
+            }
+            for marker_id in (2, 3)
+        }
+        transform, quality = estimate_camera_tcp(
+            old_snapshot["observations"],
+            canonical_geometry,
+            old_snapshot["camera_matrix"],
+            old_snapshot["dist_coeffs"],
+            marker_size_mm=float(old_snapshot.get("marker_size_mm", 22.0)),
+        )
+        snapshot = copy.deepcopy(old_snapshot)
+        snapshot["marker_poses_tcp"] = canonical_geometry
+        snapshot["T_camera_tcp"] = transform.tolist()
+        snapshot["quality"] = quality
+        snapshot["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        raw_poses = target.get("raw_poses") or []
+        if not raw_poses:
+            raise ValueError("Episode is missing its raw camera trajectory")
+        method = (target.get("active_smoothing") or {}).get("method", "raw")
+        window_ms = int((target.get("active_smoothing") or {}).get("time_window_ms", 250))
+        camera_poses = np.asarray(raw_poses, dtype=np.float64)
+        if method != "raw":
+            camera_poses = visual_tracker.smooth_trajectory(
+                camera_poses, fps=target.get("fps", 30.0),
+                method=method, time_window_ms=window_ms,
+            )
+        if camera_poses.ndim != 2 or camera_poses.shape[1] < 6 or not np.isfinite(camera_poses[:, :6]).all():
+            raise ValueError("Episode raw camera poses are invalid")
+
+        candidate = copy.deepcopy(target)
+        candidate["camera_tcp_calibration"] = snapshot
+        candidate["poses"] = camera_poses.tolist()
+        candidate["ee_poses"] = transform_camera_trajectory_to_tcp(camera_poses, transform).tolist()
+        if sync_episode_kinematics(candidate, persist=False) is None:
+            raise ValueError(candidate.get("kinematics_stale_reason") or "Updated camera-to-TCP transform could not synchronize robot kinematics")
+
+        target.clear()
+        target.update(candidate)
+        ROBOT_CONFIG["aruco_tcp_geometry"] = canonical_geometry
+        save_robot_config(ROBOT_CONFIG)
+        save_episode_meta(target)
+        return JSONResponse({
+            "status": "success",
+            "episode": target,
+            "camera_tcp_calibration": snapshot,
+            "message": "Camera-to-TCP geometry updated; selected episode trajectory recalculated",
+        })
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+
 @app.get("/api/robot/config")
 async def get_robot_config():
     """
@@ -2598,7 +3091,7 @@ async def get_robot_config():
     ]
     return JSONResponse({
         "status": "success",
-        "config": ROBOT_CONFIG,
+        "config": _public_robot_config(),
         "presets": presets
     })
 
@@ -2612,6 +3105,24 @@ async def update_robot_config(request: Request):
     try:
         _ensure_idle("change robot configuration")
         payload = await request.json()
+        if "gripper_offset" in payload:
+            return JSONResponse({
+                "status": "error",
+                "message": "Manual camera offset adjustment was removed; configure the jaw ArUco geometry instead.",
+            }, status_code=400)
+        if "aruco_tcp_geometry" in payload:
+            marker_geometry = payload["aruco_tcp_geometry"]
+            if marker_geometry is None:
+                ROBOT_CONFIG["aruco_tcp_geometry"] = None
+            else:
+                tcp_marker_object_points(marker_geometry, marker_size_mm=22.0)
+                ROBOT_CONFIG["aruco_tcp_geometry"] = {
+                    str(marker_id): {
+                        "xyz_mm": [float(v) for v in marker_geometry.get(str(marker_id), marker_geometry.get(marker_id))["xyz_mm"]],
+                        "rpy_deg": [float(v) for v in marker_geometry.get(str(marker_id), marker_geometry.get(marker_id))["rpy_deg"]],
+                    }
+                    for marker_id in (2, 3)
+                }
         for field, minimum, maximum in (
             ("offset_x", -5.0, 5.0), ("offset_y", -5.0, 5.0),
             ("offset_z", -2.0, 2.0), ("yaw_deg", -360.0, 360.0),
@@ -2671,11 +3182,6 @@ async def update_robot_config(request: Request):
             ROBOT_CONFIG["yaw_deg"] = float(payload["yaw_deg"])
         if "q3_safe_max_deg" in payload:
             ROBOT_CONFIG["q3_safe_max_deg"] = float(payload["q3_safe_max_deg"])
-        if "gripper_offset" in payload and isinstance(payload["gripper_offset"], dict):
-            if "gripper_offset" not in ROBOT_CONFIG:
-                ROBOT_CONFIG["gripper_offset"] = {}
-            ROBOT_CONFIG["gripper_offset"].update(payload["gripper_offset"])
-            camera_gripper_calibrator.update_config(**payload["gripper_offset"])
         if "gripper_marker_tracking" in payload and isinstance(payload["gripper_marker_tracking"], dict):
             if "gripper_marker_tracking" not in ROBOT_CONFIG:
                 ROBOT_CONFIG["gripper_marker_tracking"] = {}
@@ -2739,7 +3245,7 @@ async def update_robot_config(request: Request):
                 "status": "error",
                 "message": f"Masked V-SLAM updated {updated_count} episode(s); {len(failed_episodes)} failed and remain blocked from export.",
                 "failed_episodes": failed_episodes,
-                "config": ROBOT_CONFIG,
+                "config": _public_robot_config(),
             }, status_code=400)
 
         print(f"[{time.strftime('%H:%M:%S')}] 🤖 Robot Config Updated: Model={ROBOT_CONFIG['robot_type']}, Offset=({ROBOT_CONFIG['offset_x']:.2f}m, {ROBOT_CONFIG['offset_y']:.2f}m, Yaw={ROBOT_CONFIG['yaw_deg']:.1f}°), q3_safe_max={ROBOT_CONFIG.get('q3_safe_max_deg', 0.0)}° (Synced {updated_count} episodes)")
@@ -2747,92 +3253,13 @@ async def update_robot_config(request: Request):
         return JSONResponse({
             "status": "success",
             "message": "Robot configuration updated successfully",
-            "config": ROBOT_CONFIG,
+            "config": _public_robot_config(),
             "episodes_updated": updated_count
         })
     except Exception as err:
         return JSONResponse({
             "status": "error",
             "message": f"Failed to update robot configuration: {str(err)}"
-        }, status_code=400)
-
-@app.post("/api/robot/gripper_offset")
-async def update_gripper_offset_endpoint(request: Request):
-    """
-    Updates 6-DoF Camera-to-Gripper Extrinsic Offset (Forward, Height, Lateral, Pitch, Roll, Yaw).
-    Recalculates stored episode poses only when explicitly requested with
-    apply_to_episodes=true; normal preview calibration remains transient.
-    """
-    global ROBOT_CONFIG, EPISODES_DB
-    try:
-        _ensure_idle("change gripper calibration")
-        payload = await request.json()
-        fwd = float(payload.get("forward_cm", 12.8))
-        hgt = float(payload.get("height_cm", 10.9))
-        lat = float(payload.get("lateral_cm", 0.0))
-        pitch = float(payload.get("pitch_deg", 40.4))
-        roll = float(payload.get("roll_deg", 0.0))
-        yaw = float(payload.get("yaw_deg", 0.0))
-        enabled = bool(payload.get("enabled", True))
-        if "q3_safe_max_deg" in payload:
-            ROBOT_CONFIG["q3_safe_max_deg"] = float(payload["q3_safe_max_deg"])
-
-        camera_gripper_calibrator.update_config(
-            forward_cm=fwd,
-            height_cm=hgt,
-            lateral_cm=lat,
-            pitch_deg=pitch,
-            roll_deg=roll,
-            yaw_deg=yaw,
-            enabled=enabled
-        )
-
-        if "gripper_offset" not in ROBOT_CONFIG:
-            ROBOT_CONFIG["gripper_offset"] = {}
-        ROBOT_CONFIG["gripper_offset"].update(camera_gripper_calibrator.get_config())
-        save_robot_config(ROBOT_CONFIG)
-
-        apply_to_episodes = bool(payload.get("apply_to_episodes", False))
-        updated_count = 0
-        failed_episodes = []
-        if apply_to_episodes:
-            for ep in EPISODES_DB:
-                try:
-                    if ep.get("trajectory_source") == "synthetic":
-                        if sync_episode_kinematics(ep) is None:
-                            raise ValueError("Synthetic trajectory kinematics synchronization failed")
-                    else:
-                        _reprocess_episode_from_video(ep)
-                    updated_count += 1
-                except Exception as exc:
-                    ep["vslam_migration_state"] = "failed"
-                    ep["vslam_migration_error"] = str(exc)
-                    ep["dev_video_url"] = None
-                    ep["canny_video_url"] = None
-                    save_episode_meta(ep)
-                    failed_episodes.append({"episode_id": ep.get("episode_id"), "error": str(exc)})
-
-        if failed_episodes:
-            return JSONResponse({
-                "status": "error",
-                "message": f"Masked V-SLAM updated {updated_count} episode(s); {len(failed_episodes)} failed and remain blocked from export.",
-                "failed_episodes": failed_episodes,
-                "gripper_offset": camera_gripper_calibrator.get_config(),
-            }, status_code=400)
-
-        print(f"[{time.strftime('%H:%M:%S')}] 🦾 Gripper TCP Offset Updated: Pitch={pitch}°, Fwd={fwd}cm, Hgt={hgt}cm, Enabled={enabled} (Applied to {updated_count} episodes)")
-
-        return JSONResponse({
-            "status": "success",
-            "message": f"Gripper offset updated and applied to {updated_count} episodes",
-            "gripper_offset": camera_gripper_calibrator.get_config(),
-            "episodes_updated": updated_count,
-            "active_ee_poses": EPISODES_DB[0]['ee_poses'] if len(EPISODES_DB) > 0 and 'ee_poses' in EPISODES_DB[0] else []
-        })
-    except Exception as err:
-        return JSONResponse({
-            "status": "error",
-            "message": f"Failed to update gripper offset: {str(err)}"
         }, status_code=400)
 
 @app.post("/api/robot/recalculate_trajectory")
@@ -2856,6 +3283,11 @@ async def recalculate_trajectory_endpoint(request: Request):
         # 1. Optionally apply updated config from payload if provided
         new_config = payload.get("robot_config") or payload.get("config")
         if new_config and isinstance(new_config, dict):
+            if "gripper_offset" in new_config:
+                return JSONResponse({
+                    "status": "error",
+                    "message": "Manual camera offset adjustment was removed; configure the jaw ArUco geometry instead.",
+                }, status_code=400)
             if not new_config.get("reset_to_preset", False):
                 validate_custom_urdf_config({**ROBOT_CONFIG, **new_config})
             if "custom_urdf_enabled" in new_config:
@@ -2909,12 +3341,6 @@ async def recalculate_trajectory_endpoint(request: Request):
                 ROBOT_CONFIG["q3_safe_max_deg"] = float(new_config["q3_safe_max_deg"])
             if "initial_position" in new_config:
                 ROBOT_CONFIG["initial_position"] = new_config["initial_position"]
-            if "gripper_offset" in new_config and isinstance(new_config["gripper_offset"], dict):
-                if "gripper_offset" not in ROBOT_CONFIG:
-                    ROBOT_CONFIG["gripper_offset"] = {}
-                ROBOT_CONFIG["gripper_offset"].update(new_config["gripper_offset"])
-                camera_gripper_calibrator.update_config(**new_config["gripper_offset"])
-
             save_robot_config(ROBOT_CONFIG)
 
             workspace_calibrator.update_config(
@@ -2948,7 +3374,7 @@ async def recalculate_trajectory_endpoint(request: Request):
                 "status": "success",
                 "message": "No episodes to recalculate",
                 "episodes_updated": 0,
-                "config": ROBOT_CONFIG
+                "config": _public_robot_config()
             })
 
         # 3. Solver for IK evaluation
@@ -2997,7 +3423,7 @@ async def recalculate_trajectory_endpoint(request: Request):
                 "message": f"Masked V-SLAM recalculated {updated_count} episode(s); {len(failed_episodes)} failed and remain blocked from export.",
                 "episodes_updated": updated_count,
                 "failed_episodes": failed_episodes,
-                "config": ROBOT_CONFIG,
+                "config": _public_robot_config(),
                 "episodes": EPISODES_DB,
             }, status_code=400)
 
@@ -3007,7 +3433,7 @@ async def recalculate_trajectory_endpoint(request: Request):
             "status": "success",
             "message": f"Successfully recalculated trajectory for {updated_count} episode(s)",
             "episodes_updated": updated_count,
-            "config": ROBOT_CONFIG,
+            "config": _public_robot_config(),
             "episodes": EPISODES_DB
         })
     except Exception as err:
@@ -3126,7 +3552,7 @@ async def auto_align_robot_endpoint(request: Request):
         return JSONResponse({
             "status": "success",
             "message": f"Robot base calibration applied and kinematics synced ({mode})",
-            "config": ROBOT_CONFIG,
+            "config": _public_robot_config(),
             "feasibility_percent": feas_pct,
             "avg_error_cm": avg_err,
             "episode_id": target_ep.get("episode_id") if target_ep else None,
@@ -3210,7 +3636,8 @@ async def get_approach_path_endpoint(request: Request):
             lift_clearance_m=0.06,
             home_gripper=home_gripper,
             start_gripper=start_gripper,
-            start_in_robot_frame=False
+            start_in_robot_frame=False,
+            camera_tcp_transform=_episode_camera_tcp_transform(target_ep),
         )
 
         return JSONResponse({
@@ -3409,7 +3836,7 @@ async def apply_urdf_endpoint(request: Request):
             "message": f"Custom URDF '{robot_name}' applied successfully. Recalculated {recalc_count} episode(s).",
             "chain": solver.chain_description,
             "specs": specs,
-            "config": ROBOT_CONFIG,
+            "config": _public_robot_config(),
             "episodes_updated": recalc_count,
             "episodes": EPISODES_DB
         })
@@ -3429,9 +3856,18 @@ async def export_lerobot(request: Request = None):
         unverified = [ep.get("episode_id", ep.get("episode_index")) for ep in EPISODES_DB
                       if ep.get("manifest", {}).get("validation", {}).get("state") != "passed"
                       or episode_needs_vslam_reprocess(ep)
-                      or ep.get("vslam_migration_state") == "failed"]
+                      or ep.get("vslam_migration_state") == "failed"
+                      or bool(_pose_validity_errors(ep))]
         if unverified:
-            return JSONResponse({"status": "error", "message": "Migrate/reprocess all episodes with the current masked V-SLAM pipeline before export", "episodes": unverified}, status_code=409)
+            return JSONResponse({
+                "status": "error",
+                "message": "Reprocess episodes with invalid or unanchored pose frames before export",
+                "episodes": unverified,
+                "pose_errors": {
+                    str(ep.get("episode_id", ep.get("episode_index"))): _pose_validity_errors(ep)[:20]
+                    for ep in EPISODES_DB if _pose_validity_errors(ep)
+                },
+            }, status_code=409)
         payload = {}
         if request:
             try:

@@ -49,12 +49,20 @@ def test_lerobot_export_uses_current_gripper_channel_over_cached_joint_state(tmp
         "joint_states": cached_states.tolist(),
         "gripper_states": [100.0, 54.2, 0.0],
         "gripper_state_units": "percent",
+        "camera_tcp_calibration": {
+            "calibration_id": "cal-test",
+            "T_camera_tcp": np.eye(4).tolist(),
+            "quality": {"reprojection_rms_px": 0.4},
+        },
     }
 
     output = exporter.export_dataset(
         [episode], dataset_name="gripper_channel", auto_trim=False, use_timestamp=False
     )
     data = pd.read_parquet(os.path.join(output, "data", "chunk-000", "file-000.parquet"))
+    episode_meta = pd.read_parquet(os.path.join(output, "meta", "episodes", "file-000.parquet"))
+    with open(os.path.join(output, "meta", "episodes.jsonl"), encoding="utf-8") as stream:
+        episode_jsonl = json.loads(stream.readline())
     states = np.asarray(data["observation.state"].tolist())
     actions = np.asarray(data["action"].tolist())
     with open(os.path.join(output, "meta", "info.json"), encoding="utf-8") as stream:
@@ -88,6 +96,8 @@ def test_lerobot_export_uses_current_gripper_channel_over_cached_joint_state(tmp
         "open": 1.0,
         "source": "episode.gripper_states; cached joint-state fallback when absent",
     }
+    assert json.loads(episode_meta.loc[0, "camera_tcp_calibration_json"])["calibration_id"] == "cal-test"
+    assert json.loads(episode_jsonl["camera_tcp_calibration_json"])["quality"]["reprojection_rms_px"] == 0.4
 
 
 def test_initial_aware_approach_converts_gripper_percentage_once(monkeypatch):
